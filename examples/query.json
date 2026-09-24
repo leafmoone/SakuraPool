@@ -1,0 +1,7 @@
+{
+  "dataset": "items",
+  "operation": "select",
+  "select": ["id", "label"],
+  "filters": [{"column": "value", "operator": "gte", "value": 3}],
+  "limit": 2
+}
