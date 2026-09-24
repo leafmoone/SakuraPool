@@ -1,0 +1,13 @@
+{
+  "scope": "P1",
+  "contract": "reports/P1.md",
+  "logs": {
+    "build.log": "reports\\P1\\build.log",
+    "diff-check.log": "reports\\P1\\diff-check.log",
+    "pytest.log": "reports\\P1\\pytest.log",
+    "ruff.log": "reports\\P1\\ruff.log",
+    "wheel-smoke.log": "reports\\P1\\wheel-smoke.log"
+  },
+  "sha256": "reports/P1/metadata.txt",
+  "implementation_sha": "8d3ff42b6544eb5da9d0e1cc4fa25ddee3fbdc52"
+}
