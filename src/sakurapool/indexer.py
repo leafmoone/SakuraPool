@@ -195,33 +195,6 @@ class _SpoolRows:
         for batch in self.iter_batches(name):
             yield from batch
 
-    def patch_error_post_id(self, member: str, post_id: str) -> None:
-        for ordinal, payload in self.db.execute(
-            "SELECT ordinal, payload FROM rows WHERE kind='errors'"
-        ):
-            row = json.loads(payload)
-            if row["member"] == member:
-                row["post_id"] = post_id
-                self.db.execute(
-                    "UPDATE rows SET payload=? WHERE kind='errors' AND ordinal=?",
-                    (json.dumps(row, ensure_ascii=False), ordinal),
-                )
-        self.db.commit()
-
-    def patch_errors(self, member: str, post_id: str, record_id: str) -> None:
-        for ordinal, payload in self.db.execute(
-            "SELECT ordinal, payload FROM rows WHERE kind='errors'"
-        ):
-            row = json.loads(payload)
-            if row["member"] == member:
-                row["post_id"] = post_id
-                row["record_id"] = record_id
-                self.db.execute(
-                    "UPDATE rows SET payload=? WHERE kind='errors' AND ordinal=?",
-                    (json.dumps(row, ensure_ascii=False), ordinal),
-                )
-        self.db.commit()
-
     def close(self) -> None:
         self.db.commit()
         self.db.close()
@@ -360,12 +333,12 @@ def _scan_shard(path: Path, rel: str, adapter: DatasetAdapter, hash_images: bool
         validator_strength=validator["strength"], sha256=validator["sha256"],
     ))
 
-    def error(member: str, code: str, detail: str = "") -> None:
+    def error(member: str, code: str, detail: str = "", post_id: str | None = None) -> None:
         assert code in ERROR_CODES
         detail = _truncate_utf8(detail)
         rows["errors"].append(dict(
             dataset_id=adapter.dataset, object_id=object_id, source=adapter.source,
-            object_path=rel, member=member, post_id=None, record_id=None, path=member,
+            object_path=rel, member=member, post_id=post_id, record_id=None, path=member,
             code=code, error_detail=detail, detail=detail,
         ))
 
@@ -417,14 +390,27 @@ def _scan_shard(path: Path, rel: str, adapter: DatasetAdapter, hash_images: bool
                 error(key, "missing_image")
                 continue
             missing_required_metadata = not jsons and adapter.metadata_required
-            if missing_required_metadata:
-                error(key, "missing_metadata")
             post_id = PurePosixPath(key).name
-            rows.patch_error_post_id(key, post_id)
             if not post_id or (adapter.numeric_post_id and not re.fullmatch(r"[0-9]+", post_id)):
-                error(key, "invalid_post_id")
+                error(key, "invalid_post_id", post_id=post_id)
                 continue
             image, meta = group[0], jsons[0] if jsons else None
+            identity = RecordKey(adapter.dataset, object_id, key)
+            record_id = identity.record_id
+            rows.register_identity(record_id, identity)
+            if missing_required_metadata:
+                error(key, "missing_metadata", post_id=post_id)
+                for ordinal, payload in rows.db.execute(
+                    "SELECT ordinal, payload FROM rows WHERE kind='errors'"
+                ):
+                    row = json.loads(payload)
+                    if row["member"] == key:
+                        row["record_id"] = record_id
+                        rows.db.execute(
+                            "UPDATE rows SET payload=? WHERE kind='errors' AND ordinal=?",
+                            (json.dumps(row, ensure_ascii=False), ordinal),
+                        )
+                rows.db.commit()
             metadata = None
             started = time.perf_counter()
             try:
@@ -482,10 +468,6 @@ def _scan_shard(path: Path, rel: str, adapter: DatasetAdapter, hash_images: bool
             if text is not None and not isinstance(text, str):
                 error(meta.name, "metadata_invalid", "invalid text")
                 text = None
-            identity = RecordKey(adapter.dataset, object_id, key)
-            record_id = identity.record_id
-            rows.register_identity(record_id, identity)
-            rows.patch_errors(key, post_id, record_id)
             identity_fields = dict(record_id=record_id, dataset_id=adapter.dataset,
                                    object_id=object_id, sample_path=key)
             rows["samples"].append(dict(
