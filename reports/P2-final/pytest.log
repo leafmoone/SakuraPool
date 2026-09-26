@@ -1,16 +1,16 @@
-..................................................................       [100%]
+.....................................................................    [100%]
 =================================== PASSES ====================================
 _______________________________ test_cli_config _______________________________
 ---------------------------- Captured stdout call -----------------------------
 {"error": "index scan requires --input and --output"}
 _________________________ test_cli_row_error_nonzero __________________________
 ---------------------------- Captured stdout call -----------------------------
-{"archives": 1, "errors": 1, "header_seconds": 0.00010050006676465273, "json_seconds": 0.0, "objects": 1, "objects_committed": 1, "objects_seen": 1, "objects_skipped": 0, "parquet_seconds": 0.010080700041726232, "samples": 0, "skipped": 0, "total_seconds": 0.02044310001656413}
+{"archives": 1, "errors": 1, "header_seconds": 0.0001517999917268753, "json_seconds": 5.00003807246685e-07, "objects": 1, "objects_committed": 1, "objects_seen": 1, "objects_skipped": 0, "parquet_seconds": 0.028925699996761978, "samples": 1, "skipped": 0, "total_seconds": 0.048301000031642616}
 =========================== short test summary info ===========================
 PASSED tests/test_evaluator.py::test_filter_select_and_limit_are_deterministic
 PASSED tests/test_evaluator.py::test_count
 PASSED tests/test_indexer.py::test_original_fixtures[A-members0-2-codes0]
-PASSED tests/test_indexer.py::test_original_fixtures[B-members1-0-codes1]
+PASSED tests/test_indexer.py::test_original_fixtures[B-members1-1-codes1]
 PASSED tests/test_indexer.py::test_original_fixtures[C-members2-0-codes2]
 PASSED tests/test_indexer.py::test_original_fixtures[D-members3-0-codes3]
 PASSED tests/test_indexer.py::test_original_fixtures[E-members4-0-codes4]
@@ -31,6 +31,9 @@ PASSED tests/test_indexer.py::test_compressed_disguised[w:gz]
 PASSED tests/test_indexer.py::test_compressed_disguised[w:bz2]
 PASSED tests/test_indexer.py::test_compressed_disguised[w:xz]
 PASSED tests/test_indexer.py::test_member_offset_re_read_verification
+PASSED tests/test_indexer.py::test_same_path_different_content_changes_object_and_record_ids
+PASSED tests/test_indexer.py::test_four_tables_share_object_and_record_references
+PASSED tests/test_indexer.py::test_bounded_cross_batch_writer_staging
 PASSED tests/test_indexer.py::test_identity_formula_conflict_uint64
 PASSED tests/test_indexer.py::test_optional_metadata_tags_hash_no_decode
 PASSED tests/test_indexer.py::test_input_same_size_mtime_changed

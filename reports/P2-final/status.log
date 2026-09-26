@@ -1,2 +1,15 @@
 ## dev
-?? reports/P2-final/
+ M .gitignore
+ M reports/P2-final/benchmark.log
+ M reports/P2-final/build.log
+ M reports/P2-final/extents.log
+ M reports/P2-final/git.log
+ M reports/P2-final/manifest.json
+ M reports/P2-final/pinned-pytest.log
+ M reports/P2-final/pytest.log
+ M reports/P2-final/status.log
+ M reports/P2-final/venv.log
+ M reports/P2-final/wheel-install.log
+ M reports/P2-final/wheel-scan.log
+?? agents.md
+?? reports/P2-final/wheel-import.log

@@ -1,3 +1,6 @@
+791f588d209b5ed5e7045b90d93ea7a2fa307354 fix(index): enforce ObjectRef table closure
+b6105f045b1bc740801981b80f4c4e91b5847fa8 fix(index): close P2 contract gaps
+7f8574b0c832ab7bd2c47725edfc8d8eaabce6fb docs(index): record final P2 validation evidence
 9c5c4e084b3cd7b08718204e0536a4129418d9ef fix(evidence): verify pinned wheelhouse inputs
 24c611b75b55c05c246d74a88763a7b4104cb393 fix(index): verify TAR member seek reads
 b549ff5a6152ddc25e4032c7251fe11dcadb6cab fix(evidence): preserve revision log bytes and complete inventory
