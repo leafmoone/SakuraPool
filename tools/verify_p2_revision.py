@@ -1,4 +1,4 @@
-"""Revision evidence; preserves raw subprocess bytes, including failures and timeouts."""
+"""Revision evidence; preserves raw subprocess bytes, including failed installation."""
 
 import hashlib
 import io
@@ -11,24 +11,30 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / "reports" / "P2-revision"
+OUT = ROOT / "reports" / "P2-revision-final"
 BASE = "52358d6fca728d2bba12814490e0974a6907b218"
 
 
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     entries = []
-    env = dict(os.environ, PYTHONPATH=str(ROOT / "src"))
+    env = dict(os.environ, PYTHONPATH=str(ROOT / "src"), UV_HTTP_TIMEOUT="15", UV_HTTP_RETRIES="0")
 
     def run(name, argv, cwd=ROOT, timeout=150, process_env=env):
+        process = subprocess.Popen(argv, cwd=cwd, env=process_env, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT)
         try:
-            result = subprocess.run(argv, cwd=cwd, env=process_env, stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT, timeout=timeout)
-            data, code = result.stdout, result.returncode
-        except subprocess.TimeoutExpired as exc:
-            data, code = (exc.stdout or b"") + b"\nHARNESS_TIMEOUT\n", 124
-        path = OUT / f"{name}.log"
-        path.write_bytes(data)
+            data, _ = process.communicate(timeout=timeout)
+            code = process.returncode
+        except subprocess.TimeoutExpired:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                               capture_output=True, timeout=15)
+            else:
+                process.kill()
+            data, _ = process.communicate(timeout=15)
+            data, code = data + b"\nHARNESS_TIMEOUT\n", 124
+        (OUT / f"{name}.log").write_bytes(data)
         entries.append(dict(name=name, argv=[str(a) for a in argv], cwd=str(cwd), exit=code,
                             bytes=len(data), sha256=hashlib.sha256(data).hexdigest()))
         (OUT / "manifest.json").write_text(json.dumps(entries, indent=2), encoding="utf-8")
@@ -43,22 +49,21 @@ def main():
     run("ruff", [sys.executable, "-m", "ruff", "check", "."])
     run("diff", ["git", "diff", "--check"])
     run("diff-base", ["git", "diff", f"{BASE}..HEAD", "--check"])
-    run("build", [sys.executable, "-m", "build", "--wheel", "--outdir",
-                  "/tmp/sakurapool-p2-wheel"])
+    wheel_dir = Path("/tmp/sakurapool-p2-wheel").resolve()
+    run("build", [sys.executable, "-m", "build", "--wheel", "--outdir", str(wheel_dir)])
     run("benchmark", [sys.executable, "tools/benchmark_indexer.py"])
     run("extents", [sys.executable, "-c", "from tools.p2_extent_probe import main;main()"])
-    # No dependency transplants or --no-deps. Compatible Python installed through uv.
+    # Same resolved directory for build and install, including Windows drive-root /tmp.
     with tempfile.TemporaryDirectory(prefix="sakurapool-p2-clean-") as directory:
         clean = Path(directory)
         venv = clean / "venv"
         code = run("venv", ["uv", "venv", "--python", "3.12", str(venv)])
         python = venv / "Scripts" / "python.exe" if os.name == "nt" else venv / "bin" / "python"
-        wheel_dir = Path(tempfile.gettempdir()) / "sakurapool-p2-wheel"
         wheel = wheel_dir / "sakurapool-0.1.0-py3-none-any.whl"
         if code == 0:
-            code = run("wheel-install", [sys.executable, "-m", "pip", "--python", str(python),
-                       "install", "--timeout", "15", "--retries", "0", str(wheel),
-                       "pip", "pytest==8.3.4", "ruff==0.9.2", "build==1.2.2.post1"], timeout=120)
+            code = run("wheel-install", ["uv", "pip", "install", "--python", str(python),
+                       str(wheel), "pip", "pytest==8.3.4", "ruff==0.9.2", "build==1.2.2.post1"],
+                       timeout=90)
         if code == 0:
             run("pip-check", [str(python), "-m", "pip", "check"], cwd=clean)
             run("pinned-pytest", [str(python), "-m", "pytest", "-q", "-rA"])
@@ -82,7 +87,8 @@ def main():
             ]:
                 run("wheel-" + name, [str(sakura), *args], cwd=clean, process_env=isolated)
     run("status", ["git", "status", "--short", "--branch"])
+    return 1 if any(entry["exit"] for entry in entries) else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
