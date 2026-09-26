@@ -1,0 +1,11 @@
+{
+  "datasets": {
+    "synthetic": {
+      "source": "synthetic",
+      "image_extensions": [".jpg", ".jpeg", ".png", ".webp"],
+      "tags_field": "tags",
+      "text_field": "text",
+      "max_json_bytes": 16777216
+    }
+  }
+}
