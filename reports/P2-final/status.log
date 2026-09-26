@@ -12,4 +12,5 @@
  M reports/P2-final/wheel-install.log
  M reports/P2-final/wheel-scan.log
 ?? agents.md
-?? reports/P2-final/wheel-import.log
+?? reports/P2-final/host-junit.xml
+?? reports/P2-final/pinned-junit.xml

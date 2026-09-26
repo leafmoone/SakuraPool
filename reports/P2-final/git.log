@@ -1,3 +1,6 @@
+dff6906bd1b861d14e5e9ca6ba9b80cbe2f5bc04 fix(verify): aggregate JUnit suite statistics
+f24ab109c4ae6817027c895670a737930dd27aaa fix(index): align P2 storage and bounded scan contract
+2dd9ca16bb4b0a1160270c70a7e28209c96460f9 docs(index): record reviewer repair evidence
 791f588d209b5ed5e7045b90d93ea7a2fa307354 fix(index): enforce ObjectRef table closure
 b6105f045b1bc740801981b80f4c4e91b5847fa8 fix(index): close P2 contract gaps
 7f8574b0c832ab7bd2c47725edfc8d8eaabce6fb docs(index): record final P2 validation evidence
