@@ -9,8 +9,8 @@
     ],
     "cwd": "D:\\SakuraTool\\SakuraPool",
     "exit": 0,
-    "bytes": 1679,
-    "sha256": "ea6bedc1a9235339ef3ae12c474a24e4395103cf5a718c9456d4650c7ebe355b"
+    "bytes": 1938,
+    "sha256": "e03c622c6de7856683f712635a30403bed1918d3e9fb4e0c7b77637f24d1cc1b"
   },
   {
     "name": "environment",
@@ -35,8 +35,8 @@
     ],
     "cwd": "D:\\SakuraTool\\SakuraPool",
     "exit": 0,
-    "bytes": 7738,
-    "sha256": "c8d06cef685b8218e6c2c8d1a1071b1b7a110ea59a430946adbd9f7a13c1be0f"
+    "bytes": 7953,
+    "sha256": "304ff99cd4d3fcc67f548b1834294c3bd2e25ad8701a97f3249d6e95678e3026"
   },
   {
     "name": "ruff",
@@ -57,7 +57,9 @@
     "argv": [
       "git",
       "diff",
-      "--check"
+      "--check",
+      "--",
+      ":(exclude)reports/P2-final"
     ],
     "cwd": "D:\\SakuraTool\\SakuraPool",
     "exit": 0,
@@ -90,7 +92,7 @@
     "cwd": "D:\\SakuraTool\\SakuraPool",
     "exit": 0,
     "bytes": 3740,
-    "sha256": "dcc1d0878fb7866795001a7726c65181facb9aba395064b4f3072019773e8439"
+    "sha256": "2ccf79bc0e79af41e1e9df36e870db003dba7e73d0b25a11228848550c2b1165"
   },
   {
     "name": "benchmark",
@@ -100,8 +102,8 @@
     ],
     "cwd": "D:\\SakuraTool\\SakuraPool",
     "exit": 0,
-    "bytes": 680,
-    "sha256": "f1000718687213d213ec9b7a12f849473c37f8abd9e2a03ca864df3b44bd41c5"
+    "bytes": 679,
+    "sha256": "463e8d33b288ca88637860af8164dfe3789ae070b87d480721cc5e03ed3cbe6f"
   },
   {
     "name": "extents",
@@ -112,8 +114,8 @@
     ],
     "cwd": "D:\\SakuraTool\\SakuraPool",
     "exit": 0,
-    "bytes": 1556,
-    "sha256": "34ae350a8d38cf770eaa7858284e1a792022619c8d49c7164823291f60827444"
+    "bytes": 1559,
+    "sha256": "8eff2b625f87ea1dd7ee6b465921f919110930906d7453e15e762d5b0fd3cd1c"
   },
   {
     "name": "venv",
@@ -122,12 +124,12 @@
       "venv",
       "--python",
       "3.12",
-      "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-ikl3hihm\\venv"
+      "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-povsum5x\\venv"
     ],
     "cwd": "D:\\SakuraTool\\SakuraPool",
     "exit": 0,
     "bytes": 217,
-    "sha256": "5da60de9c3c73aecb9a08921bf9dbef60cfd6490e4c4ff83fe42a35adb2b2610"
+    "sha256": "264b7f9df266c8bcb84ec474ce67427e392e18d6a3511c8dc35d6cf7c104521a"
   },
   {
     "name": "wheel-install",
@@ -136,7 +138,7 @@
       "pip",
       "install",
       "--python",
-      "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-ikl3hihm\\venv\\Scripts\\python.exe",
+      "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-povsum5x\\venv\\Scripts\\python.exe",
       "D:\\tmp\\sakurapool-p2-wheel\\sakurapool-0.1.0-py3-none-any.whl",
       "D:\\tmp\\sakurapool-p2-deps\\pyarrow-18.1.0-cp312-cp312-win_amd64.whl",
       "D:\\tmp\\sakurapool-p2-deps\\ruff-0.9.2-py3-none-win_amd64.whl",
@@ -147,17 +149,17 @@
     ],
     "cwd": "D:\\SakuraTool\\SakuraPool",
     "exit": 0,
-    "bytes": 633,
-    "sha256": "d55ce2b95543a55d8d474b395d2eec42f7546e8e3bee73d3847f563b5cd07bda"
+    "bytes": 631,
+    "sha256": "dc9cd4b3085c0c8fded27c4a5d98342f69a8f394f216daae4515d27fb9631c2c"
   },
   {
     "name": "wheel-import",
     "argv": [
-      "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-ikl3hihm\\venv\\Scripts\\python.exe",
+      "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-povsum5x\\venv\\Scripts\\python.exe",
       "-c",
       "import pathlib,sakurapool,sys; p=pathlib.Path(sakurapool.__file__).resolve(); assert str(pathlib.Path(sys.prefix)) in str(p), p; assert not any(str(pathlib.Path('D:\\\\SakuraTool\\\\SakuraPool\\\\src').resolve()) == str(pathlib.Path(x).resolve()) for x in sys.path if x)"
     ],
-    "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-ikl3hihm",
+    "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-povsum5x",
     "exit": 0,
     "bytes": 0,
     "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -165,12 +167,12 @@
   {
     "name": "pip-check",
     "argv": [
-      "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-ikl3hihm\\venv\\Scripts\\python.exe",
+      "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-povsum5x\\venv\\Scripts\\python.exe",
       "-m",
       "pip",
       "check"
     ],
-    "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-ikl3hihm",
+    "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-povsum5x",
     "exit": 0,
     "bytes": 31,
     "sha256": "672aec65a45bed50e70229c70934a7eebf0462595c459b83023027645d57cccf"
@@ -178,28 +180,28 @@
   {
     "name": "pinned-pytest",
     "argv": [
-      "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-ikl3hihm\\venv\\Scripts\\python.exe",
+      "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-povsum5x\\venv\\Scripts\\python.exe",
       "-m",
       "pytest",
       "-rA",
       "--junitxml=D:\\SakuraTool\\SakuraPool\\reports\\P2-final\\pinned-junit.xml",
       "D:\\SakuraTool\\SakuraPool\\tests"
     ],
-    "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-ikl3hihm",
+    "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-povsum5x",
     "exit": 0,
-    "bytes": 9642,
-    "sha256": "54bdb8b4c486740e93a637f17950072e1f73b9c8850c5ae1db04df738758d3c8"
+    "bytes": 9931,
+    "sha256": "10a035fddb1d41aec47f6656e48958da326631ad80b9bb201cfc12d3de5f74d7"
   },
   {
     "name": "pinned-ruff",
     "argv": [
-      "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-ikl3hihm\\venv\\Scripts\\python.exe",
+      "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-povsum5x\\venv\\Scripts\\python.exe",
       "-m",
       "ruff",
       "check",
       "D:\\SakuraTool\\SakuraPool"
     ],
-    "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-ikl3hihm",
+    "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-povsum5x",
     "exit": 0,
     "bytes": 19,
     "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
@@ -207,10 +209,10 @@
   {
     "name": "wheel-version",
     "argv": [
-      "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-ikl3hihm\\venv\\Scripts\\sakura.exe",
+      "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-povsum5x\\venv\\Scripts\\sakura.exe",
       "--version"
     ],
-    "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-ikl3hihm",
+    "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-povsum5x",
     "exit": 0,
     "bytes": 18,
     "sha256": "9e4652caeef99ddbc6fe66df616ec946e8820b6170350239a37bd90b9cc117ec"
@@ -218,13 +220,13 @@
   {
     "name": "wheel-config",
     "argv": [
-      "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-ikl3hihm\\venv\\Scripts\\sakura.exe",
+      "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-povsum5x\\venv\\Scripts\\sakura.exe",
       "config",
       "validate",
       "--config",
-      "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-ikl3hihm\\config.json"
+      "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-povsum5x\\config.json"
     ],
-    "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-ikl3hihm",
+    "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-povsum5x",
     "exit": 0,
     "bytes": 39,
     "sha256": "6460bf02e82275a1e0c72576ad828e593bbd531b4756f7499ec7a6ec09e19b97"
@@ -232,32 +234,32 @@
   {
     "name": "wheel-scan",
     "argv": [
-      "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-ikl3hihm\\venv\\Scripts\\sakura.exe",
+      "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-povsum5x\\venv\\Scripts\\sakura.exe",
       "index",
       "scan",
       "--config",
-      "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-ikl3hihm\\config.json",
+      "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-povsum5x\\config.json",
       "--dataset",
       "demo",
       "--input",
-      "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-ikl3hihm\\fixture.tar",
+      "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-povsum5x\\fixture.tar",
       "--output",
-      "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-ikl3hihm\\out"
+      "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-povsum5x\\out"
     ],
-    "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-ikl3hihm",
+    "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sakurapool-p2-clean-povsum5x",
     "exit": 0,
-    "bytes": 295,
-    "sha256": "eaa5aa215fdaefeed894b12ae4d0508105b2136fc40c493c7d1ae983e3b3cbd3"
+    "bytes": 294,
+    "sha256": "0a08982e0dc959adcb1e384f2fed675993742a313a1d8d52f2d34042f44b5b13"
   },
   {
     "name": "host-junit-statistics",
-    "tests": 80,
+    "tests": 83,
     "failures": 0,
     "errors": 0
   },
   {
     "name": "pinned-junit-statistics",
-    "tests": 80,
+    "tests": 83,
     "failures": 0,
     "errors": 0
   },

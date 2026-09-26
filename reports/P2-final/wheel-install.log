@@ -1,7 +1,7 @@
-Using Python 3.12.13 environment at: C:\Users\PC\AppData\Local\Temp\sakurapool-p2-clean-ikl3hihm\venv
-Resolved 11 packages in 1.13s
-Prepared 1 package in 13ms
-Installed 11 packages in 237ms
+Using Python 3.12.13 environment at: C:\Users\PC\AppData\Local\Temp\sakurapool-p2-clean-povsum5x\venv
+Resolved 11 packages in 13ms
+Prepared 1 package in 9ms
+Installed 11 packages in 250ms
  + build==1.2.2.post1
  + colorama==0.4.6
  + iniconfig==2.3.0

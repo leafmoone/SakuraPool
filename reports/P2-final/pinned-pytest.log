@@ -2,14 +2,14 @@
 platform win32 -- Python 3.12.13, pytest-8.3.4, pluggy-1.6.0
 rootdir: D:\SakuraTool\SakuraPool
 configfile: pyproject.toml
-collected 80 items
+collected 83 items
 
 D:\SakuraTool\SakuraPool\tests\test_evaluator.py ..                      [  2%]
-D:\SakuraTool\SakuraPool\tests\test_indexer.py ......................... [ 33%]
-................                                                         [ 53%]
-D:\SakuraTool\SakuraPool\tests\test_indexer_boundaries.py ..........     [ 66%]
-D:\SakuraTool\SakuraPool\tests\test_indexer_recovery.py ..........       [ 78%]
-D:\SakuraTool\SakuraPool\tests\test_p2_revision.py ........              [ 88%]
+D:\SakuraTool\SakuraPool\tests\test_indexer.py ......................... [ 32%]
+...................                                                      [ 55%]
+D:\SakuraTool\SakuraPool\tests\test_indexer_boundaries.py ..........     [ 67%]
+D:\SakuraTool\SakuraPool\tests\test_indexer_recovery.py ..........       [ 79%]
+D:\SakuraTool\SakuraPool\tests\test_p2_revision.py ........              [ 89%]
 D:\SakuraTool\SakuraPool\tests\test_query.py .....                       [ 95%]
 D:\SakuraTool\SakuraPool\tests\test_registry.py .                        [ 96%]
 D:\SakuraTool\SakuraPool\tests\test_schema.py ...                        [100%]
@@ -20,7 +20,7 @@ _______________________________ test_cli_config _______________________________
 {"error": "index scan requires --input and --output"}
 _________________________ test_cli_row_error_nonzero __________________________
 ---------------------------- Captured stdout call -----------------------------
-{"archives": 1, "errors": 1, "header_seconds": 0.004173099994659424, "json_seconds": 7.00005330145359e-07, "objects": 1, "objects_committed": 1, "objects_seen": 1, "objects_skipped": 0, "parquet_seconds": 0.022878399933688343, "samples": 1, "skipped": 0, "total_seconds": 0.04638760001398623}
+{"archives": 1, "errors": 1, "header_seconds": 0.006495899986475706, "json_seconds": 4.00003045797348e-07, "objects": 1, "objects_committed": 1, "objects_seen": 1, "objects_skipped": 0, "parquet_seconds": 0.014613199979066849, "samples": 1, "skipped": 0, "total_seconds": 0.0407751000020653}
 - generated xml file: D:\SakuraTool\SakuraPool\reports\P2-final\pinned-junit.xml -
 =========================== short test summary info ===========================
 PASSED D:\SakuraTool\SakuraPool\tests\test_evaluator.py::test_filter_select_and_limit_are_deterministic
@@ -53,7 +53,10 @@ PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_bounded_cross_batch_
 PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_identity_formula_conflict_uint64
 PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_optional_metadata_tags_hash_no_decode
 PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_png_header_dimensions_are_indexed_without_decode
+PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_tar_member_cache_is_bounded
+PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_member_lookup_uses_indexed_plan
 PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_default_scan_does_not_read_image_payload
+PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_resume_verification_does_not_read_full_parquet
 PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_utf8_error_detail_is_bounded
 PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_all_table_row_boundaries_and_resume[0]
 PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_all_table_row_boundaries_and_resume[1]
@@ -103,4 +106,4 @@ PASSED D:\SakuraTool\SakuraPool\tests\test_registry.py::test_schema_and_model_re
 PASSED D:\SakuraTool\SakuraPool\tests\test_schema.py::test_rows_to_table_preserves_schema_and_values
 PASSED D:\SakuraTool\SakuraPool\tests\test_schema.py::test_rows_to_table_rejects_unknown_and_missing_fields
 PASSED D:\SakuraTool\SakuraPool\tests\test_schema.py::test_custom_schema
-============================= 80 passed in 36.97s =============================
+============================= 83 passed in 7.21s ==============================

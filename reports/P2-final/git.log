@@ -1,3 +1,6 @@
+9f70c4c2e7ca73bacce1ab75d2ba064556e1defb fix(verify): isolate raw reports from diff check
+b6bb9a6d9eea8048ab9d1c0251e44bf7a21a5056 fix(index): remove residual spool scans
+d159c6b2cbfe78693bb3e933f37955f2611d09d7 docs(index): record emergency streaming repair
 6476956a8a8ddaaf2d99fa1e079c9d6df59a4ff0 fix(index): verify complete streamed publications
 7622bd0882f8b02b7bfb026500ab4164ad01e531 fix(index): close parquet and streaming scan gaps
 2e1ec223f672a66fb998ef8a6330f9bc12123e16 docs(index): record second reviewer repair
