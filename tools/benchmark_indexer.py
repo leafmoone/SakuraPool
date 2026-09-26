@@ -1,4 +1,4 @@
-"""Offline 10k synthetic benchmark; timings include validation and durable writes."""
+"""10k synthetic samples, one TAR object; not a production throughput claim."""
 
 import ctypes
 import io
@@ -23,14 +23,9 @@ def peak_rss_bytes():
             _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD)] + [
                 (name, ctypes.c_size_t)
                 for name in (
-                    "PeakWorkingSetSize",
-                    "WorkingSetSize",
-                    "QuotaPeakPagedPoolUsage",
-                    "QuotaPagedPoolUsage",
-                    "QuotaPeakNonPagedPoolUsage",
-                    "QuotaNonPagedPoolUsage",
-                    "PagefileUsage",
-                    "PeakPagefileUsage",
+                    "PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage",
+                    "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage", "QuotaNonPagedPoolUsage",
+                    "PagefileUsage", "PeakPagefileUsage",
                 )
             ]
 
@@ -40,9 +35,7 @@ def peak_rss_bytes():
         kernel.GetCurrentProcess.restype = wintypes.HANDLE
         psapi = ctypes.WinDLL("psapi", use_last_error=True)
         psapi.GetProcessMemoryInfo.argtypes = [
-            wintypes.HANDLE,
-            ctypes.POINTER(Counters),
-            wintypes.DWORD,
+            wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD,
         ]
         if not psapi.GetProcessMemoryInfo(
             kernel.GetCurrentProcess(), ctypes.byref(counters), counters.cb
@@ -70,22 +63,14 @@ def main():
                     info.size = len(data)
                     archive.addfile(info, io.BytesIO(data))
         result = scan(source, root / "output")
-        assert result["objects"] == 10000 and result["errors"] == 0
-        print(
-            json.dumps(
-                {
-                    **result,
-                    "peak_rss_bytes": peak_rss_bytes(),
-                    "python": sys.version,
-                    "pyarrow": pyarrow.__version__,
-                    "platform": platform.platform(),
-                    "fixture": "10000 synthetic pairs",
-                    "rss_scope": "process peak including fixture generation and imports",
-                    "total_scope": "scan including input SHA256, excluding fixture generation",
-                },
-                sort_keys=True,
-            )
-        )
+        assert result["objects"] == 1 and result["samples"] == 10000 and result["errors"] == 0
+        print(json.dumps({
+            **result, "peak_rss_bytes": peak_rss_bytes(), "python": sys.version,
+            "pyarrow": pyarrow.__version__, "platform": platform.platform(),
+            "fixture": "10000 synthetic pairs in one TAR shard",
+            "rss_scope": "process peak including fixture generation and imports",
+            "total_scope": "scan including whole TAR SHA256, excluding fixture generation",
+        }, sort_keys=True))
 
 
 if __name__ == "__main__":

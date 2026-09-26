@@ -1,4 +1,4 @@
-"""Command line interface for query validation, evaluation, and local indexing."""
+"""Command-line boundary for queries, registry validation and local indexing."""
 
 import argparse
 import json
@@ -19,13 +19,18 @@ def _load_json(path: str) -> Any:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="sakurapool")
+    parser = argparse.ArgumentParser(prog="sakura")
+    parser.add_argument("--version", action="version", version="sakurapool 0.1.0")
     subparsers = parser.add_subparsers(dest="command", required=True)
     validate = subparsers.add_parser("validate", help="validate a query JSON document")
     validate.add_argument("query", type=Path)
     evaluate = subparsers.add_parser("evaluate", help="evaluate a query against a JSON row array")
     evaluate.add_argument("query", type=Path)
     evaluate.add_argument("rows", type=Path)
+    config = subparsers.add_parser("config", help="validate registry configuration")
+    config_sub = config.add_subparsers(dest="config_command", required=True)
+    config_validate = config_sub.add_parser("validate")
+    config_validate.add_argument("--config", type=Path, required=True)
     index = subparsers.add_parser("index", help="build a local index")
     index_subparsers = index.add_subparsers(dest="index_command", required=True)
     scan_command = index_subparsers.add_parser("scan", help="scan uncompressed TAR archives")
@@ -38,6 +43,10 @@ def main(argv: list[str] | None = None) -> int:
     scan_command.add_argument("--hash-images", action="store_true")
     args = parser.parse_args(argv)
     try:
+        if args.command == "config":
+            registry = AdapterRegistry.from_dict(_load_json(str(args.config)))
+            print(json.dumps({"valid": True, "datasets": sorted(registry.adapters)}))
+            return 0
         if args.command == "index":
             if (args.root and args.input) or (args.output_positional and args.output):
                 raise ValueError("do not mix positional and named input/output")
@@ -47,8 +56,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("index scan requires --input and --output")
             registry = (
                 AdapterRegistry.from_dict(_load_json(str(args.config)))
-                if args.config
-                else AdapterRegistry.local()
+                if args.config else AdapterRegistry.local()
             )
             summary = scan(
                 root, output, hash_images=args.hash_images, dataset=args.dataset, registry=registry
@@ -64,7 +72,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(result.to_pylist(), sort_keys=True))
         return 0
     except (OSError, ValueError, TypeError, KeyError, tarfile.TarError) as exc:
-        if args.command == "index":
+        if args.command in ("index", "config"):
             print(json.dumps({"error": str(exc)}, sort_keys=True))
             return 2
         parser.error(str(exc))

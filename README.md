@@ -1,112 +1,144 @@
 # SakuraPool
 
-SakuraPool provides typed P1 reference-query contracts and a P2 local uncompressed
-TAR/WebDataset index builder. No production data, downloads, image decoding,
-deduplication, model execution, or P3 runtime is included.
+Typed P1 reference queries and a P2 local uncompressed TAR index builder. No data
+service access, image decoding, production throughput claims, P3, or model execution.
 
-## P1 reference layer (unchanged)
+## Installation and CLI
 
-- Pinned Python package metadata and PyArrow schema conversion.
-- Structured `QuerySpec` and `FilterSpec` validation.
-- Schema/model registries with duplicate protection.
-- In-memory `filter`, `select`, and `count` evaluation.
+The declared supported runtime is Python 3.10–3.13 with pinned PyArrow 18.1.0.
+Python 3.14 is explicitly excluded: Arrow 18.1.0 has no matching wheel. The host's
+Python 3.14 / Arrow 25 test run is diagnostic only, not certification of these pins.
+Use a compatible Python and normal dependency resolution; never transplant Arrow
+into a venv or use `--no-deps` to claim an installation passed.
 
 ```console
 python -m pip install -e '.[dev]'
+sakura --version
+sakura config validate --config examples/index-config.json
+sakura index scan --config examples/index-config.json --dataset synthetic --input /local/tars --output /local/index
 sakurapool validate examples/query.json
 sakurapool evaluate examples/query.json examples/rows.json
 ```
 
-The evaluator preserves input order and applies filters before limits. It remains
-a small-data correctness reference, not a production execution engine.
-The historical P1 boundary and evidence are in [reports/P1.md](reports/P1.md).
+`sakurapool` remains an alias. `index scan INPUT OUTPUT` remains supported. Input may
+be one uncompressed TAR or a directory recursively containing TARs. Compression is
+rejected by known extension, content magic, and the uncompressed TAR reader, including
+compressed content disguised as `.tar`. Inputs/outputs must not overlap.
 
-## P2 local index
+## P1_CONTRACT_CHANGE
 
-```console
-sakurapool index scan --config examples/index-config.json --dataset synthetic --input /local/tars --output /local/index
+**Original definition:** P1 implemented only `DEFAULT_SCHEMA(id, value, label)` and
+query/model/schema registries. It did not implement the required ObjectRef, MemberRef,
+RecordKey or namespaced tag contract. Initial P2 incorrectly defined an Object as an
+image occurrence, hashed dataset/source/shard/member/extents with SHA256, and made
+samples one-to-one with objects. Tags were bare strings.
+
+**Problem:** one TAR contains many physical records; moving extents changed identity;
+there were no JSON member extents or registry-defined tag namespace/origin/category.
+P1's toy query schema is not evidence that these original domain requirements existed.
+
+**New definition (on-disk schema version 2):** one Object is one TAR shard, identified
+within a dataset by its canonical relative POSIX object path. Each successfully paired
+physical sample is one samples row; invalid/unpaired candidates produce errors instead.
+`RecordKey=(dataset_id, object_id, sample_path)`, where sample_path is the adapter's
+full logical member stem, not an image byte offset. `record_id` is exactly:
+
+```python
+hashlib.blake2b(json.dumps(
+    ["sakurapool-record-v1", dataset_id, object_id, sample_path],
+    ensure_ascii=False, separators=(",", ":")
+).encode("utf-8"), digest_size=16).hexdigest()
 ```
 
-Without a config, `--dataset local` selects the built-in local adapter. The previous
-positional `index scan INPUT OUTPUT` syntax remains supported. Inputs and outputs
-must be disjoint local directories. Config selects canonical source, image suffixes,
-metadata tag/text fields, and the JSON byte limit. Pairing uses the full POSIX member
-path without its final suffix, not basename-only matching; nested paths and dotted
-keys work. Duplicate members, ambiguous images, unsafe paths, unsupported members,
-missing/orphan metadata, and source mismatch are diagnosed without guessing.
+Canonical object IDs are nonempty relative POSIX paths without empty, dot, dot-dot,
+backslash, or colon components. Noncanonical IDs are rejected, never silently mapped.
+Original key fields are retained with every sample/annotation. Duplicate/colliding
+keys fail without publishing that shard. This is physical-record identity, not dedup.
+`records.ObjectRef` and `records.MemberRef` construct references without opening images.
 
-Only uncompressed TAR is supported, including PAX long paths. Compression is rejected
-by recognized extension and by `tarfile`'s `r:` format check. Members are never
-extracted. `offset_data` and `size` refer to the original TAR's physical byte extent;
-no image decoder is imported. Default indexing reads headers and metadata (the input
-validator also hashes all archive bytes). Optional `--hash-images` additionally hashes
-image member bytes; it does not decode them.
+**Migration impact:** version 1 outputs must not be reused. Build a new output directory;
+there is no in-place migration. Object IDs, record IDs, table columns, error codes,
+summary counts, and crash hooks changed. Existing P1 query APIs remain unchanged but
+are not automatically a query engine for the four domain tables. Historical P2 reports
+and `tools/verify_p2.py` describe the obsolete v1 protocol, not current certification.
 
-### Version 1 on-disk contract
+## Four Arrow tables
 
-P1's `DEFAULT_SCHEMA`, query, evaluator, schema registry, and model contracts remain
-unchanged. The following four schemas are **new P2 contracts**, not replacements for
-P1's `id/value/label` table. Package metadata and `__version__` remain aligned at 0.1.0.
+- **objects:** dataset_id, object_id, source, logical path, size:uint64, strong validator
+  strength and SHA256. Local absolute build paths are never stored in logical identity.
+- **samples:** retained RecordKey and record_id, source/post_id, image path/offset_data/size,
+  nullable JSON path/offset_data/size, nullable metadata JSON and text, tags_state,
+  tags:list<struct<value, namespace, origin, category>>, hash_source and nullable sha256.
+  Both image and JSON extents use uint64. No image decoder is imported.
+- **annotations:** retained identity plus namespace/origin/category and one JSON document
+  value per nonempty metadata document; not one row per tag.
+- **errors:** dataset_id, object_id, registry source, member/logical path, code, detail.
+  Empty tables retain their exact schema.
 
-| Table | Columns |
-| --- | --- |
-| objects | object_id, source, dataset, shard, image_path, json_path, offset_data:uint64, size:uint64, tags_state, tags:list<string>, hash_source, sha256 |
-| samples | sample_id, object_id, text (nullable string) |
-| annotations | object_id, key, value (canonical JSON string) |
-| errors | source (relative shard), path, code, detail |
+Tags states: `known` is a nonempty list of strings, `empty` is `[]`, `missing` has no
+configured metadata key, `invalid` has a wrong type. Missing/invalid tags are null.
+Tag origin is `declared:json.<field>`; namespace/category come from the adapter.
+Metadata SHA256 is only `declared:json.sha256`, never content proof. `--hash-images`
+explicitly computes image SHA256 and marks `computed:sha256`. Default scanning does
+not separately read images to hash them, **but the strong object validator reads the
+whole TAR multiple times** (before scanning, before commit, and final input validation).
+Size/mtime are change hints, not strong content proof. Validator version 1 explicitly
+names strength `strong:sha256`.
 
-`tags_state` is missing/invalid/empty/known. Only lists of strings are valid tags;
-missing and invalid are null, whereas empty is an actual empty list. A syntactically
-valid 64-hex JSON sha256 is normalized and marked `declared:json.sha256`, never called
-verified. Computed hashes are `computed:sha256`; absent/invalid hashes are `missing`.
-Invalid declared hashes produce an error row while retaining the object.
+## Registry and pairing
 
-Object identity is SHA256 of canonical JSON containing dataset, canonical source,
-relative POSIX shard path, member path, offset, and size. It identifies a physical
-occurrence, not content equivalence. Samples currently map one-to-one to objects.
-Relocating an unchanged input directory preserves identity; changing the dataset,
-source, member layout or relative shard path does not. Input content changes are
-rejected for an existing output even if size and mtime are preserved.
+Source is mandatory registry data and never inferred from paths. Pairing preserves the
+full logical stem. `image_prefix="images/"` and `metadata_prefix="meta/"` allow
+`images/7.jpg` + `meta/7.json` to pair as `7`; remaining directory components are kept.
+Prefix removal is explicit and collisions are rejected. `metadata_required` defaults
+to true and can be false. `numeric_post_id` optionally requires decimal post stems.
+`tags_field`, `text_field`, `max_json_bytes`, `tag_namespace`, `tag_category`, and
+`image_extensions` are explicit options. README.md/manifest.json, hidden paths,
+directories, and unrecognized suffixes are ignored; `ignored_names` is configurable.
 
-### Publication and resume
+Error vocabulary: invalid_post_id, missing_image, missing_metadata, metadata_invalid,
+source_mismatch, ambiguous_image_member, ambiguous_metadata_member, unsupported_member,
+unsupported_archive, record_identity_conflict. Fatal archive/conflict/storage failures
+raise and CLI returns error JSON/nonzero; per-record errors are stored and return 1.
+Normal CLI returns 0; argument/fatal errors return 2.
 
-Each shard publishes exactly four `<shard-id>.<table>.parquet` fragments (including
-schemaful empty tables) and `<shard-id>.COMMIT`. Files are written in the output
-directory to `.partial`, flushed and fsynced through **writable descriptors**, then
-atomically renamed. COMMIT is published last using the same protocol and contains
-fragment SHA256/byte/row counts, input size/mtime_ns/SHA256, and an INPUT contract hash.
-POSIX additionally fsyncs the directory. Windows does not promise directory-fsync or
-power-loss durability; process-crash recovery is tested. This is a **single-writer**
-contract, not a concurrent writer service.
+## Publication, resume, and counts
 
-Resume verifies the complete input set and configuration, all committed fragment
-hashes, schemas, and row counts. A corrupt commit fails closed. An uncommitted shard
-is rebuilt; stale `.partial` files are removed. Readers must consume only fragments
-listed by verified COMMIT markers, never glob all Parquet files during publication.
-The abandoned pre-review per-object layout is intentionally not migrated: choose a
-fresh output. `INPUT.json` locks configuration, including `--hash-images`.
+Single writer, quiescent local inputs. Each shard writes four Parquet partial files in
+batches, flushes/fsyncs and closes, then renames finals. COMMIT is last, atomically
+published after fsync and records file path/size/SHA256/row counts, input validator,
+schema/builder/dataset/object and created_at. POSIX fsyncs directories. Windows CRT
+has no directory fsync: process recovery is tested, power-loss durability is not promised.
+Readers must verify COMMIT before consuming files, never simply glob uncommitted finals.
 
-Summary `objects` and `errors` are totals including resumed shards; `skipped` counts
-shards, not objects. Timing fields are measurements and excluded from determinism
-claims. CLI success returns JSON/0; row errors return summary JSON/1; fatal validation
-or I/O failures return error JSON/2 (argparse syntax errors use argparse's stderr/2).
-Fatal storage failures are not misreported as metadata/archive error rows.
+Crash hooks: A=half samples partial before footer; B=all Parquet closed, no rename;
+C=first final rename only; D=all final files without marker; E=marker published.
+A–D rebuild; E validates all hashes/schemas/counts before skipping. Corrupt committed
+outputs fail `CORRUPT_COMMIT` and are not silently rebuilt. Changed input content,
+mtime, inventory, or configuration rejects existing offsets. Only reserved builder
+partial names are removed; unrelated user files are preserved. Do not place your own
+files in builder-reserved names. COMMIT hashes are not authenticated against an attacker.
 
-## Offline validation and limitations
+Summary objects_seen/objects_committed/objects_skipped count TAR shards. `objects` is
+the total shard rows including skipped shards; `samples` counts indexed physical sample
+rows, not shards, tags, or invalid candidates. `skipped` is a compatibility alias of
+objects_skipped. created_at and timings are nondeterministic; logical rows/IDs/counts
+are deterministic. Memory still scales with the largest shard (headers and rows are
+materialized); batched Parquet writing is not a bounded-memory streaming claim.
+
+## Verification
 
 ```console
-python tools/verify_p2.py
+PYTHONPATH=src python -m pytest -q
+python -m ruff check .
+git diff --check
+git diff 52358d6fca728d2bba12814490e0974a6907b218..HEAD --check
+python -m build --wheel --outdir /tmp/sakurapool-p2-wheel
+PYTHONPATH=src python tools/benchmark_indexer.py
 ```
 
-This runs full/specialized pytest, ruff, diff-check, an offline no-isolation build,
-a 10,000-pair synthetic benchmark, and isolated installed-wheel CLI smoke. Raw logs,
-commands, exit codes, SHA256 and sizes are in `reports/P2/evidence-manifest.json`.
-The current host has Python 3.14.5 / Arrow 25.0.1, **not pinned Arrow 18.1.0**.
-The offline wheel smoke transplants only the installed Arrow dependency into a fresh
-venv, does not expose source/global site-packages, and intentionally records a failing
-`pip check`. This is not a successful pinned dependency installation certification.
-
-See [reports/P2/report.md](reports/P2/report.md) for the implementation audit and
-remaining review gates. Peak memory scales with the largest shard; this builder is
-not a bounded-memory production streamer. Inputs are assumed quiescent during a scan;
-validators detect observed changes, not adversarial racing writers.
+The benchmark generates 10,000 synthetic samples in **one** TAR. It reports
+header/json/parquet/total seconds and process peak RSS including fixture generation
+and imports; total excludes fixture generation but includes whole-TAR validation.
+No production performance inference is valid. See the revision report for actual
+command logs, compatible installation failures/successes, and remaining gates.
