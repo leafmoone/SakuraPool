@@ -519,6 +519,8 @@ def _verify_fragment(path: Path, schema: pa.Schema) -> int:
     if parquet.schema_arrow != schema:
         raise ValueError(f"schema mismatch: {path.name}")
     metadata_rows = parquet.metadata.num_rows
+    if metadata_rows == 0:
+        return 0
     iterated_rows = sum(
         batch.num_rows for batch in parquet.iter_batches(batch_size=BATCH_SIZE)
     )

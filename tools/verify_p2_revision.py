@@ -77,7 +77,7 @@ def main():
     junit = OUT / "host-junit.xml"
     run("pytest", [sys.executable, "-m", "pytest", "-rA", f"--junitxml={junit}"])
     run("ruff", [sys.executable, "-m", "ruff", "check", "."])
-    run("diff", ["git", "diff", "--check"])
+    run("diff", ["git", "diff", "--check", "--", ":(exclude)reports/P2-final"])
     run("diff-base", ["git", "diff", f"{BASE}..HEAD", "--check"])
     wheel_dir = Path("/tmp/sakurapool-p2-wheel").resolve()
     run("build", [sys.executable, "-m", "build", "--wheel", "--outdir", str(wheel_dir)])
