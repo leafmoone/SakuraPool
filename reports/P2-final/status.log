@@ -4,7 +4,9 @@
  M reports/P2-final/build.log
  M reports/P2-final/extents.log
  M reports/P2-final/git.log
+ M reports/P2-final/host-junit.xml
  M reports/P2-final/manifest.json
+ M reports/P2-final/pinned-junit.xml
  M reports/P2-final/pinned-pytest.log
  M reports/P2-final/pytest.log
  M reports/P2-final/status.log
@@ -12,5 +14,3 @@
  M reports/P2-final/wheel-install.log
  M reports/P2-final/wheel-scan.log
 ?? agents.md
-?? reports/P2-final/host-junit.xml
-?? reports/P2-final/pinned-junit.xml

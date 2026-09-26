@@ -5,15 +5,15 @@ configfile: pyproject.toml
 testpaths: tests
 plugins: anyio-4.13.0, asyncio-1.4.0
 asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
-collected 70 items
+collected 80 items
 
 tests\test_evaluator.py ..                                               [  2%]
-tests\test_indexer.py ...............................                    [ 47%]
-tests\test_indexer_boundaries.py ..........                              [ 61%]
-tests\test_indexer_recovery.py ..........                                [ 75%]
-tests\test_p2_revision.py ........                                       [ 87%]
-tests\test_query.py .....                                                [ 94%]
-tests\test_registry.py .                                                 [ 95%]
+tests\test_indexer.py .........................................          [ 53%]
+tests\test_indexer_boundaries.py ..........                              [ 66%]
+tests\test_indexer_recovery.py ..........                                [ 78%]
+tests\test_p2_revision.py ........                                       [ 88%]
+tests\test_query.py .....                                                [ 95%]
+tests\test_registry.py .                                                 [ 96%]
 tests\test_schema.py ...                                                 [100%]
 
 =================================== PASSES ====================================
@@ -22,7 +22,7 @@ _______________________________ test_cli_config _______________________________
 {"error": "index scan requires --input and --output"}
 _________________________ test_cli_row_error_nonzero __________________________
 ---------------------------- Captured stdout call -----------------------------
-{"archives": 1, "errors": 1, "header_seconds": 0.0022489000111818314, "json_seconds": 7.00005330145359e-07, "objects": 1, "objects_committed": 1, "objects_seen": 1, "objects_skipped": 0, "parquet_seconds": 0.017046699998900294, "samples": 1, "skipped": 0, "total_seconds": 0.039328299928456545}
+{"archives": 1, "errors": 1, "header_seconds": 0.007112300023436546, "json_seconds": 5.00003807246685e-07, "objects": 1, "objects_committed": 1, "objects_seen": 1, "objects_skipped": 0, "parquet_seconds": 0.020097800064831972, "samples": 1, "skipped": 0, "total_seconds": 0.047311600064858794}
 - generated xml file: D:\SakuraTool\SakuraPool\reports\P2-final\host-junit.xml -
 =========================== short test summary info ===========================
 PASSED tests/test_evaluator.py::test_filter_select_and_limit_are_deterministic
@@ -55,6 +55,16 @@ PASSED tests/test_indexer.py::test_bounded_cross_batch_writer_staging
 PASSED tests/test_indexer.py::test_identity_formula_conflict_uint64
 PASSED tests/test_indexer.py::test_optional_metadata_tags_hash_no_decode
 PASSED tests/test_indexer.py::test_png_header_dimensions_are_indexed_without_decode
+PASSED tests/test_indexer.py::test_default_scan_does_not_read_image_payload
+PASSED tests/test_indexer.py::test_utf8_error_detail_is_bounded
+PASSED tests/test_indexer.py::test_all_table_row_boundaries_and_resume[0]
+PASSED tests/test_indexer.py::test_all_table_row_boundaries_and_resume[1]
+PASSED tests/test_indexer.py::test_all_table_row_boundaries_and_resume[1023]
+PASSED tests/test_indexer.py::test_all_table_row_boundaries_and_resume[1024]
+PASSED tests/test_indexer.py::test_all_table_row_boundaries_and_resume[1025]
+PASSED tests/test_indexer.py::test_all_table_row_boundaries_and_resume[2051]
+PASSED tests/test_indexer.py::test_errors_cross_batch_roundtrip_and_resume[1025]
+PASSED tests/test_indexer.py::test_errors_cross_batch_roundtrip_and_resume[2051]
 PASSED tests/test_indexer.py::test_input_same_size_mtime_changed
 PASSED tests/test_indexer.py::test_fresh_process_roundtrip_determinism
 PASSED tests/test_indexer.py::test_cli_config
@@ -95,4 +105,4 @@ PASSED tests/test_registry.py::test_schema_and_model_registries_reject_duplicate
 PASSED tests/test_schema.py::test_rows_to_table_preserves_schema_and_values
 PASSED tests/test_schema.py::test_rows_to_table_rejects_unknown_and_missing_fields
 PASSED tests/test_schema.py::test_custom_schema
-============================= 70 passed in 7.07s ==============================
+============================= 80 passed in 37.22s =============================

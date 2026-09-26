@@ -1,0 +1,42 @@
+{
+  "report": "repair-report-v3.md",
+  "base_sha": "52358d6fca728d2bba12814490e0974a6907b218",
+  "prior_submission_sha": "2e1ec223f672a66fb998ef8a6330f9bc12123e16",
+  "implementation_commits": [
+    "7622bd0882f8b02b7bfb026500ab4164ad01e531",
+    "6476956a8a8ddaaf2d99fa1e079c9d6df59a4ff0"
+  ],
+  "junit": {
+    "host": {"path": "host-junit.xml", "tests": 80, "failures": 0, "errors": 0},
+    "pinned": {"path": "pinned-junit.xml", "tests": 80, "failures": 0, "errors": 0}
+  },
+  "boundary_counts": [0, 1, 1023, 1024, 1025, 2051],
+  "error_boundary_counts": [1025, 2051],
+  "benchmark": {
+    "exit": 0,
+    "samples": 10000,
+    "errors": 0,
+    "total_seconds": 111.86201569996774,
+    "header_seconds": 0.4197569000534713,
+    "json_seconds": 0.14821020141243935,
+    "parquet_seconds": 0.30075499997474253,
+    "peak_rss_bytes": 99819520,
+    "scope": "synthetic 10000 pairs, scan including TAR SHA256, excluding fixture generation"
+  },
+  "gates": {
+    "host_pytest": 0,
+    "pinned_pytest": 0,
+    "host_ruff": 0,
+    "pinned_ruff": 0,
+    "wheel_import_isolation": 0,
+    "pip_check": 0,
+    "cli_smoke": 0,
+    "benchmark": 0,
+    "extent_probe": 0,
+    "diff_check": 0,
+    "base_diff_check": 0
+  },
+  "known_intermediate_failure": "One pre-fix benchmark invocation timed out while O(n^2) error spool patching existed; final benchmark exit was 0 after removal.",
+  "main_unchanged": true,
+  "p3_started": false
+}

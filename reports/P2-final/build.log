@@ -51,7 +51,7 @@ running install_egg_info
 Copying src\sakurapool.egg-info to build\bdist.win-amd64\wheel\.\sakurapool-0.1.0-py3.14.egg-info
 running install_scripts
 creating build\bdist.win-amd64\wheel\sakurapool-0.1.0.dist-info\WHEEL
-creating 'D:\tmp\sakurapool-p2-wheel\.tmp-8m92ta22\sakurapool-0.1.0-py3-none-any.whl' and adding 'build\bdist.win-amd64\wheel' to it
+creating 'D:\tmp\sakurapool-p2-wheel\.tmp-l7gr16cr\sakurapool-0.1.0-py3-none-any.whl' and adding 'build\bdist.win-amd64\wheel' to it
 adding 'sakurapool/__init__.py'
 adding 'sakurapool/__main__.py'
 adding 'sakurapool/cli.py'

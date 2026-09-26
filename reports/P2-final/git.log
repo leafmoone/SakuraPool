@@ -1,3 +1,6 @@
+6476956a8a8ddaaf2d99fa1e079c9d6df59a4ff0 fix(index): verify complete streamed publications
+7622bd0882f8b02b7bfb026500ab4164ad01e531 fix(index): close parquet and streaming scan gaps
+2e1ec223f672a66fb998ef8a6330f9bc12123e16 docs(index): record second reviewer repair
 dff6906bd1b861d14e5e9ca6ba9b80cbe2f5bc04 fix(verify): aggregate JUnit suite statistics
 f24ab109c4ae6817027c895670a737930dd27aaa fix(index): align P2 storage and bounded scan contract
 2dd9ca16bb4b0a1160270c70a7e28209c96460f9 docs(index): record reviewer repair evidence
