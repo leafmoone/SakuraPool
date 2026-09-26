@@ -19,8 +19,13 @@ def test_process_death(tmp_path, stage):
     source.mkdir()
     make_tar(source / "a.tar", {"x.jpg": b"x", "x.json": b"{}"})
     output = tmp_path / "out"
-    env = dict(os.environ, PYTHONPATH=str(Path(__file__).parents[1] / "src"))
+    env = dict(os.environ)
+    if os.environ.get("SAKURAPOOL_EXPECT_INSTALLED") != "1":
+        env["PYTHONPATH"] = str(Path(__file__).parents[1] / "src")
     code = (
+        "import os,pathlib,sys,sakurapool;"
+        "assert os.environ.get('SAKURAPOOL_EXPECT_INSTALLED') != '1' or "
+        "str(pathlib.Path(sys.prefix)) in str(pathlib.Path(sakurapool.__file__).resolve());"
         "import os,sys;from pathlib import Path;from sakurapool.indexer import scan;"
         "scan(Path(sys.argv[1]),Path(sys.argv[2]),"
         "checkpoint=lambda s: os._exit(73) if s==sys.argv[3] else None)"
@@ -100,7 +105,9 @@ def test_two_shards_and_empty_annotations(tmp_path):
     output = tmp_path / "out"
     assert indexer.scan(source, output)["objects"] == 2
     assert len({r["object_id"] for r in read_rows(output, "objects")}) == 2
-    assert read_rows(output, "annotations") == []
+    annotations = read_rows(output, "annotations")
+    assert len(annotations) == 2
+    assert {row["tags_state"] for row in annotations} == {"missing"}
     assert indexer.scan(source, output)["skipped"] == 2
     for marker in output.glob("*.COMMIT"):
         commit = json.loads(marker.read_bytes())

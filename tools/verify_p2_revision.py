@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -73,7 +74,8 @@ def main():
     run("environment", [sys.executable, "-c", "import sys,platform,pyarrow;"
         "print(sys.executable);print(sys.version);print(platform.platform());"
         "print('Arrow',pyarrow.__version__)"])
-    run("pytest", [sys.executable, "-m", "pytest", "-q", "-rA"])
+    junit = OUT / "host-junit.xml"
+    run("pytest", [sys.executable, "-m", "pytest", "-rA", f"--junitxml={junit}"])
     run("ruff", [sys.executable, "-m", "ruff", "check", "."])
     run("diff", ["git", "diff", "--check"])
     run("diff-base", ["git", "diff", f"{BASE}..HEAD", "--check"])
@@ -107,7 +109,7 @@ def main():
                 timeout=600,
             )
         if code == 0:
-            isolated = dict(os.environ)
+            isolated = dict(os.environ, SAKURAPOOL_EXPECT_INSTALLED="1")
             isolated.pop("PYTHONPATH", None)
             run(
                 "wheel-import",
@@ -124,9 +126,13 @@ def main():
             )
             run("pip-check", [str(python), "-m", "pip", "check"], cwd=clean,
                 process_env=isolated)
+            pinned_junit = OUT / "pinned-junit.xml"
             run(
                 "pinned-pytest",
-                [str(python), "-m", "pytest", "-q", "-rA", str(ROOT / "tests")],
+                [
+                    str(python), "-m", "pytest", "-rA", f"--junitxml={pinned_junit}",
+                    str(ROOT / "tests"),
+                ],
                 cwd=clean,
                 process_env=isolated,
             )
@@ -148,8 +154,14 @@ def main():
                           "--input", str(source), "--output", str(clean / "out")]),
             ]:
                 run("wheel-" + name, [str(sakura), *args], cwd=clean, process_env=isolated)
+    for name, junit in (("host", OUT / "host-junit.xml"), ("pinned", OUT / "pinned-junit.xml")):
+        if junit.exists():
+            suite = ET.parse(junit).getroot()
+            entries.append({"name": name + "-junit-statistics", "tests": int(suite.attrib["tests"]),
+                            "failures": int(suite.attrib.get("failures", 0)),
+                            "errors": int(suite.attrib.get("errors", 0))})
     run("status", ["git", "status", "--short", "--branch"])
-    return 1 if any(entry["exit"] for entry in entries) else 0
+    return 1 if any(entry.get("exit", 0) for entry in entries) else 0
 
 
 if __name__ == "__main__":

@@ -41,12 +41,21 @@ class ObjectRef:
     object_id: str
     path: str
     validator_sha256: str
+    backend: str = "local"
+    repo_type: str = "tar"
+    object_version: str = ""
+    validator_kind: str = "sha256"
+    validator_strength: str = "strong:sha256"
 
     def __post_init__(self) -> None:
         canonical_object_id(self.object_id)
         canonical_object_id(self.path)
         if len(self.validator_sha256) != 64:
             raise ValueError("strong SHA256 validator required")
+        if not self.backend or not self.repo_type or not self.validator_kind:
+            raise ValueError("ObjectRef storage metadata is required")
+        if self.object_version and self.object_version != self.validator_sha256:
+            raise ValueError("ObjectRef version must match validator")
 
 
 @dataclass(frozen=True)

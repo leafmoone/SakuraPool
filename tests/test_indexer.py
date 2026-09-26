@@ -69,12 +69,17 @@ def test_original_fixtures(tmp_path, case, members, samples, codes):
     if case == "B":
         missing = read_rows(out, "samples")[0]
         assert missing["json_path"] is None
-        assert missing["metadata"] is None
+        assert missing["text"] is None
         assert missing["tags_state"] == "missing"
     for name, schema in indexer.SCHEMAS.items():
         assert pq.read_table(next(out.glob(f"*.{name}.parquet"))).schema == schema
     obj = read_rows(out, "objects")[0]
-    ref = ObjectRef(obj["dataset_id"], obj["object_id"], obj["path"], obj["sha256"])
+    ref = ObjectRef(
+        obj["dataset_id"], obj["object_id"], obj["path"], obj["sha256"],
+        backend=obj["backend"], repo_type=obj["repo_type"],
+        object_version=obj["object_version"], validator_kind=obj["validator_kind"],
+        validator_strength=obj["validator_strength"],
+    )
     with tarfile.open(source, "r:") as tar, source.open("rb") as stream:
         for row in read_rows(out, "samples"):
             key = RecordKey(row["dataset_id"], row["object_id"], row["sample_path"])
@@ -199,6 +204,13 @@ def test_four_tables_share_object_and_record_references(tmp_path):
     annotations = read_rows(output, "annotations")
     assert len({(r["record_id"], r["namespace"], r["origin"])
                 for r in annotations}) == len(annotations)
+    annotation_fields = {field.name: field for field in indexer.ANNOTATIONS_SCHEMA}
+    assert annotation_fields["tags_state"].type == indexer.pa.string()
+    assert annotation_fields["tags"].type == indexer.TAG_TYPE
+    assert annotations[0]["tags"] == [dict(value="a", category="general")]
+    assert {field.name for field in indexer.SAMPLES_SCHEMA} >= {
+        "image_format", "width", "height", "has_alpha", "hash_kind", "status"
+    }
 
 
 def test_bounded_cross_batch_writer_staging(tmp_path, monkeypatch):
@@ -253,7 +265,7 @@ def test_optional_metadata_tags_hash_no_decode(tmp_path, monkeypatch):
     real = indexer._read_member
 
     def guarded(tar, member):
-        assert member.name.endswith(".json")
+        assert member.name.endswith((".json", ".jpg"))
         return real(tar, member)
 
     monkeypatch.setattr(indexer, "_read_member", guarded)
@@ -262,12 +274,24 @@ def test_optional_metadata_tags_hash_no_decode(tmp_path, monkeypatch):
     out = tmp_path / "out"
     indexer.scan(source, out, dataset="d", registry=registry)
     rows = read_rows(out, "samples")
-    assert rows[0]["metadata"] is None and rows[0]["json_path"] is None
+    assert rows[0]["json_path"] is None and rows[0]["text"] is None
     assert [r["tags_state"] for r in rows] == [
         "missing", "missing", "empty", "known", "invalid", "invalid", "missing"]
     assert rows[-1]["hash_source"] == "declared:json.sha256"
-    assert rows[3]["tags"] == [dict(value="x", namespace="tags",
-                                     origin="declared:json.tags", category="general")]
+    assert rows[3]["tags"] == [dict(value="x", category="general")]
+
+
+def test_png_header_dimensions_are_indexed_without_decode(tmp_path):
+    source = tmp_path / "a.tar"
+    png = bytearray(b"\x89PNG\r\n\x1a\n")
+    png += b"\x00\x00\x00\x0dIHDR" + (12).to_bytes(4, "big") + (9).to_bytes(4, "big")
+    png += b"\x08\x06" + b"\x00\x00\x00\x00" + b"\x00" * 20
+    make_tar(source, {"1.png": bytes(png), "1.json": b"{}"})
+    out = tmp_path / "out"
+    indexer.scan(source, out)
+    row = read_rows(out, "samples")[0]
+    assert (row["width"], row["height"], row["has_alpha"]) == (12, 9, True)
+    assert "metadata" not in row
 
 
 def test_input_same_size_mtime_changed(tmp_path):
@@ -287,9 +311,14 @@ def test_fresh_process_roundtrip_determinism(tmp_path):
     stem = "nested/" + "x" * 120
     make_tar(source, {stem + ".jpg": b"x", stem + ".json": b"{}"}, format=tarfile.PAX_FORMAT)
     outputs = [tmp_path / "one", tmp_path / "two"]
-    env = dict(os.environ, PYTHONPATH=str(Path(__file__).parents[1] / "src"))
+    env = dict(os.environ)
+    if os.environ.get("SAKURAPOOL_EXPECT_INSTALLED") != "1":
+        env["PYTHONPATH"] = str(Path(__file__).parents[1] / "src")
     code = (
-        "import sys;from pathlib import Path;import pyarrow.parquet as pq;"
+        "import os,sys,pathlib,sakurapool;"
+        "assert os.environ.get('SAKURAPOOL_EXPECT_INSTALLED') != '1' or "
+        "str(pathlib.Path(sys.prefix)) in str(pathlib.Path(sakurapool.__file__).resolve());"
+        "from pathlib import Path;import pyarrow.parquet as pq;"
         "from sakurapool.indexer import scan,SCHEMAS;"
         "o=Path(sys.argv[2]);r=scan(Path(sys.argv[1]),o);"
         "assert r['samples']==1;"
