@@ -71,6 +71,9 @@ def test_original_fixtures(tmp_path, case, members, samples, codes):
         assert missing["json_path"] is None
         assert missing["text"] is None
         assert missing["tags_state"] == "missing"
+        missing_error = read_rows(out, "errors")[0]
+        assert missing_error["post_id"] == "3"
+        assert missing_error["record_id"] == missing["record_id"]
     for name, schema in indexer.SCHEMAS.items():
         assert pq.read_table(next(out.glob(f"*.{name}.parquet"))).schema == schema
     obj = read_rows(out, "objects")[0]
@@ -295,6 +298,44 @@ def test_png_header_dimensions_are_indexed_without_decode(tmp_path):
     assert "metadata" not in row
 
 
+def test_tar_member_cache_is_bounded(tmp_path, monkeypatch):
+    source = tmp_path / "a.tar"
+    make_tar(source, {f"{i}.jpg": b"x" for i in range(2051)})
+    observed = []
+    real_next = indexer.tarfile.TarFile.next
+    def observe(archive):
+        member = real_next(archive)
+        observed.append(len(archive.members))
+        return member
+    monkeypatch.setattr(indexer.tarfile.TarFile, "next", observe)
+    indexer.scan(source, tmp_path / "out")
+    assert max(observed) <= 1
+
+
+def test_member_lookup_uses_indexed_plan():
+    spool = indexer._MemberSpool()
+    rows = indexer._SpoolRows()
+    try:
+        plan = spool.db.execute(
+            "EXPLAIN QUERY PLAN SELECT name FROM members "
+            "WHERE key=? AND is_image=? ORDER BY name LIMIT 2", ("x", 1)
+        ).fetchall()
+        detail = " ".join(row[3] for row in plan)
+        assert "members_lookup" in detail
+        assert "SCAN" not in detail.upper()
+        join_plan = rows.db.execute(
+            "EXPLAIN QUERY PLAN SELECT a.record_id FROM rows AS a "
+            "LEFT JOIN rows AS s ON s.kind='samples' AND s.record_id=a.record_id "
+            "WHERE a.kind='annotations' AND s.record_id IS NULL LIMIT 1"
+        ).fetchall()
+        join_detail = " ".join(row[3] for row in join_plan)
+        assert "rows_record_lookup" in join_detail
+        assert "payload" not in join_detail
+    finally:
+        spool.close()
+        rows.close()
+
+
 def test_default_scan_does_not_read_image_payload(tmp_path, monkeypatch):
     source = tmp_path / "a.tar"
     make_tar(source, {"1.jpg": b"payload", "1.json": b'{"width":99,"height":88}'})
@@ -304,6 +345,15 @@ def test_default_scan_does_not_read_image_payload(tmp_path, monkeypatch):
         return real(archive, member, verify_offsets)
     monkeypatch.setattr(indexer, "_read_member", guarded)
     indexer.scan(source, tmp_path / "out")
+
+
+def test_resume_verification_does_not_read_full_parquet(tmp_path, monkeypatch):
+    source = tmp_path / "a.tar"
+    make_tar(source, {f"{i}.jpg": b"x" for i in range(1025)})
+    out = tmp_path / "out"
+    indexer.scan(source, out)
+    monkeypatch.setattr(indexer.pq, "read_table", lambda *args: pytest.fail("full parquet read"))
+    assert indexer.scan(source, out)["skipped"] == 1
 
 
 def test_utf8_error_detail_is_bounded(tmp_path):

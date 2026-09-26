@@ -115,6 +115,7 @@ class _MemberSpool:
             "CREATE TABLE members (key TEXT, name TEXT, suffix TEXT, "
             "offset INTEGER, size INTEGER, is_image INTEGER)"
         )
+        self.db.execute("CREATE INDEX members_lookup ON members(key, is_image, name)")
         self.db.commit()
 
     def add(self, key: str, member: tarfile.TarInfo, suffix: str, is_image: bool) -> None:
@@ -154,10 +155,11 @@ class _SpoolRows:
         handle.close()
         self.db = sqlite3.connect(self.path)
         self.db.execute(
-            "CREATE TABLE rows (kind TEXT, ordinal INTEGER, payload TEXT, "
+            "CREATE TABLE rows (kind TEXT, ordinal INTEGER, record_id TEXT, payload TEXT, "
             "PRIMARY KEY (kind, ordinal))"
         )
         self.db.execute("CREATE TABLE identities (record_id TEXT PRIMARY KEY, identity TEXT)")
+        self.db.execute("CREATE INDEX rows_record_lookup ON rows(kind, record_id)")
         self.db.commit()
         self.counts = {name: 0 for name in SCHEMAS}
 
@@ -176,8 +178,8 @@ class _SpoolRows:
     def append(self, name: str, row: dict[str, Any]) -> None:
         ordinal = self.counts[name]
         self.db.execute(
-            "INSERT INTO rows VALUES (?, ?, ?)",
-            (name, ordinal, json.dumps(row, ensure_ascii=False)),
+            "INSERT INTO rows VALUES (?, ?, ?, ?)",
+            (name, ordinal, row.get("record_id"), json.dumps(row, ensure_ascii=False)),
         )
         self.counts[name] += 1
         if ordinal % BATCH_SIZE == BATCH_SIZE - 1:
@@ -307,6 +309,12 @@ def _truncate_utf8(value: str, limit: int = 4096) -> str:
     return data.decode("utf-8", errors="ignore")
 
 
+def _next_member(archive: tarfile.TarFile) -> tarfile.TarInfo | None:
+    member = archive.next()
+    archive.members.clear()
+    return member
+
+
 def _safe(name: str) -> bool:
     return bool(name) and "\\" not in name and ":" not in name and all(
         p not in ("", ".", "..") for p in name.split("/")
@@ -333,12 +341,13 @@ def _scan_shard(path: Path, rel: str, adapter: DatasetAdapter, hash_images: bool
         validator_strength=validator["strength"], sha256=validator["sha256"],
     ))
 
-    def error(member: str, code: str, detail: str = "", post_id: str | None = None) -> None:
+    def error(member: str, code: str, detail: str = "", post_id: str | None = None,
+              record_id: str | None = None) -> None:
         assert code in ERROR_CODES
         detail = _truncate_utf8(detail)
         rows["errors"].append(dict(
             dataset_id=adapter.dataset, object_id=object_id, source=adapter.source,
-            object_path=rel, member=member, post_id=post_id, record_id=None, path=member,
+            object_path=rel, member=member, post_id=post_id, record_id=record_id, path=member,
             code=code, error_detail=detail, detail=detail,
         ))
 
@@ -349,32 +358,32 @@ def _scan_shard(path: Path, rel: str, adapter: DatasetAdapter, hash_images: bool
         raise UnsupportedArchiveError(f"unsupported_archive: {path}") from exc
     with archive:
         member_spool = _MemberSpool()
-        member = archive.next()
+        member = _next_member(archive)
         while member is not None:
             if member.isdir():
-                member = archive.next()
+                member = _next_member(archive)
                 continue
             if not _safe(member.name):
                 error(member.name, "unsupported_member", "unsafe member path")
-                member = archive.next()
+                member = _next_member(archive)
                 continue
             parts = PurePosixPath(member.name).parts
             if any(p.startswith(".") for p in parts) or parts[-1] in adapter.ignored_names:
-                member = archive.next()
+                member = _next_member(archive)
                 continue
             suffix = PurePosixPath(member.name).suffix.lower()
             if suffix != ".json" and suffix not in adapter.image_extensions:
-                member = archive.next()
+                member = _next_member(archive)
                 continue
             if not member.isfile() or member.issparse():
                 error(member.name, "unsupported_member")
-                member = archive.next()
+                member = _next_member(archive)
                 continue
             if not 0 <= member.offset_data <= member.offset_data + member.size <= validator["size"]:
                 raise ValueError(f"invalid TAR extent: {member.name}")
             key = adapter.pair_key(member.name)
             member_spool.add(key, member, suffix, suffix != ".json")
-            member = archive.next()
+            member = _next_member(archive)
         member_spool.db.commit()
         timings["header_seconds"] += time.perf_counter() - started
         for key in member_spool.iter_keys():
@@ -399,18 +408,7 @@ def _scan_shard(path: Path, rel: str, adapter: DatasetAdapter, hash_images: bool
             record_id = identity.record_id
             rows.register_identity(record_id, identity)
             if missing_required_metadata:
-                error(key, "missing_metadata", post_id=post_id)
-                for ordinal, payload in rows.db.execute(
-                    "SELECT ordinal, payload FROM rows WHERE kind='errors'"
-                ):
-                    row = json.loads(payload)
-                    if row["member"] == key:
-                        row["record_id"] = record_id
-                        rows.db.execute(
-                            "UPDATE rows SET payload=? WHERE kind='errors' AND ordinal=?",
-                            (json.dumps(row, ensure_ascii=False), ordinal),
-                        )
-                rows.db.commit()
+                error(key, "missing_metadata", post_id=post_id, record_id=record_id)
             metadata = None
             started = time.perf_counter()
             try:
@@ -431,10 +429,11 @@ def _scan_shard(path: Path, rel: str, adapter: DatasetAdapter, hash_images: bool
                         raise ValueError("metadata must be a JSON object")
                     _json(metadata)
                     if "source" in metadata and metadata["source"] != adapter.source:
-                        error(meta.name, "source_mismatch")
+                        error(meta.name, "source_mismatch", post_id=post_id, record_id=record_id)
                         continue
             except (ValueError, UnicodeError) as exc:
-                error(meta.name, "metadata_invalid", str(exc))
+                error(meta.name, "metadata_invalid", str(exc), post_id=post_id,
+                      record_id=record_id)
                 continue
             finally:
                 timings["json_seconds"] += time.perf_counter() - started
@@ -457,7 +456,8 @@ def _scan_shard(path: Path, rel: str, adapter: DatasetAdapter, hash_images: bool
             digest = values.get("sha256")
             if digest is not None and (not isinstance(digest, str)
                                        or not re.fullmatch(r"[0-9a-fA-F]{64}", digest)):
-                error(meta.name, "metadata_invalid", "invalid declared sha256")
+                error(meta.name, "metadata_invalid", "invalid declared sha256",
+                      post_id=post_id, record_id=record_id)
                 digest = None
             digest = digest.lower() if digest else None
             origin = "declared:json.sha256" if digest else "missing"
@@ -466,7 +466,8 @@ def _scan_shard(path: Path, rel: str, adapter: DatasetAdapter, hash_images: bool
                 origin = "computed:sha256"
             text = values.get(adapter.text_field)
             if text is not None and not isinstance(text, str):
-                error(meta.name, "metadata_invalid", "invalid text")
+                error(meta.name, "metadata_invalid", "invalid text", post_id=post_id,
+                      record_id=record_id)
                 text = None
             identity_fields = dict(record_id=record_id, dataset_id=adapter.dataset,
                                    object_id=object_id, sample_path=key)
@@ -504,13 +505,26 @@ def _validate_references(rows: _SpoolRows) -> None:
         if any((row["dataset_id"], row["object_id"]) != object_ref
                for row in rows.iter_rows(name)):
             raise ValueError(f"{name} contains an ObjectRef outside objects")
-    for row in rows.iter_rows("annotations"):
-        exists = rows.db.execute(
-            "SELECT 1 FROM rows WHERE kind='samples' AND payload LIKE ? LIMIT 1",
-            (f'%"record_id": "{row["record_id"]}"%',),
-        ).fetchone()
-        if exists is None:
-            raise ValueError("annotations contains a RecordKey outside samples")
+    missing = rows.db.execute(
+        "SELECT a.record_id FROM rows AS a "
+        "LEFT JOIN rows AS s ON s.kind='samples' AND s.record_id=a.record_id "
+        "WHERE a.kind='annotations' AND s.record_id IS NULL LIMIT 1"
+    ).fetchone()
+    if missing is not None:
+        raise ValueError("annotations contains a RecordKey outside samples")
+
+
+def _verify_fragment(path: Path, schema: pa.Schema) -> int:
+    parquet = pq.ParquetFile(path)
+    if parquet.schema_arrow != schema:
+        raise ValueError(f"schema mismatch: {path.name}")
+    metadata_rows = parquet.metadata.num_rows
+    iterated_rows = sum(
+        batch.num_rows for batch in parquet.iter_batches(batch_size=BATCH_SIZE)
+    )
+    if iterated_rows != metadata_rows:
+        raise ValueError(f"row metadata mismatch: {path.name}")
+    return metadata_rows
 
 
 def _write_fragments(files: dict[str, Path], rows: _SpoolRows,
@@ -534,11 +548,11 @@ def _write_fragments(files: dict[str, Path], rows: _SpoolRows,
                     writer.write_table(_table_from_rows(batch, SCHEMAS[name]))
             stream.flush()
             os.fsync(stream.fileno())
-        table = pq.read_table(partial)
-        if table.schema != SCHEMAS[name] or table.num_rows != rows.counts[name]:
+        actual_rows = _verify_fragment(partial, SCHEMAS[name])
+        if actual_rows != rows.counts[name]:
             raise ValueError(f"schema/row mismatch before publication: {name}")
         info[name] = dict(path=final.name, sha256=_sha(partial),
-                          bytes=partial.stat().st_size, rows=table.num_rows)
+                          bytes=partial.stat().st_size, rows=actual_rows)
     checkpoint("B")  # all parquet closed and fsynced, no rename
     for index, final in enumerate(files.values()):
         os.replace(final.with_name(final.name + ".partial"), final)
@@ -604,8 +618,7 @@ def scan(root: Path, output: Path, *, hash_images: bool = False, dataset: str = 
                     if (info["path"] != fragment.name or info["sha256"] != _sha(fragment)
                             or info["bytes"] != fragment.stat().st_size):
                         raise ValueError(f"output hash mismatch: {name}")
-                    table = pq.read_table(fragment)
-                    if table.schema != SCHEMAS[name] or table.num_rows != info["rows"]:
+                    if _verify_fragment(fragment, SCHEMAS[name]) != info["rows"]:
                         raise ValueError(f"schema/row mismatch: {name}")
                 counts["objects_skipped"] += 1
                 counts["skipped"] += 1
