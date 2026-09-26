@@ -75,7 +75,7 @@ def test_original_fixtures(tmp_path, case, members, samples, codes):
         assert pq.read_table(next(out.glob(f"*.{name}.parquet"))).schema == schema
     obj = read_rows(out, "objects")[0]
     ref = ObjectRef(
-        obj["dataset_id"], obj["object_id"], obj["path"], obj["sha256"],
+        obj["dataset_id"], obj["object_id"], obj["path"], obj["sha256"], obj["object_size"],
         backend=obj["backend"], repo_type=obj["repo_type"],
         object_version=obj["object_version"], validator_kind=obj["validator_kind"],
         validator_strength=obj["validator_strength"],
@@ -168,7 +168,7 @@ def test_member_offset_re_read_verification():
     member.size = 3
     archive = SimpleNamespace(fileobj=UnstableFile())
     with pytest.raises(ValueError, match="offset verification failed"):
-        indexer._read_member(archive, member)
+        indexer._read_member(archive, member, verify_offsets=True)
 
 
 def test_same_path_different_content_changes_object_and_record_ids(tmp_path):
@@ -251,7 +251,8 @@ def test_identity_formula_conflict_uint64(tmp_path, monkeypatch):
     path = tmp_path / "large.parquet"
     pq.write_table(pa.Table.from_pylist([row], schema), path)
     assert pq.read_table(path).to_pylist() == [row]
-    MemberRef(ObjectRef("d", "a.tar", "a.tar", "a" * 64), "1.jpg", **row)
+    MemberRef(ObjectRef("d", "a.tar", "a.tar", "a" * 64, 2**64 - 1,
+                        object_version="a" * 64), "1.jpg", offset_data=1, size=2)
 
 
 def test_optional_metadata_tags_hash_no_decode(tmp_path, monkeypatch):
@@ -286,12 +287,68 @@ def test_png_header_dimensions_are_indexed_without_decode(tmp_path):
     png = bytearray(b"\x89PNG\r\n\x1a\n")
     png += b"\x00\x00\x00\x0dIHDR" + (12).to_bytes(4, "big") + (9).to_bytes(4, "big")
     png += b"\x08\x06" + b"\x00\x00\x00\x00" + b"\x00" * 20
-    make_tar(source, {"1.png": bytes(png), "1.json": b"{}"})
+    make_tar(source, {"1.png": bytes(png), "1.json": b'{"width":99,"height":88,"has_alpha":false}'})
     out = tmp_path / "out"
     indexer.scan(source, out)
     row = read_rows(out, "samples")[0]
-    assert (row["width"], row["height"], row["has_alpha"]) == (12, 9, True)
+    assert (row["width"], row["height"], row["has_alpha"]) == (99, 88, False)
     assert "metadata" not in row
+
+
+def test_default_scan_does_not_read_image_payload(tmp_path, monkeypatch):
+    source = tmp_path / "a.tar"
+    make_tar(source, {"1.jpg": b"payload", "1.json": b'{"width":99,"height":88}'})
+    real = indexer._read_member
+    def guarded(archive, member, verify_offsets=False):
+        assert member.name.endswith(".json")
+        return real(archive, member, verify_offsets)
+    monkeypatch.setattr(indexer, "_read_member", guarded)
+    indexer.scan(source, tmp_path / "out")
+
+
+def test_utf8_error_detail_is_bounded(tmp_path):
+    source = tmp_path / "a.tar"
+    make_tar(source, {"x.jpg": b"x", "x.json": b"invalid"})
+    out = tmp_path / "out"
+    original = indexer._truncate_utf8
+    indexer._truncate_utf8 = lambda value: original("中" * 5000)
+    try:
+        indexer.scan(source, out)
+    finally:
+        indexer._truncate_utf8 = original
+    detail = read_rows(out, "errors")[0]["error_detail"]
+    assert len(detail.encode("utf-8")) <= 4096
+    detail.encode("utf-8").decode("utf-8")
+
+
+@pytest.mark.parametrize("count", [0, 1, 1023, 1024, 1025, 2051])
+def test_all_table_row_boundaries_and_resume(tmp_path, count):
+    members = {}
+    for index in range(count):
+        members[f"{index}.jpg"] = b"x"
+        members[f"{index}.json"] = b'{"tags": ["x"]}'
+    source = tmp_path / "a.tar"
+    make_tar(source, members)
+    out = tmp_path / "out"
+    result = indexer.scan(source, out)
+    assert result["samples"] == count
+    assert len(read_rows(out, "samples")) == count
+    assert len(read_rows(out, "annotations")) == count
+    assert indexer.scan(source, out)["skipped"] == 1
+
+
+@pytest.mark.parametrize("count", [1025, 2051])
+def test_errors_cross_batch_roundtrip_and_resume(tmp_path, count):
+    members = {f"{index}.jpg": b"x" for index in range(count)}
+    source = tmp_path / "a.tar"
+    make_tar(source, members)
+    out = tmp_path / "out"
+    indexer.scan(source, out)
+    errors = read_rows(out, "errors")
+    assert len(errors) == count
+    assert all(row["post_id"] is not None for row in errors)
+    assert len(read_rows(out, "errors")) == count
+    assert indexer.scan(source, out)["skipped"] == 1
 
 
 def test_input_same_size_mtime_changed(tmp_path):

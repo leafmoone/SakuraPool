@@ -41,6 +41,7 @@ class ObjectRef:
     object_id: str
     path: str
     validator_sha256: str
+    object_size: int
     backend: str = "local"
     repo_type: str = "tar"
     object_version: str = ""
@@ -52,9 +53,13 @@ class ObjectRef:
         canonical_object_id(self.path)
         if len(self.validator_sha256) != 64:
             raise ValueError("strong SHA256 validator required")
+        if type(self.object_size) is not int or not 0 <= self.object_size < 2**64:
+            raise ValueError("object_size must be uint64")
         if not self.backend or not self.repo_type or not self.validator_kind:
             raise ValueError("ObjectRef storage metadata is required")
-        if self.object_version and self.object_version != self.validator_sha256:
+        if not self.object_version or not self.validator_strength.startswith("strong:"):
+            raise ValueError("strong ObjectRef version and validator are required")
+        if self.object_version != self.validator_sha256:
             raise ValueError("ObjectRef version must match validator")
 
 
@@ -67,9 +72,12 @@ class MemberRef:
 
     def __post_init__(self) -> None:
         canonical_object_id(self.path)
-        for value in (self.offset_data, self.size):
-            if type(value) is not int or not 0 <= value < 2**64:
-                raise ValueError("member extents must be uint64")
+        if type(self.offset_data) is not int or type(self.size) is not int:
+            raise ValueError("member extents must be uint64")
+        if not 0 <= self.offset_data < 2**64 or not 0 <= self.size < 2**64:
+            raise ValueError("member extents must be uint64")
+        if self.offset_data + self.size > self.object.object_size:
+            raise ValueError("member extent exceeds object_size")
 
 
 class IdentityConflictError(ValueError):
