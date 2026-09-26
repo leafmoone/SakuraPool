@@ -1,0 +1,4 @@
+Processing D:\tmp\sakurapool-p2-wheel\sakurapool-0.1.0-py3-none-any.whl
+Collecting pyarrow==18.1.0 (from sakurapool==0.1.0)
+  Using cached pyarrow-18.1.0-cp312-cp312-win_amd64.whl.metadata (3.4 kB)
+Downloading pyarrow-18.1.0-cp312-cp312-win_amd64.whl (25.1 MB)

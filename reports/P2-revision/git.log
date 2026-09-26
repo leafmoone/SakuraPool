@@ -1,0 +1,4 @@
+22bf9fa1947d4bb1aeda2a046591f9f993a51492 fix(index): restore TAR object and physical record contracts
+8e339ad3eda9ae03ace70869c819ef5082cf938e fix(evidence): preserve original validation log bytes
+c705b7603610ca613fe51f01381f5cf9104e4c17 docs(index): record P2 validation evidence and review gaps
+c480253c08b4e4547f9210025ee68f4f5f1a55ad feat(index): build recoverable local TAR shard indexes
