@@ -1,0 +1,5 @@
+package C:\Users\PC\AppData\Local\Temp\sakurapool-clean-wheel-dg0_urd0\venv\Lib\site-packages\sakurapool\__init__.py arrow 25.0.1
+{"archives": 1, "errors": 0, "header_seconds": 0.0002516000531613827, "json_seconds": 6.510003004223108e-05, "objects": 1, "parquet_seconds": 0.01526070002000779, "skipped": 0, "total_seconds": 0.030330899986438453}
+ 
+{"query": {"dataset": "items", "filters": [{"column": "value", "operator": "gte", "value": 3}], "limit": 2, "operation": "select", "select": ["id", "label"]}, "valid": true}
+ 

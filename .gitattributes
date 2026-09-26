@@ -1,0 +1,2 @@
+# Raw validation output must retain exact bytes (including native CRLF and spaces).
+reports/P2/*.log -text -whitespace
