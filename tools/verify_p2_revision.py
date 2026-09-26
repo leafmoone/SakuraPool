@@ -156,10 +156,13 @@ def main():
                 run("wheel-" + name, [str(sakura), *args], cwd=clean, process_env=isolated)
     for name, junit in (("host", OUT / "host-junit.xml"), ("pinned", OUT / "pinned-junit.xml")):
         if junit.exists():
-            suite = ET.parse(junit).getroot()
-            entries.append({"name": name + "-junit-statistics", "tests": int(suite.attrib["tests"]),
-                            "failures": int(suite.attrib.get("failures", 0)),
-                            "errors": int(suite.attrib.get("errors", 0))})
+            root = ET.parse(junit).getroot()
+            suites = [root] if root.tag == "testsuite" else list(root.findall("testsuite"))
+            stats = {
+                key: sum(int(suite.attrib.get(key, 0)) for suite in suites)
+                for key in ("tests", "failures", "errors")
+            }
+            entries.append({"name": name + "-junit-statistics", **stats})
     run("status", ["git", "status", "--short", "--branch"])
     return 1 if any(entry.get("exit", 0) for entry in entries) else 0
 
