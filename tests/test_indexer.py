@@ -42,7 +42,7 @@ def read_rows(output, name):
 CASES = [
     ("A", {"1.jpg": b"one", "1.json": b'{"tags":["a"]}',
            "2.webp": b"two", "2.json": b'{"tags":[]}'}, 2, []),
-    ("B", {"3.jpg": b"three"}, 0, ["missing_metadata"]),
+    ("B", {"3.jpg": b"three"}, 1, ["missing_metadata"]),
     ("C", {"4.json": b"{}"}, 0, ["missing_image"]),
     ("D", {"5.jpg": b"a", "5.webp": b"b", "5.json": b"{}"},
      0, ["ambiguous_image_member"]),
@@ -66,6 +66,11 @@ def test_original_fixtures(tmp_path, case, members, samples, codes):
         1, 1, samples)
     assert len(read_rows(out, "objects")) == 1
     assert sorted(r["code"] for r in read_rows(out, "errors")) == codes
+    if case == "B":
+        missing = read_rows(out, "samples")[0]
+        assert missing["json_path"] is None
+        assert missing["metadata"] is None
+        assert missing["tags_state"] == "missing"
     for name, schema in indexer.SCHEMAS.items():
         assert pq.read_table(next(out.glob(f"*.{name}.parquet"))).schema == schema
     obj = read_rows(out, "objects")[0]
@@ -78,6 +83,9 @@ def test_original_fixtures(tmp_path, case, members, samples, codes):
                 (row["image_path"], row["offset_data"], row["size"]),
                 (row["json_path"], row["json_offset_data"], row["json_size"]),
             ):
+                if member_path is None:
+                    assert offset is None and size is None
+                    continue
                 member = MemberRef(ref, member_path, offset, size)
                 stream.seek(member.offset_data)
                 payload = stream.read(member.size)
@@ -156,6 +164,63 @@ def test_member_offset_re_read_verification():
     archive = SimpleNamespace(fileobj=UnstableFile())
     with pytest.raises(ValueError, match="offset verification failed"):
         indexer._read_member(archive, member)
+
+
+def test_same_path_different_content_changes_object_and_record_ids(tmp_path):
+    first = tmp_path / "first" / "same.tar"
+    second = tmp_path / "second" / "same.tar"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    make_tar(first, {"1.jpg": b"one", "1.json": b"{}"})
+    make_tar(second, {"1.jpg": b"two", "1.json": b"{}"})
+    registry = AdapterRegistry()
+    registry.register(DatasetAdapter("demo", "A"))
+    indexer.scan(first, tmp_path / "first-out", dataset="demo", registry=registry)
+    indexer.scan(second, tmp_path / "second-out", dataset="demo", registry=registry)
+    first_object = read_rows(tmp_path / "first-out", "objects")[0]
+    second_object = read_rows(tmp_path / "second-out", "objects")[0]
+    first_sample = read_rows(tmp_path / "first-out", "samples")[0]
+    second_sample = read_rows(tmp_path / "second-out", "samples")[0]
+    assert first_object["object_id"] != second_object["object_id"]
+    assert first_sample["record_id"] != second_sample["record_id"]
+
+
+def test_four_tables_share_object_and_record_references(tmp_path):
+    source = tmp_path / "a.tar"
+    make_tar(source, {"1.jpg": b"one", "1.json": b'{"tags":["a"]}'})
+    output = tmp_path / "out"
+    indexer.scan(source, output)
+    objects = {(r["dataset_id"], r["object_id"]) for r in read_rows(output, "objects")}
+    for table in ("samples", "annotations", "errors"):
+        assert all((r["dataset_id"], r["object_id"]) in objects for r in read_rows(output, table))
+    samples = {(r["record_id"], r["dataset_id"], r["object_id"], r["sample_path"])
+               for r in read_rows(output, "samples")}
+    assert all((r["record_id"], r["dataset_id"], r["object_id"], r["sample_path"]) in samples
+               for r in read_rows(output, "annotations"))
+    annotations = read_rows(output, "annotations")
+    assert len({(r["record_id"], r["namespace"], r["origin"])
+                for r in annotations}) == len(annotations)
+
+
+def test_bounded_cross_batch_writer_staging(tmp_path, monkeypatch):
+    source = tmp_path / "a.tar"
+    members = {}
+    for index in range(indexer.BATCH_SIZE * 2 + 3):
+        members[f"{index}.jpg"] = b"x"
+        members[f"{index}.json"] = b"{}"
+    make_tar(source, members)
+    output = tmp_path / "out"
+    observed = []
+    original = indexer._table_from_rows
+
+    def observe(rows, schema):
+        observed.append(len(rows))
+        return original(rows, schema)
+
+    monkeypatch.setattr(indexer, "_table_from_rows", observe)
+    result = indexer.scan(source, output)
+    assert result["samples"] == indexer.BATCH_SIZE * 2 + 3
+    assert max(observed) <= indexer.BATCH_SIZE
 
 
 def test_identity_formula_conflict_uint64(tmp_path, monkeypatch):

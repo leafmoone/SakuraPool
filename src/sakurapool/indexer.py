@@ -164,18 +164,24 @@ def _safe(name: str) -> bool:
     )
 
 
+def _object_id(rel: str, validator_sha256: str) -> str:
+    """Bind the logical shard path to its content version."""
+    return f"{rel}@sha256-{validator_sha256}"
+
+
 def _scan_shard(path: Path, rel: str, adapter: DatasetAdapter, hash_images: bool,
                 timings: dict[str, float], validator: dict[str, Any]) -> dict[str, list[dict]]:
     rows: dict[str, list[dict]] = {name: [] for name in SCHEMAS}
+    object_id = _object_id(rel, validator["sha256"])
     rows["objects"].append(dict(
-        dataset_id=adapter.dataset, object_id=rel, source=adapter.source,
+        dataset_id=adapter.dataset, object_id=object_id, source=adapter.source,
         path=rel, size=validator["size"], validator_strength=validator["strength"],
         sha256=validator["sha256"],
     ))
 
     def error(member: str, code: str, detail: str = "") -> None:
         assert code in ERROR_CODES
-        rows["errors"].append(dict(dataset_id=adapter.dataset, object_id=rel,
+        rows["errors"].append(dict(dataset_id=adapter.dataset, object_id=object_id,
                                    source=adapter.source, path=member, code=code, detail=detail))
 
     started = time.perf_counter()
@@ -220,9 +226,9 @@ def _scan_shard(path: Path, rel: str, adapter: DatasetAdapter, hash_images: bool
             if not group:
                 error(key, "missing_image")
                 continue
-            if not jsons and adapter.metadata_required:
+            missing_required_metadata = not jsons and adapter.metadata_required
+            if missing_required_metadata:
                 error(key, "missing_metadata")
-                continue
             post_id = PurePosixPath(key).name
             if not post_id or (adapter.numeric_post_id and not re.fullmatch(r"[0-9]+", post_id)):
                 error(key, "invalid_post_id")
@@ -270,10 +276,10 @@ def _scan_shard(path: Path, rel: str, adapter: DatasetAdapter, hash_images: bool
             if text is not None and not isinstance(text, str):
                 error(meta.name, "metadata_invalid", "invalid text")
                 text = None
-            identity = RecordKey(adapter.dataset, rel, key)
+            identity = RecordKey(adapter.dataset, object_id, key)
             record_id = register_identity(seen, identity)
             identity_fields = dict(record_id=record_id, dataset_id=adapter.dataset,
-                                   object_id=rel, sample_path=key)
+                                   object_id=object_id, sample_path=key)
             rows["samples"].append(dict(
                 **identity_fields, source=adapter.source, post_id=post_id, image_path=image.name,
                 offset_data=image.offset_data, size=image.size,
@@ -291,6 +297,11 @@ def _scan_shard(path: Path, rel: str, adapter: DatasetAdapter, hash_images: bool
     return rows
 
 
+def _table_from_rows(rows: list[dict], schema: pa.Schema) -> pa.Table:
+    """Materialize one bounded Parquet batch, keeping the conversion seam testable."""
+    return pa.Table.from_pylist(rows, schema)
+
+
 def _write_fragments(files: dict[str, Path], rows: dict[str, list[dict]],
                      checkpoint: Callable[[str], None]) -> dict[str, dict]:
     info = {}
@@ -299,16 +310,17 @@ def _write_fragments(files: dict[str, Path], rows: dict[str, list[dict]],
         with partial.open("wb") as stream:
             with pq.ParquetWriter(stream, SCHEMAS[name]) as writer:
                 if name == "samples":
-                    halfway = max(1, len(rows[name]) // 2)
-                    writer.write_table(pa.Table.from_pylist(rows[name][:halfway], SCHEMAS[name]))
+                    first = min(BATCH_SIZE, len(rows[name]))
+                    if first:
+                        writer.write_table(_table_from_rows(rows[name][:first], SCHEMAS[name]))
                     stream.flush()
                     os.fsync(stream.fileno())
                     checkpoint("A")  # samples partial lacks footer and remaining rows
-                    start = halfway
+                    start = first
                 else:
                     start = 0
                 for offset in range(start, len(rows[name]), BATCH_SIZE):
-                    writer.write_table(pa.Table.from_pylist(
+                    writer.write_table(_table_from_rows(
                         rows[name][offset:offset + BATCH_SIZE], SCHEMAS[name]))
             stream.flush()
             os.fsync(stream.fileno())
@@ -358,6 +370,7 @@ def scan(root: Path, output: Path, *, hash_images: bool = False, dataset: str = 
     for path in archives:
         rel = path.relative_to(base).as_posix()
         shard_id = hashlib.sha256(_json([dataset, rel])).hexdigest()
+        object_id = _object_id(rel, validators[rel]["sha256"])
         marker = output / f"{shard_id}.COMMIT"
         expected_markers.add(marker.name)
         files = {name: output / f"{shard_id}.{name}.parquet" for name in SCHEMAS}
@@ -366,7 +379,7 @@ def scan(root: Path, output: Path, *, hash_images: bool = False, dataset: str = 
                 commit = json.loads(marker.read_bytes())
                 if commit["contract_sha256"] != hashlib.sha256(_json(contract)).hexdigest():
                     raise ValueError("contract hash mismatch")
-                if (commit["input"] != validators[rel] or commit["object_id"] != rel
+                if (commit["input"] != validators[rel] or commit["object_id"] != object_id
                         or commit["dataset_id"] != dataset or commit["builder"] != BUILDER
                         or commit["schema"] != FORMAT_VERSION):
                     raise ValueError("commit identity/validator mismatch")
@@ -396,8 +409,9 @@ def scan(root: Path, output: Path, *, hash_images: bool = False, dataset: str = 
             timings["parquet_seconds"] += time.perf_counter() - started_parquet
             if _validator(path) != validators[rel]:
                 raise ValueError("input validator mismatch: input changed during scan")
-            commit = dict(schema=FORMAT_VERSION, builder=BUILDER, dataset_id=dataset, object_id=rel,
-                          created_at=datetime.now(timezone.utc).isoformat(), input=validators[rel],
+            commit = dict(
+                schema=FORMAT_VERSION, builder=BUILDER, dataset_id=dataset, object_id=object_id,
+                created_at=datetime.now(timezone.utc).isoformat(), input=validators[rel],
                           files=info, contract_sha256=hashlib.sha256(_json(contract)).hexdigest())
             _atomic(marker, _json(commit))
             counts["objects_committed"] += 1

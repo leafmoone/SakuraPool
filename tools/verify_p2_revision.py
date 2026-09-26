@@ -107,9 +107,31 @@ def main():
                 timeout=600,
             )
         if code == 0:
-            run("pip-check", [str(python), "-m", "pip", "check"], cwd=clean)
-            run("pinned-pytest", [str(python), "-m", "pytest", "-q", "-rA"])
-            run("pinned-ruff", [str(python), "-m", "ruff", "check", "."])
+            isolated = dict(os.environ)
+            isolated.pop("PYTHONPATH", None)
+            run(
+                "wheel-import",
+                [
+                    str(python),
+                    "-c",
+                    "import pathlib,sakurapool,sys; p=pathlib.Path(sakurapool.__file__).resolve(); "
+                    "assert str(pathlib.Path(sys.prefix)) in str(p), p; assert not any("
+                    f"str(pathlib.Path({str((ROOT / 'src').resolve())!r}).resolve()) "
+                    "== str(pathlib.Path(x).resolve()) for x in sys.path if x)",
+                ],
+                cwd=clean,
+                process_env=isolated,
+            )
+            run("pip-check", [str(python), "-m", "pip", "check"], cwd=clean,
+                process_env=isolated)
+            run(
+                "pinned-pytest",
+                [str(python), "-m", "pytest", "-q", "-rA", str(ROOT / "tests")],
+                cwd=clean,
+                process_env=isolated,
+            )
+            run("pinned-ruff", [str(python), "-m", "ruff", "check", str(ROOT)],
+                cwd=clean, process_env=isolated)
             config = clean / "config.json"
             config.write_text('{"datasets":{"demo":{"source":"A"}}}')
             source = clean / "fixture.tar"
@@ -119,8 +141,6 @@ def main():
                     member.size = len(payload)
                     tar.addfile(member, io.BytesIO(payload))
             sakura = python.parent / ("sakura.exe" if os.name == "nt" else "sakura")
-            isolated = dict(os.environ)
-            isolated.pop("PYTHONPATH", None)
             for name, args in [
                 ("version", ["--version"]),
                 ("config", ["config", "validate", "--config", str(config)]),
