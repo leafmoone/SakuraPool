@@ -13,6 +13,29 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "reports" / "P2-final"
 BASE = "52358d6fca728d2bba12814490e0974a6907b218"
+PINNED_WHEELS = {
+    "pyarrow-18.1.0-cp312-cp312-win_amd64.whl": (
+        "0ad4892617e1a6c7a551cfc827e072a633eaff758fa09f21c4ee548c30bcaf99"
+    ),
+    "ruff-0.9.2-py3-none-win_amd64.whl": (
+        "c5e1d6abc798419cf46eed03f54f2e0c3adb1ad4b801119dedf23fcaf69b55b5"
+    ),
+}
+
+
+def _wheelhouse_args() -> list[str]:
+    configured = os.environ.get("SAKURAPOOL_WHEELHOUSE")
+    if not configured:
+        return []
+    root = Path(configured).resolve()
+    paths = []
+    for name, expected in PINNED_WHEELS.items():
+        path = root / name
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if actual != expected:
+            raise ValueError(f"wheelhouse hash mismatch: {name}: {actual}")
+        paths.append(str(path))
+    return paths
 
 
 def main():
@@ -66,9 +89,23 @@ def main():
         python = venv / "Scripts" / "python.exe" if os.name == "nt" else venv / "bin" / "python"
         wheel = wheel_dir / "sakurapool-0.1.0-py3-none-any.whl"
         if code == 0:
-            code = run("wheel-install", ["uv", "pip", "install", "--python", str(python),
-                       str(wheel), "pip", "pytest==8.3.4", "ruff==0.9.2", "build==1.2.2.post1"],
-                       timeout=600)
+            code = run(
+                "wheel-install",
+                [
+                    "uv",
+                    "pip",
+                    "install",
+                    "--python",
+                    str(python),
+                    str(wheel),
+                    *_wheelhouse_args(),
+                    "pip",
+                    "pytest==8.3.4",
+                    "ruff==0.9.2",
+                    "build==1.2.2.post1",
+                ],
+                timeout=600,
+            )
         if code == 0:
             run("pip-check", [str(python), "-m", "pip", "check"], cwd=clean)
             run("pinned-pytest", [str(python), "-m", "pytest", "-q", "-rA"])
