@@ -151,6 +151,10 @@ def _read_member(archive: tarfile.TarFile, member: tarfile.TarInfo) -> bytes:
     data = archive.fileobj.read(member.size)
     if len(data) != member.size:
         raise ValueError(f"short read for {member.name}")
+    archive.fileobj.seek(member.offset_data)
+    verified = archive.fileobj.read(member.size)
+    if verified != data:
+        raise ValueError(f"offset verification failed for {member.name}")
     return data
 
 

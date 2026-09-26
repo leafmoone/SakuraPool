@@ -11,14 +11,19 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / "reports" / "P2-revision-final"
+OUT = ROOT / "reports" / "P2-final"
 BASE = "52358d6fca728d2bba12814490e0974a6907b218"
 
 
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     entries = []
-    env = dict(os.environ, PYTHONPATH=str(ROOT / "src"), UV_HTTP_TIMEOUT="15", UV_HTTP_RETRIES="0")
+    env = dict(
+        os.environ,
+        PYTHONPATH=str(ROOT / "src"),
+        UV_HTTP_TIMEOUT="120",
+        UV_HTTP_RETRIES="2",
+    )
 
     def run(name, argv, cwd=ROOT, timeout=150, process_env=env):
         process = subprocess.Popen(argv, cwd=cwd, env=process_env, stdout=subprocess.PIPE,
@@ -63,7 +68,7 @@ def main():
         if code == 0:
             code = run("wheel-install", ["uv", "pip", "install", "--python", str(python),
                        str(wheel), "pip", "pytest==8.3.4", "ruff==0.9.2", "build==1.2.2.post1"],
-                       timeout=90)
+                       timeout=600)
         if code == 0:
             run("pip-check", [str(python), "-m", "pip", "check"], cwd=clean)
             run("pinned-pytest", [str(python), "-m", "pytest", "-q", "-rA"])

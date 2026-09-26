@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tarfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -134,6 +135,27 @@ def test_compressed_disguised(tmp_path, mode):
         pass
     with pytest.raises(indexer.UnsupportedArchiveError):
         indexer.scan(source, tmp_path / "out")
+
+
+def test_member_offset_re_read_verification():
+    class UnstableFile:
+        def __init__(self):
+            self.reads = 0
+
+        def seek(self, offset):
+            assert offset == 512
+
+        def read(self, size):
+            assert size == 3
+            self.reads += 1
+            return b"one" if self.reads == 1 else b"two"
+
+    member = tarfile.TarInfo("1.jpg")
+    member.offset_data = 512
+    member.size = 3
+    archive = SimpleNamespace(fileobj=UnstableFile())
+    with pytest.raises(ValueError, match="offset verification failed"):
+        indexer._read_member(archive, member)
 
 
 def test_identity_formula_conflict_uint64(tmp_path, monkeypatch):
