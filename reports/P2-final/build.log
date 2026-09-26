@@ -1,0 +1,71 @@
+* Creating isolated environment: venv+pip...
+* Installing packages in isolated environment:
+  - setuptools==75.6.0
+* Getting build dependencies for wheel...
+running egg_info
+writing src\sakurapool.egg-info\PKG-INFO
+writing dependency_links to src\sakurapool.egg-info\dependency_links.txt
+writing entry points to src\sakurapool.egg-info\entry_points.txt
+writing requirements to src\sakurapool.egg-info\requires.txt
+writing top-level names to src\sakurapool.egg-info\top_level.txt
+reading manifest file 'src\sakurapool.egg-info\SOURCES.txt'
+writing manifest file 'src\sakurapool.egg-info\SOURCES.txt'
+* Building wheel...
+running bdist_wheel
+running build
+running build_py
+copying src\sakurapool\cli.py -> build\lib\sakurapool
+copying src\sakurapool\evaluator.py -> build\lib\sakurapool
+copying src\sakurapool\indexer.py -> build\lib\sakurapool
+copying src\sakurapool\models.py -> build\lib\sakurapool
+copying src\sakurapool\query.py -> build\lib\sakurapool
+copying src\sakurapool\records.py -> build\lib\sakurapool
+copying src\sakurapool\registry.py -> build\lib\sakurapool
+copying src\sakurapool\schema.py -> build\lib\sakurapool
+copying src\sakurapool\__init__.py -> build\lib\sakurapool
+copying src\sakurapool\__main__.py -> build\lib\sakurapool
+running egg_info
+writing src\sakurapool.egg-info\PKG-INFO
+writing dependency_links to src\sakurapool.egg-info\dependency_links.txt
+writing entry points to src\sakurapool.egg-info\entry_points.txt
+writing requirements to src\sakurapool.egg-info\requires.txt
+writing top-level names to src\sakurapool.egg-info\top_level.txt
+reading manifest file 'src\sakurapool.egg-info\SOURCES.txt'
+writing manifest file 'src\sakurapool.egg-info\SOURCES.txt'
+installing to build\bdist.win-amd64\wheel
+running install
+running install_lib
+creating build\bdist.win-amd64\wheel
+creating build\bdist.win-amd64\wheel\sakurapool
+copying build\lib\sakurapool\cli.py -> build\bdist.win-amd64\wheel\.\sakurapool
+copying build\lib\sakurapool\evaluator.py -> build\bdist.win-amd64\wheel\.\sakurapool
+copying build\lib\sakurapool\indexer.py -> build\bdist.win-amd64\wheel\.\sakurapool
+copying build\lib\sakurapool\models.py -> build\bdist.win-amd64\wheel\.\sakurapool
+copying build\lib\sakurapool\query.py -> build\bdist.win-amd64\wheel\.\sakurapool
+copying build\lib\sakurapool\records.py -> build\bdist.win-amd64\wheel\.\sakurapool
+copying build\lib\sakurapool\registry.py -> build\bdist.win-amd64\wheel\.\sakurapool
+copying build\lib\sakurapool\schema.py -> build\bdist.win-amd64\wheel\.\sakurapool
+copying build\lib\sakurapool\__init__.py -> build\bdist.win-amd64\wheel\.\sakurapool
+copying build\lib\sakurapool\__main__.py -> build\bdist.win-amd64\wheel\.\sakurapool
+running install_egg_info
+Copying src\sakurapool.egg-info to build\bdist.win-amd64\wheel\.\sakurapool-0.1.0-py3.14.egg-info
+running install_scripts
+creating build\bdist.win-amd64\wheel\sakurapool-0.1.0.dist-info\WHEEL
+creating 'D:\tmp\sakurapool-p2-wheel\.tmp-agr91i5s\sakurapool-0.1.0-py3-none-any.whl' and adding 'build\bdist.win-amd64\wheel' to it
+adding 'sakurapool/__init__.py'
+adding 'sakurapool/__main__.py'
+adding 'sakurapool/cli.py'
+adding 'sakurapool/evaluator.py'
+adding 'sakurapool/indexer.py'
+adding 'sakurapool/models.py'
+adding 'sakurapool/query.py'
+adding 'sakurapool/records.py'
+adding 'sakurapool/registry.py'
+adding 'sakurapool/schema.py'
+adding 'sakurapool-0.1.0.dist-info/METADATA'
+adding 'sakurapool-0.1.0.dist-info/WHEEL'
+adding 'sakurapool-0.1.0.dist-info/entry_points.txt'
+adding 'sakurapool-0.1.0.dist-info/top_level.txt'
+adding 'sakurapool-0.1.0.dist-info/RECORD'
+removing build\bdist.win-amd64\wheel
+Successfully built sakurapool-0.1.0-py3-none-any.whl

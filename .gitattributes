@@ -2,3 +2,4 @@
 reports/P2/*.log -text -whitespace
 reports/P2-revision/*.log -text -whitespace
 reports/P2-revision-final/*.log -text -whitespace
+reports/P2-final/*.log -text -whitespace
