@@ -302,6 +302,23 @@ def _table_from_rows(rows: list[dict], schema: pa.Schema) -> pa.Table:
     return pa.Table.from_pylist(rows, schema)
 
 
+def _validate_references(rows: dict[str, list[dict]]) -> None:
+    objects = {(row["dataset_id"], row["object_id"]) for row in rows["objects"]}
+    for name in ("samples", "annotations", "errors"):
+        if any((row["dataset_id"], row["object_id"]) not in objects for row in rows[name]):
+            raise ValueError(f"{name} contains an ObjectRef outside objects")
+    samples = {
+        (row["record_id"], row["dataset_id"], row["object_id"], row["sample_path"])
+        for row in rows["samples"]
+    }
+    if any(
+        (row["record_id"], row["dataset_id"], row["object_id"], row["sample_path"])
+        not in samples
+        for row in rows["annotations"]
+    ):
+        raise ValueError("annotations contains a RecordKey outside samples")
+
+
 def _write_fragments(files: dict[str, Path], rows: dict[str, list[dict]],
                      checkpoint: Callable[[str], None]) -> dict[str, dict]:
     info = {}
@@ -404,6 +421,7 @@ def scan(root: Path, output: Path, *, hash_images: bool = False, dataset: str = 
                 if partial.exists():
                     partial.unlink()
             rows = _scan_shard(path, rel, adapter, hash_images, timings, validators[rel])
+            _validate_references(rows)
             started_parquet = time.perf_counter()
             info = _write_fragments(files, rows, checkpoint)
             timings["parquet_seconds"] += time.perf_counter() - started_parquet

@@ -167,20 +167,19 @@ def test_member_offset_re_read_verification():
 
 
 def test_same_path_different_content_changes_object_and_record_ids(tmp_path):
-    first = tmp_path / "first" / "same.tar"
-    second = tmp_path / "second" / "same.tar"
-    first.parent.mkdir()
-    second.parent.mkdir()
-    make_tar(first, {"1.jpg": b"one", "1.json": b"{}"})
-    make_tar(second, {"1.jpg": b"two", "1.json": b"{}"})
+    source = tmp_path / "same.tar"
+    first_out = tmp_path / "first-out"
+    second_out = tmp_path / "second-out"
+    make_tar(source, {"1.jpg": b"one", "1.json": b"{}"})
     registry = AdapterRegistry()
     registry.register(DatasetAdapter("demo", "A"))
-    indexer.scan(first, tmp_path / "first-out", dataset="demo", registry=registry)
-    indexer.scan(second, tmp_path / "second-out", dataset="demo", registry=registry)
-    first_object = read_rows(tmp_path / "first-out", "objects")[0]
-    second_object = read_rows(tmp_path / "second-out", "objects")[0]
-    first_sample = read_rows(tmp_path / "first-out", "samples")[0]
-    second_sample = read_rows(tmp_path / "second-out", "samples")[0]
+    indexer.scan(source, first_out, dataset="demo", registry=registry)
+    make_tar(source, {"1.jpg": b"two", "1.json": b"{}"})
+    indexer.scan(source, second_out, dataset="demo", registry=registry)
+    first_object = read_rows(first_out, "objects")[0]
+    second_object = read_rows(second_out, "objects")[0]
+    first_sample = read_rows(first_out, "samples")[0]
+    second_sample = read_rows(second_out, "samples")[0]
     assert first_object["object_id"] != second_object["object_id"]
     assert first_sample["record_id"] != second_sample["record_id"]
 
