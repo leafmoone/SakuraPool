@@ -1,0 +1,8 @@
+Python 3.12.13
+No broken requirements found.
+numpy==2.2.6
+pip==26.2.1
+pyarrow==18.1.0
+pyroaring==1.1.0
+cli-help-rc=0
+154 passed in 16.76s

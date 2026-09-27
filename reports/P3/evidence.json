@@ -1,0 +1,113 @@
+{
+ "base": "6c45548e01b0856d6d4bbce18e240be0b22ae7e7",
+ "base_note": "P2 final == main == origin main (root-confirmed; earlier report wrongly cited P1 52358d6f)",
+ "benchmark": {
+  "file": "benchmark.json",
+  "memory_growth_5m_over_1m": 1.76,
+  "raw_log": "raw/bench-final.log",
+  "run_bound": "each phase JSON carries run_id = sha256(runtime source tree + bench options); stale trees re-run",
+  "scales": {
+   "100k": {
+    "compile_peak_rss_bytes": 154816512,
+    "compile_peak_temp_bytes": 41026020,
+    "compile_wall_s": 2.317,
+    "diff_mismatches": 0,
+    "gates": {
+     "note": "gates apply at 5M scale only"
+    },
+    "locations100k": {
+     "rows": 50000,
+     "s": 0.003
+    },
+    "query_open_s": 0.001,
+    "query_peak_rss_bytes": 55513088
+   },
+   "1M": {
+    "compile_peak_rss_bytes": 221904896,
+    "compile_peak_temp_bytes": 414408255,
+    "compile_wall_s": 51.158,
+    "diff_mismatches": null,
+    "gates": {
+     "note": "gates apply at 5M scale only"
+    },
+    "locations100k": {
+     "rows": 100000,
+     "s": 0.007
+    },
+    "query_open_s": 0.001,
+    "query_peak_rss_bytes": 76627968
+   },
+   "5M": {
+    "compile_peak_rss_bytes": 390856704,
+    "compile_peak_temp_bytes": 2088730157,
+    "compile_wall_s": 315.031,
+    "diff_mismatches": null,
+    "gates": {
+     "cache_resident_bounded": true,
+     "first128_e2e_p95_500ms": true,
+     "locations100k_reported": true,
+     "ten_k_1s": true,
+     "warm_count_p95_200ms": true
+    },
+    "locations100k": {
+     "rows": 100000,
+     "s": 0.007
+    },
+    "query_open_s": 0.001,
+    "query_peak_rss_bytes": 159080448
+   }
+  }
+ },
+ "corrections": [
+  "fingerprint never included COMMIT.created_at (code was correct; old report wrong; now pinned by test)",
+  "query CLI existed; --index/--snapshot/--spec/--full + JSON any_of added",
+  "BASE is 6c45548e (P2 final), not 52358d6f (P1)",
+  "5M peak RSS 795MiB was pre-remediation (whole-file hashing); final tree is 372MiB"
+ ],
+ "implementation_commits": [
+  "8aaa2998330d74ca576c0e56a1629f499e23c83a",
+  "d1852ea105c7e876bc5bb75d9c82831a1806b995",
+  "6ee1841315c5f871445b86f62a0c828b6967b2d0",
+  "ea65bf27acc3fac450e86f9c0da30552c5e4d27e",
+  "27939cbfb74a6b68ef9fb0252dd4e07cc6c111d7",
+  "9d05e02c8434ebac4676f56566135accfedcbde9",
+  "9e62fd6b3b54eaebb906b9e5d484b7f1df316e13"
+ ],
+ "item_map": {
+  "A": "tests/test_runtime_remediation.py::test_locations_payload_tamper_only_full_verify, ::test_whole_file_swap_same_shape_rejected, ::test_explicit_snapshot_dir_open, ::test_keyword_query_entry_and_len_and_object_ref",
+  "B": "::test_ready_reuse_validated_and_current_repaired, ::test_staging_ownership_respected + existing crash/resume suite",
+  "C": "::test_streaming_hash_parity + 5M query RSS 152MiB in benchmark.json",
+  "D": "::test_byte_lru_oversized_and_budget, ::test_byte_lru_32mib_real_eviction, ::test_default_cache_budget_is_256mib",
+  "E": "::test_bare_unknown_namespace_errors, ::test_record_batches_carry_names, ::test_planner_short_circuits_on_stored_cardinality, ::test_keyword_query_entry_and_len_and_object_ref",
+  "F": "::test_cli_spec_and_flags, ::test_created_at_does_not_change_snapshot_id",
+  "G": "::test_inventory_rejects_stray_files, ::test_inventory_rejects_row_ownership_violation, ::test_synthetic_p2_follows_real_contract",
+  "H": "::test_uint64_offsets_and_metadata_presence",
+  "I": "benchmark.json (e2e gate, per-family cold cache, 10k cap, run fingerprint, locations100k)",
+  "J": "tests-3.12.log, raw/venv312.txt, reports/P3 committed with hashes.sha256"
+ },
+ "pinned_env": {
+  "cli": "compile rc=0, query rc=0, --spec/--full rc=0 (raw/venv312.txt)",
+  "pins": {
+   "numpy": "2.2.6",
+   "pyarrow": "18.1.0",
+   "pyroaring": "1.1.0"
+  },
+  "pip_check": "No broken requirements found (exit 0)",
+  "python": "3.12.13",
+  "tool": "uv venv + uv pip install -e . (normal wheel installs, not --no-deps)"
+ },
+ "ruff": "All checks passed (exit 0)",
+ "tests": {
+  "host_3.14": {
+   "exit_code": 0,
+   "failed": 0,
+   "passed": 154
+  },
+  "pinned_3.12.13": {
+   "exit_code": 0,
+   "failed": 0,
+   "log": "tests-3.12.log",
+   "passed": 154
+  }
+ }
+}
