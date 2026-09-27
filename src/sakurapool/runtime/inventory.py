@@ -62,6 +62,41 @@ class P2Inventory:
         return tuple(fragment for obj in self.objects for fragment in obj.fragments)
 
 
+def combine_inventories(inventories: list[P2Inventory]) -> P2Inventory:
+    """Merge multiple committed P2 indexes into one P3 compile input.
+
+    Object and dataset names must be unique across inputs; the combined
+    fingerprint hashes the per-directory fingerprints in input order.
+    """
+    if not inventories:
+        _fail("no P2 inputs provided")
+    if len(inventories) == 1:
+        return inventories[0]
+    objects = []
+    seen = set()
+    datasets = set()
+    for inventory in inventories:
+        for dataset in {obj.dataset_id for obj in inventory.objects}:
+            if dataset in datasets:
+                _fail(f"duplicate dataset name across inputs: {dataset}")
+            datasets.add(dataset)
+        for obj in inventory.objects:
+            key = (obj.dataset_id, obj.object_id)
+            if key in seen:
+                _fail(f"duplicate object across inputs: {obj.object_id}")
+            seen.add(key)
+            objects.append(obj)
+    fingerprint = hashlib.sha256(
+        _json(sorted(inventory.source_fingerprint for inventory in inventories))
+    ).hexdigest()
+    return P2Inventory(
+        root=inventories[0].root,
+        contract=dict(inventories[0].contract),
+        objects=tuple(objects),
+        source_fingerprint=fingerprint,
+    )
+
+
 def _fail(message: str) -> NoReturn:
     raise CorruptInputError(message)
 
