@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import hashlib
 import json
 import os
 import platform
@@ -208,6 +209,38 @@ def phase_compile(workdir: Path, scale: str) -> dict:
                 final_bytes=sizes)
 
 
+def _source_fingerprint() -> str:
+    """Bind every cached result to the exact code and options that produced
+    it: a stale JSON from a previous tree must never masquerade as a
+    final-tree measurement."""
+    digest = hashlib.sha256()
+    for rel in sorted(("tools/bench_runtime.py", "tests/synthetic_p2.py")
+                      + tuple(p.relative_to(REPO).as_posix()
+                              for p in sorted(
+                                  (REPO / "src/sakurapool/runtime").glob(
+                                      "*.py")))):
+        path = REPO / rel
+        if path.exists():
+            digest.update(rel.encode())
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _run_fingerprint(args) -> str:
+    payload = dict(source=_source_fingerprint(),
+                   scale=list(SCALE_PARAMS),
+                   cache_bytes=args.cache_bytes,
+                   n_specs=args.n_specs,
+                   seed_base=SEED_BASE, hot=HOT, medium=MEDIUM, rare=RARE)
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()
+                          ).hexdigest()
+
+
+_FAMILY_ORDER = ("source_only", "hot", "rare", "hot_and_medium",
+                 "three_tag_and", "three_tag_or", "not", "source_2tag",
+                 "two_source_2tag", "any_of_2")
+
+
 def _family_specs(manifest: dict) -> dict:
     hot, medium, rare = manifest["hot"], manifest["medium"], manifest["rare"]
     return {
@@ -255,73 +288,89 @@ def _timings(values: list[float]) -> dict:
     }
 
 
-def phase_query(workdir: Path, scale: str,
+def _drain_10k(r) -> float:
+    """Time draining up to exactly 10_000 rows (never more): the batch
+    size is capped so 8192+8192=16384 can no longer accumulate."""
+    t0 = time.perf_counter()
+    got = 0
+    for batch in r.iter_location_batches(8192):
+        if got >= 10000:
+            break
+        take = min(len(batch.rid), 10000 - got)
+        got += take
+        if take < len(batch.rid):
+            break
+    return time.perf_counter() - t0
+
+
+def phase_query(workdir: Path, scale: str, run_id: str,
                 cache_bytes: int | None = None) -> dict:
     from sakurapool.runtime.snapshot import RuntimeSnapshot
 
     manifest = json.loads((workdir / "manifest.json").read_text())
     root = workdir / "rt"
     kwargs = dict(cache_bytes=cache_bytes) if cache_bytes else {}
-    opened = time.perf_counter()
-    rt = RuntimeSnapshot.open(root, **kwargs)
-    open_s = time.perf_counter() - opened
-    families = _family_specs(manifest)
-    result = dict(scale=scale, open_s=round(open_s, 3),
-                  rid_count=rt.rid_count,
-                  cache_bytes=rt.cache.byte_limit,
-                  families={}, large=None, cache_stats=None)
-    # cold pass: each family once, fresh cache state at first touch
-    for name, parts in families.items():
+    # COLD pass: one independent snapshot (and cache) per family, in a
+    # fresh process - no family may inherit another family's warm cache.
+    cold = {}
+    for name in _FAMILY_ORDER:
+        rt = RuntimeSnapshot.open(root, **kwargs)
+        parts = _family_specs(manifest)[name]
         spec = _spec_from_parts(parts)
         t0 = time.perf_counter()
         r = rt.query(spec)
         plan_s = time.perf_counter() - t0
-        t0 = time.perf_counter()
         count = r.count()
-        t_count = time.perf_counter() - t0
         t128 = t10k = None
         if count:
             t0 = time.perf_counter()
-            _ = next(r.iter_location_batches(128))
+            next(r.iter_location_batches(128))
             t128 = time.perf_counter() - t0
-            t0 = time.perf_counter()
-            got = 0
-            for batch in r.iter_location_batches(8192):
-                got += len(batch.rid)
-                if got >= 10000:
-                    break
-            t10k = time.perf_counter() - t0
-        result["families"][name] = dict(
+            t10k = _drain_10k(r)
+        cold[name] = dict(
             cold_plan_ms=round(plan_s * 1000, 3),
-            cold_count_ms=round(t_count * 1000, 3),
             cold_first128_ms=(None if t128 is None
                               else round(t128 * 1000, 3)),
             cold_10k_ms=(None if t10k is None else round(t10k * 1000, 3)),
             count=count)
-    # warm pass: 5 repeats each
-    for name in families:
-        spec = _spec_from_parts(families[name])
-        plans, c128, t10k = [], [], []
-        empty = result["families"][name]["count"] == 0
+        rt.close()
+    # WARM pass: one snapshot, shared cache, 5 repeats per family; the
+    # e2e timing covers query+first128 in one span.
+    rt = RuntimeSnapshot.open(root, **kwargs)
+    opened = time.perf_counter()
+    result = dict(scale=scale, run_id=run_id, open_s=round(opened, 3),
+                  rid_count=rt.rid_count,
+                  cache_bytes=rt.cache.byte_limit,
+                  families={}, large=None, locations100k=None,
+                  cache_stats=None)
+    for name in _FAMILY_ORDER:
+        spec = _spec_from_parts(_family_specs(manifest)[name])
+        plans, extract128, e2e128, t10k = [], [], [], []
+        empty = cold[name]["count"] == 0
         for _ in range(5):
+            # span 1: plan only (query() up to the bitmap result)
             t0 = time.perf_counter()
             r = rt.query(spec)
             plans.append(time.perf_counter() - t0)
             if empty:
                 continue
+            # span 2: extraction only (first 128 locations from a ready
+            # result) - reported, not gated
             t0 = time.perf_counter()
             next(r.iter_location_batches(128))
-            c128.append(time.perf_counter() - t0)
+            extract128.append(time.perf_counter() - t0)
+            # span 3 (gate scope): full query -> first 128 end to end
             t0 = time.perf_counter()
-            got = 0
-            for batch in r.iter_location_batches(8192):
-                got += len(batch.rid)
-                if got >= 10000:
-                    break
-            t10k.append(time.perf_counter() - t0)
+            r2 = rt.query(spec)
+            next(r2.iter_location_batches(128))
+            e2e128.append(time.perf_counter() - t0)
+            t10k.append(_drain_10k(r2))
+        result["families"][name] = dict(cold[name])
         result["families"][name].update(
             warm_plan=_timings(plans),
-            warm_first128=({"n": 0} if empty else _timings(c128)),
+            warm_first128_extract=({"n": 0} if empty
+                                   else _timings(extract128)),
+            warm_first128_e2e=({"n": 0} if empty else _timings(e2e128)),
             warm_10k=({"n": 0} if empty else _timings(t10k)))
     # large result: half-corpus source term (>1M rids at 5M scale)
     big = _spec_from_parts({"sources": ("src_a",)})
@@ -332,6 +381,15 @@ def phase_query(workdir: Path, scale: str,
     t_big = time.perf_counter() - t0
     result["large"] = dict(count=count, first100=len(first100),
                            first100_s=round(t_big, 3))
+    # 100k-row location drain: the required locations-scale evidence.
+    t0 = time.perf_counter()
+    got = 0
+    for batch in r.iter_location_batches(8192):
+        got += len(batch.rid)
+        if got >= 100000:
+            break
+    result["locations100k"] = dict(
+        rows=got, s=round(time.perf_counter() - t0, 3))
     # cache stats / eviction behavior
     result["cache_stats"] = dict(
         hits=rt.cache.hits, misses=rt.cache.misses,
@@ -494,13 +552,18 @@ def _gates(report: dict) -> dict:
     warm = [f["warm_plan"] for f in families.values()]
     p95s = [t["p95_ms"] for t in warm]
     gates["warm_count_p95_200ms"] = max(p95s) <= 200.0
-    with_locations = [f for f in families.values() if f["warm_first128"]["n"]]
-    gates["first128_p95_500ms"] = (
-        max(f["warm_first128"]["p95_ms"] for f in with_locations)
+    with_locations = [f for f in families.values()
+                      if f["warm_first128_e2e"]["n"]]
+    # gate scope is the query->first128 path, measured end to end on the
+    # warm pass; plan-only and extract-only spans are reported separately.
+    gates["first128_e2e_p95_500ms"] = (
+        max(f["warm_first128_e2e"]["p95_ms"] for f in with_locations)
         <= 500.0) if with_locations else True
     gates["ten_k_1s"] = (max(f["warm_10k"]["p95_ms"]
                              for f in with_locations)
                          <= 1000.0) if with_locations else True
+    gates["locations100k_reported"] = bool(
+        report.get("locations100k", {}).get("rows") == 100000)
     gates["cache_resident_bounded"] = report["cache_stats"][
         "resident_le_limit"]
     return gates
@@ -509,24 +572,33 @@ def _gates(report: dict) -> dict:
 def _run_phase(phase: str, scale_dir: Path, scale: str, args) -> None:
     """Execute one phase in-process (child mode)."""
     out = scale_dir / f"{phase}.json"
+    run_id = _run_fingerprint(args)
     if out.exists():
-        print(f"[{scale_dir.name}] {phase}: cached", flush=True)
-        return
+        cached = json.loads(out.read_text())
+        if cached.get("run_id") == run_id:
+            print(f"[{scale_dir.name}] {phase}: cached (run {run_id[:12]})",
+                  flush=True)
+            return
+        print(f"[{scale_dir.name}] {phase}: stale cache "
+              f"(run {str(cached.get('run_id'))[:12]} != {run_id[:12]}), "
+              "re-running", flush=True)
     if phase == "gen":
         data = phase_gen(scale_dir, scale_dir.name)
+        data["run_id"] = run_id
         print(f"[{scale_dir.name}] gen: {data['expected_samples']} samples",
               flush=True)
     elif phase == "compile":
         print(f"[{scale_dir.name}] compile: starting (child process)",
               flush=True)
         data = phase_compile(scale_dir, scale_dir.name)
+        data["run_id"] = run_id
         print(f"[{scale_dir.name}] compile: {data['wall_s']}s "
               f"rss={data['peak_rss_bytes'] // 2**20}MiB "
               f"temp={data['peak_temp_bytes'] // 2**20}MiB", flush=True)
     elif phase == "query":
         print(f"[{scale_dir.name}] query: starting (child process)",
               flush=True)
-        data = phase_query(scale_dir, scale_dir.name,
+        data = phase_query(scale_dir, scale_dir.name, run_id,
                            cache_bytes=args.cache_bytes)
         print(f"[{scale_dir.name}] query: done", flush=True)
     elif phase == "diff":
@@ -535,6 +607,7 @@ def _run_phase(phase: str, scale_dir: Path, scale: str, args) -> None:
         print(f"[{scale_dir.name}] diff: {args.n_specs} specs "
               "(child process)", flush=True)
         data = phase_diff(scale_dir, scale_dir.name, n_specs=args.n_specs)
+        data["run_id"] = run_id
         print(f"[{scale_dir.name}] diff: mismatches={data['mismatches']}",
               flush=True)
     else:

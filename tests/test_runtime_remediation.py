@@ -252,6 +252,34 @@ def test_byte_lru_oversized_and_budget(tmp_path):
     assert lru.get(("tag", 3)) == b"456"
 
 
+def test_byte_lru_32mib_real_eviction():
+    """D: real 32 MiB budget with 48 evictions of 1 MiB blobs - the
+    1 MiB demo does not substitute for this."""
+    from sakurapool.runtime.snapshot import ByteLRU
+
+    lru = ByteLRU(32 << 20)
+    blob = b"x" * (1 << 20)
+    for i in range(80):
+        lru.put(("tag", i), bytes((i,)) * (1 << 20))
+        assert lru.resident_bytes() <= 32 << 20
+    assert lru.evictions == 48
+    assert lru.resident_bytes() == 32 << 20
+    # oldest evicted, newest retained
+    assert lru.get(("tag", 0)) is None
+    assert lru.get(("tag", 79)) == bytes((79,)) * (1 << 20)
+    del blob
+
+
+def test_default_cache_budget_is_256mib(tmp_path):
+    """D: the default open() cache budget stays 256 MiB."""
+    summary, root = _compile_synthetic(tmp_path, "cache256", [
+        ObjectSpec("a.tar", [SampleSpec("1.jpg", "1", [("t", None)])])
+    ])
+    from sakurapool.runtime import RuntimeSnapshot
+    with RuntimeSnapshot.open(root) as rt:
+        assert rt.cache.byte_limit == 256 * 1024 * 1024
+
+
 def test_streaming_hash_parity(tmp_path):
     """C: the streaming hash helper equals hashlib.sha256 over the file
     and never needs the whole file in Python memory."""
