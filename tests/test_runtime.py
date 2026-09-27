@@ -632,6 +632,52 @@ def test_fresh_process_open_and_query(tmp_path):
     assert result["cache_misses"] >= 1
 
 
+def test_catalog_query_plans_use_indexes(tmp_path):
+    """EXPLAIN QUERY PLAN: every runtime catalog lookup must use an index."""
+    from synthetic_p2 import ObjectSpec, SampleSpec, build_p2_directory
+
+    idx = tmp_path / "p2"
+    build_p2_directory(idx, dataset="ds", source="src", objects=[
+        ObjectSpec("a.tar", [SampleSpec(f"{i}.jpg", str(i),
+                                         [(f"t{i % 7}", None)])
+                                    for i in range(20)]),
+        ObjectSpec("b.tar", [SampleSpec(f"{i}.jpg", str(i),
+                                         [(f"t{i % 5}", None)])
+                                    for i in range(20)],
+                  namespace="danbooru"),
+    ], created_at="2025-01-01T00:00:00+00:00")
+    import sakurapool.runtime.compiler as compiler
+    summary = compiler.compile_runtime(load_p2_inventory(idx),
+                                       tmp_path / "rt")
+    import sqlite3
+    con = sqlite3.connect(str(summary.path / "catalog.sqlite"))
+    plans = {
+        "namespace": ("SELECT namespace_id FROM namespaces WHERE namespace = ?",
+                      ("x",)),
+        "tag": ("SELECT t.tag_id FROM tags t JOIN namespaces n "
+                "ON n.namespace_id = t.namespace_id WHERE n.namespace = ? "
+                "AND t.value = ?", ("x", "y")),
+        "source": ("SELECT source_id FROM sources WHERE name = ?", ("x",)),
+        "dataset": ("SELECT dataset_id FROM datasets WHERE name = ?", ("x",)),
+        "records_source_post": ("SELECT rid FROM records WHERE source_id = ? "
+                                "AND post_id = ? ORDER BY rid", (0, "p")),
+        "records_dataset_post": ("SELECT rid FROM records WHERE source_id = ? "
+                                 "AND post_id = ? AND dataset_id = ? "
+                                 "ORDER BY rid", (0, "p", 0)),
+        "record_by_rid": ("SELECT record_id, source_id, dataset_id, post_id "
+                          "FROM records WHERE rid = ?", (0,)),
+        "records_batch": ("SELECT rid, record_id, source_id, dataset_id, "
+                          "post_id FROM records WHERE rid IN (?,?,?) "
+                          "ORDER BY rid", (0, 1, 2)),
+    }
+    for name, (sql, params) in plans.items():
+        rows = con.execute("EXPLAIN QUERY PLAN " + sql, params).fetchall()
+        text = "\n".join(row[3] for row in rows)
+        assert "SCAN" not in text, f"{name}: full scan detected:\n{text}"
+        assert "USING" in text, f"{name}: no index used:\n{text}"
+    con.close()
+
+
 def test_not_semantics_states(tmp_path):
     """§43: NOT monochrome excludes only known-with-monochrome."""
     from synthetic_p2 import ObjectSpec, SampleSpec, build_p2_directory
