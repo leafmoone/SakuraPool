@@ -7,7 +7,6 @@ import json
 import os
 import re
 import sqlite3
-import sys
 import tarfile
 import tempfile
 import time
@@ -105,7 +104,26 @@ class _TableProxy:
         self.owner.append(self.name, row)
 
 
-_ACTIVE_SPOOLS: dict[Path, sqlite3.Connection | None] = {}
+class _SpoolState:
+    def __init__(self, path: Path, handle) -> None:
+        self.path, self.handle, self.db = path, handle, None
+
+
+class _SpoolScope:
+    def __init__(self) -> None:
+        self.resources: set[_SpoolState] = set()
+
+    def add(self, resource: _SpoolState) -> None:
+        self.resources.add(resource)
+
+    def discard(self, resource: _SpoolState) -> None:
+        self.resources.discard(resource)
+
+    def cleanup(self) -> list[BaseException]:
+        errors = []
+        for resource in list(self.resources):
+            errors.extend(_release_spool(resource))
+        return errors
 
 
 def _remove_spool_files(path: Path) -> list[BaseException]:
@@ -119,30 +137,40 @@ def _remove_spool_files(path: Path) -> list[BaseException]:
     return errors
 
 
-def _release_spool(path: Path, db: sqlite3.Connection | None) -> list[BaseException]:
+def _release_spool(resource: _SpoolState) -> list[BaseException]:
     errors = []
-    if db is not None:
+    if resource.db is not None:
         try:
-            db.close()
+            resource.db.close()
         except BaseException as exc:
             errors.append(exc)
-    errors.extend(_remove_spool_files(path))
-    _ACTIVE_SPOOLS.pop(path, None)
+    if resource.handle is not None:
+        try:
+            resource.handle.close()
+        except BaseException as exc:
+            errors.append(exc)
+    errors.extend(_remove_spool_files(resource.path))
+    if not errors:
+        resource.db = None
+        resource.handle = None
     return errors
 
 
 class _MemberSpool:
-    def __init__(self) -> None:
+    def __init__(self, scope: _SpoolScope | None = None) -> None:
         handle = tempfile.NamedTemporaryFile(
             prefix="sakurapool-members-", suffix=".sqlite", delete=False
         )
-        self.path = Path(handle.name)
-        handle.close()
-        _ACTIVE_SPOOLS[self.path] = None
+        self.scope = scope or _SpoolScope()
+        self.resource = _SpoolState(Path(handle.name), handle)
+        self.scope.add(self.resource)
+        self.path = self.resource.path
         self.db: sqlite3.Connection | None = None
         try:
+            handle.close()
+            self.resource.handle = None
             self.db = sqlite3.connect(self.path)
-            _ACTIVE_SPOOLS[self.path] = self.db
+            self.resource.db = self.db
             if getattr(self, "_ddl_injection", False):
                 raise RuntimeError("ddl injection")
             self.db.execute(
@@ -152,9 +180,11 @@ class _MemberSpool:
             self.db.execute("CREATE INDEX members_lookup ON members(key, is_image, name)")
             self.db.commit()
         except BaseException as primary:
-            cleanup_errors = _release_spool(self.path, self.db)
+            cleanup_errors = _release_spool(self.resource)
             for cleanup_error in cleanup_errors:
                 primary.add_note(f"spool cleanup failed: {cleanup_error!r}")
+            if not cleanup_errors:
+                self.scope.discard(self.resource)
             raise
 
     def add(self, key: str, member: tarfile.TarInfo, suffix: str, is_image: bool) -> None:
@@ -179,25 +209,30 @@ class _MemberSpool:
         return result
 
     def close(self) -> None:
-        errors = _release_spool(self.path, self.db)
-        self.db = None
+        errors = _release_spool(self.resource)
+        if not errors:
+            self.scope.discard(self.resource)
+            self.db = None
         if errors:
             raise SpoolCleanupError("spool cleanup failed: " + repr(errors[0]))
 
 
 class _SpoolRows:
     """Disk-backed row spool; only one bounded batch is materialized at a time."""
-    def __init__(self) -> None:
+    def __init__(self, scope: _SpoolScope | None = None) -> None:
         handle = tempfile.NamedTemporaryFile(
             prefix="sakurapool-spool-", suffix=".sqlite", delete=False
         )
-        self.path = Path(handle.name)
-        handle.close()
-        _ACTIVE_SPOOLS[self.path] = None
+        self.scope = scope or _SpoolScope()
+        self.resource = _SpoolState(Path(handle.name), handle)
+        self.scope.add(self.resource)
+        self.path = self.resource.path
         self.db: sqlite3.Connection | None = None
         try:
+            handle.close()
+            self.resource.handle = None
             self.db = sqlite3.connect(self.path)
-            _ACTIVE_SPOOLS[self.path] = self.db
+            self.resource.db = self.db
             if getattr(self, "_ddl_injection", False):
                 raise RuntimeError("ddl injection")
             self.db.execute(
@@ -209,9 +244,11 @@ class _SpoolRows:
             self.db.commit()
             self.counts = {name: 0 for name in SCHEMAS}
         except BaseException as primary:
-            cleanup_errors = _release_spool(self.path, self.db)
+            cleanup_errors = _release_spool(self.resource)
             for cleanup_error in cleanup_errors:
                 primary.add_note(f"spool cleanup failed: {cleanup_error!r}")
+            if not cleanup_errors:
+                self.scope.discard(self.resource)
             raise
 
     def __getitem__(self, name: str) -> _TableProxy:
@@ -249,8 +286,10 @@ class _SpoolRows:
             yield from batch
 
     def close(self) -> None:
-        errors = _release_spool(self.path, self.db)
-        self.db = None
+        errors = _release_spool(self.resource)
+        if not errors:
+            self.scope.discard(self.resource)
+            self.db = None
         if errors:
             raise SpoolCleanupError("spool cleanup failed: " + repr(errors[0]))
 
@@ -384,8 +423,10 @@ def _object_id(rel: str, validator_sha256: str) -> str:
 
 def _scan_shard_impl(path: Path, rel: str, adapter: DatasetAdapter, hash_images: bool,
                 timings: dict[str, float], validator: dict[str, Any],
-                verify_offsets: bool = False) -> _SpoolRows:
-    rows = _SpoolRows()
+                verify_offsets: bool = False, scope: _SpoolScope | None = None) -> _SpoolRows:
+    scope = scope or _SpoolScope()
+    rows = _SpoolRows(scope)
+
     object_id = _object_id(rel, validator["sha256"])
     rows["objects"].append(dict(
         storage_id=adapter.storage_id, backend="local", repo_type="local",
@@ -413,7 +454,7 @@ def _scan_shard_impl(path: Path, rel: str, adapter: DatasetAdapter, hash_images:
     except tarfile.ReadError as exc:
         raise UnsupportedArchiveError(f"unsupported_archive: {path}") from exc
     with archive:
-        member_spool = _MemberSpool()
+        member_spool = _MemberSpool(scope)
         member = _next_member(archive)
         while member is not None:
             if member.isdir():
@@ -547,21 +588,19 @@ def _scan_shard_impl(path: Path, rel: str, adapter: DatasetAdapter, hash_images:
     return rows
 
 
-def _cleanup_spools() -> list[BaseException]:
-    errors = []
-    for path, connection in list(_ACTIVE_SPOOLS.items()):
-        errors.extend(_release_spool(path, connection))
-    return errors
+def _cleanup_spools(scope: _SpoolScope) -> list[BaseException]:
+    return scope.cleanup()
 
 
 def _scan_shard(path: Path, rel: str, adapter: DatasetAdapter, hash_images: bool,
                 timings: dict[str, float], validator: dict[str, Any],
                 verify_offsets: bool = False) -> _SpoolRows:
+    scope = _SpoolScope()
     try:
         rows = _scan_shard_impl(path, rel, adapter, hash_images, timings, validator,
-                                verify_offsets)
+                                verify_offsets, scope)
     except BaseException as primary:
-        cleanup_errors = _cleanup_spools()
+        cleanup_errors = _cleanup_spools(scope)
         for cleanup_error in cleanup_errors:
             primary.add_note(f"spool cleanup failed: {cleanup_error!r}")
         raise
@@ -712,19 +751,21 @@ def scan(root: Path, output: Path, *, hash_images: bool = False, dataset: str = 
             rows = _scan_shard(
                 path, rel, adapter, hash_images, timings, validators[rel], verify_offsets
             )
+            primary = None
             try:
                 _validate_references(rows)
                 started_parquet = time.perf_counter()
                 info = _write_fragments(files, rows, checkpoint)
                 timings["parquet_seconds"] += time.perf_counter() - started_parquet
+            except BaseException as exc:
+                primary = exc
+                raise
             finally:
                 try:
                     rows.close()
                 except BaseException as cleanup_error:
-                    if sys.exc_info()[0] is not None:
-                        sys.exc_info()[1].add_note(
-                            f"row spool cleanup failed: {cleanup_error!r}"
-                        )
+                    if primary is not None:
+                        primary.add_note(f"row spool cleanup failed: {cleanup_error!r}")
                     else:
                         raise
             if _validator(path) != validators[rel]:

@@ -475,6 +475,37 @@ def test_spool_constructor_failure_releases_owned_files(tmp_path, monkeypatch, f
     assert user_db.read_bytes() == b"user-data"
 
 
+def test_handle_close_failure_keeps_pending_until_retry(tmp_path, monkeypatch):
+    owned = tmp_path / "owned"
+    owned.mkdir()
+    original_temp = indexer.tempfile.NamedTemporaryFile
+    state = {"fail": True, "handle": None}
+    class HandleProxy:
+        def __init__(self, handle):
+            self.handle = handle
+            self.name = handle.name
+        def close(self):
+            if state["fail"]:
+                raise OSError("handle close injection")
+            return self.handle.close()
+    def temp_file(*args, **kwargs):
+        kwargs["dir"] = owned
+        handle = HandleProxy(original_temp(*args, **kwargs))
+        state["handle"] = handle
+        return handle
+    monkeypatch.setattr(indexer.tempfile, "NamedTemporaryFile", temp_file)
+    scope = indexer._SpoolScope()
+    with pytest.raises(OSError, match="handle close injection"):
+        indexer._MemberSpool(scope)
+    assert len(scope.resources) == 1
+    resource = next(iter(scope.resources))
+    assert resource.path.exists()
+    state["fail"] = False
+    assert scope.cleanup() == []
+    assert not resource.path.exists()
+    assert state["handle"].handle.closed
+
+
 def test_second_spool_connect_failure_releases_both(tmp_path, monkeypatch):
     owned = tmp_path / "owned"
     owned.mkdir()
@@ -525,7 +556,18 @@ def test_close_failure_and_primary_error_cleanup(tmp_path, monkeypatch):
         spool.close()
     assert all(not path.exists() for path in created)
     assert user_db.read_bytes() == b"keep"
-    assert indexer._ACTIVE_SPOOLS == {}
+    assert not created[0].exists()
+
+
+def test_success_path_cleanup_failure_blocks_commit(tmp_path, monkeypatch):
+    source = tmp_path / "a.tar"
+    make_tar(source, {"1.jpg": b"x", "1.json": b"{}"})
+    original_remove = indexer._remove_spool_files
+    monkeypatch.setattr(indexer, "_remove_spool_files", lambda path: [OSError("unlink injection")])
+    with pytest.raises(indexer.SpoolCleanupError, match="unlink injection"):
+        indexer.scan(source, tmp_path / "out")
+    assert not list((tmp_path / "out").glob("*.COMMIT"))
+    monkeypatch.setattr(indexer, "_remove_spool_files", original_remove)
 
 
 def test_primary_error_survives_cleanup_error(tmp_path, monkeypatch):
@@ -534,8 +576,8 @@ def test_primary_error_survives_cleanup_error(tmp_path, monkeypatch):
     def fail_impl(*args, **kwargs):
         indexer._SpoolRows()
         raise RuntimeError("primary reference")
-    def fail_cleanup():
-        original_cleanup()
+    def fail_cleanup(scope):
+        original_cleanup(scope)
         return [OSError("cleanup injection")]
     monkeypatch.setattr(indexer, "_scan_shard_impl", fail_impl)
     monkeypatch.setattr(indexer, "_cleanup_spools", fail_cleanup)
@@ -543,9 +585,46 @@ def test_primary_error_survives_cleanup_error(tmp_path, monkeypatch):
         indexer._scan_shard(Path("input.tar"), "input.tar", DatasetAdapter("d", "s"),
                             False, {}, {"sha256": "a" * 64, "size": 0, "strength": "strong:sha256"})
     assert any("cleanup" in note for note in caught.value.__notes__)
-    assert not indexer._ACTIVE_SPOOLS
     monkeypatch.setattr(indexer, "_scan_shard_impl", original_impl)
     monkeypatch.setattr(indexer, "_cleanup_spools", original_cleanup)
+
+
+def test_reference_error_keeps_primary_when_rows_unlink_fails(tmp_path, monkeypatch):
+    source = tmp_path / "a.tar"
+    make_tar(source, {"1.jpg": b"x", "1.json": b"{}"})
+    original_validate = indexer._validate_references
+    original_remove = indexer._remove_spool_files
+    def fail_validate(rows):
+        raise RuntimeError("reference primary")
+    monkeypatch.setattr(indexer, "_validate_references", fail_validate)
+    def fail_remove(path):
+        if path.name.startswith("sakurapool-spool-"):
+            return [OSError("unlink injection")]
+        return original_remove(path)
+    monkeypatch.setattr(indexer, "_remove_spool_files", fail_remove)
+    with pytest.raises(RuntimeError, match="reference primary") as caught:
+        indexer.scan(source, tmp_path / "out")
+    assert any("unlink injection" in note for note in caught.value.__notes__)
+    assert not list((tmp_path / "out").glob("*.COMMIT"))
+    monkeypatch.setattr(indexer, "_validate_references", original_validate)
+    monkeypatch.setattr(indexer, "_remove_spool_files", original_remove)
+
+
+def test_scan_failure_does_not_cleanup_external_scope(tmp_path, monkeypatch):
+    external_scope = indexer._SpoolScope()
+    external = indexer._SpoolRows(external_scope)
+    external.db.execute("SELECT 1")
+    original_impl = indexer._scan_shard_impl
+    def fail_impl(*args, **kwargs):
+        raise RuntimeError("scan failure")
+    monkeypatch.setattr(indexer, "_scan_shard_impl", fail_impl)
+    with pytest.raises(RuntimeError, match="scan failure"):
+        indexer._scan_shard(Path("input.tar"), "input.tar", DatasetAdapter("d", "s"),
+                            False, {}, {"sha256": "a" * 64, "size": 0, "strength": "strong:sha256"})
+    assert external.db.execute("SELECT 1").fetchone() == (1,)
+    assert external.path.exists()
+    monkeypatch.setattr(indexer, "_scan_shard_impl", original_impl)
+    external.close()
 
 
 def test_storage_profile_is_stable_but_object_id_is_not(tmp_path):
