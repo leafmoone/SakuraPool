@@ -334,11 +334,11 @@ def phase_query(workdir: Path, scale: str, run_id: str,
             cold_10k_ms=(None if t10k is None else round(t10k * 1000, 3)),
             count=count)
         rt.close()
-    # WARM pass: one snapshot, shared cache, 5 repeats per family; the
-    # e2e timing covers query+first128 in one span.
-    rt = RuntimeSnapshot.open(root, **kwargs)
+    # WARM pass: one snapshot, shared cache, 5 repeats per family.
     opened = time.perf_counter()
-    result = dict(scale=scale, run_id=run_id, open_s=round(opened, 3),
+    rt = RuntimeSnapshot.open(root, **kwargs)
+    open_s = time.perf_counter() - opened
+    result = dict(scale=scale, run_id=run_id, open_s=round(open_s, 3),
                   rid_count=rt.rid_count,
                   cache_bytes=rt.cache.byte_limit,
                   families={}, large=None, locations100k=None,
@@ -382,11 +382,14 @@ def phase_query(workdir: Path, scale: str, run_id: str,
     result["large"] = dict(count=count, first100=len(first100),
                            first100_s=round(t_big, 3))
     # 100k-row location drain: the required locations-scale evidence.
+    # Exactly 100_000 rows are consumed (partial last batch counted
+    # against the cap), never an extra batch.
     t0 = time.perf_counter()
     got = 0
     for batch in r.iter_location_batches(8192):
-        got += len(batch.rid)
-        if got >= 100000:
+        take = min(len(batch.rid), 100000 - got)
+        got += take
+        if take < len(batch.rid):
             break
     result["locations100k"] = dict(
         rows=got, s=round(time.perf_counter() - t0, 3))

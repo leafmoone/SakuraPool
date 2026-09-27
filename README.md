@@ -167,37 +167,67 @@ The runtime compiles one or more committed P2 directories into an immutable
 snapshot and answers queries from bitmaps without touching original archives.
 
 ```console
-sakura runtime compile INDEX_DIR [INDEX_DIR ...] RUNTIME_ROOT
-sakura runtime verify RUNTIME_ROOT [--full-verify]
-sakura runtime inspect RUNTIME_ROOT [--full-verify]
+sakura runtime compile [--index DIR ...] [P2_DIR ...] RUNTIME_ROOT
+sakura runtime query RUNTIME_ROOT [--source S] [--dataset D] [--namespace NS]
+                 [--all-tag T] [--any-tag T] [--none-tag T] [--limit N] --full
+sakura runtime query --snapshot RUNTIME_ROOT --spec SPEC.json
+sakura runtime verify RUNTIME_ROOT [--full]
+sakura runtime inspect RUNTIME_ROOT [--full]
 sakura runtime lookup RUNTIME_ROOT --source SRC --post-id ID [--dataset DS]
 ```
+
+`query` and `verify/inspect` also accept `--index`/`--snapshot` as aliases for
+the positional root; `--spec SPEC.json` reads a spec object (including an
+`any_of` list) and cannot be mixed with term flags. An unknown namespace is a
+hard error even when no tags are given. `--full` runs the streaming full
+verification (payload sha256 of every published file), while a plain open only
+checks metadata and identity (below).
 
 Layout per `RUNTIME_ROOT`: `current.json` (atomic pointer) plus
 `snapshots/<snapshot_id>/{catalog.sqlite, bitmaps.sqlite, locations.npy,
 SNAPSHOT.json, READY}`. Nothing is openable before `READY`; compilation is
-stage-resumable (`STAGE.txt` marks stage1/catalog/bitmaps/locations/snapshot/ready)
-and a second `compile` against the same published snapshot is a no-op. `rid` is a
-dense `uint32` in canonical order `(dataset_id, object_id, sample_path,
-record_id)`. `locations.npy` is a rid-ordered numpy memmap
-(`object_idx u4, image_offset u8, image_size u8, metadata_offset u8,
-metadata_size u8, format_id u2, flags u1`); `catalog.sqlite` holds names/IDs
-(records, sources, datasets, namespaces, tags with categories) and every lookup
-resolves via index (asserted by `EXPLAIN QUERY PLAN` tests). Tag identity is
-`(namespace, value)`; one namespace may be served by multiple sources/origins
-(bitmap union). `tags_state in (known, empty)` defines a record's known set;
-`missing`/`invalid` records contribute no tags. Conflicting categories for one
-`(namespace, value)` fail the compile with `TAG_CATEGORY_CONFLICT`.
+stage-resumable (`STAGE.txt` marks stage1/catalog/bitmaps/locations/snapshot/ready).
+A second `compile` reuses a published snapshot only after validating the READY
+marker, the manifest, and a streamed sha256 of every published file; a broken
+`current.json` is repaired, foreign `.staging-<other-id>` directories are never
+deleted, and the P2 inventory fails closed on any undeclared file (stray
+partials included), on `object_id != rel@sha256(input)`, and on fragment rows
+that claim a different (dataset, object). `rid` is a dense `uint32` in
+canonical order `(dataset_id, object_id, sample_path, record_id)`.
+`locations.npy` is a rid-ordered numpy memmap (`object_idx u4, image_offset u8,
+image_size u8, metadata_offset u8, metadata_size u8, format_id u2, flags u1`)
+with an 82-byte identity trailer (`SAP3LOC1`, snapshot_id, rid_count) appended
+after the payload: a fast open binds the whole file to the snapshot identity
+(a same-shape `locations.npy` from another snapshot raises `SnapshotMixError`,
+as does a whole-file swap of `bitmaps.sqlite`/`catalog.sqlite`), while an
+in-place same-size payload edit is only detected by `--full` streaming
+verification. `catalog.sqlite` holds names/IDs (records, sources, datasets,
+namespaces, tags with categories) and every lookup resolves via index
+(asserted by `EXPLAIN QUERY PLAN` tests). Tag identity is `(namespace, value)`;
+one namespace may be served by multiple sources/origins (bitmap union).
+`tags_state in (known, empty)` defines a record's known set; `missing`/`invalid`
+records contribute no tags. Conflicting categories for one `(namespace, value)`
+fail the compile with `TAG_CATEGORY_CONFLICT`. Offsets/sizes are stored lossless
+beyond 2**63 and metadata presence is independent of its size (a zero-length
+metadata keeps `HAS_METADATA`). The snapshot fingerprint excludes the P2
+`created_at` timestamps by design, so re-timestamped identical inputs produce
+the same `snapshot_id`.
 
 Query domain (`RuntimeQuerySpec`): `sources` OR, `datasets` OR, then AND with
 per-tag `all_tags`, one OR group of `any_tags`, and per-namespace `none_tags`
-(`known_ns − excluded`); `any_of` is a union of flat branches. `query()` returns a
-lazy bitmap result: `count()`, `iter_rids()`, `limit(n)`,
-`iter_location_batches(size)`, `iter_record_batches(size)`; point resolution is
+(`known_ns − excluded`); `any_of` is a union of flat branches. AND terms are
+planned by their stored cardinality before any bitmap loads and materialization
+stops once the intersection is empty. `query()` accepts a spec object or
+keyword form (`rt.query(sources=..., namespace=..., all_tags=...)`) and returns
+a lazy bitmap result: `count()` / `len()`, `iter_rids()`, `limit(n)`,
+`iter_location_batches(size)`, `iter_record_batches(size)` (record batches carry
+`source_name`/`dataset_name` alongside the numeric IDs); point resolution is
 `lookup_rids(source, post_id[, dataset])` / `resolve_one(source, post_id,
-[dataset])` (ambiguous matches raise `AmbiguousRecordError`). Bitmaps are cached
-in a byte-budget LRU (`cache_bytes` on `RuntimeSnapshot.open`, 256 MiB default)
-with hits/misses/evictions counters.
+[dataset])` (ambiguous matches raise `AmbiguousRecordError`) and
+`object_ref(object_idx)` returns the full validated `ObjectRef`. Bitmaps are
+cached in a byte-budget LRU (`cache_bytes` on `RuntimeSnapshot.open`, 256 MiB
+default) with hits/misses/evictions counters; a single blob larger than the
+budget is never cached.
 
 Benchmark (`tools/bench_runtime.py`, synthetic corpus, deterministic seed):
 
@@ -208,15 +238,19 @@ PYTHONPATH=src python tools/bench_runtime.py --workdir build/bench --scale 100k
 # is attributed per phase; results merge into build/bench/report.json
 ```
 
-Host Python 3.14.5, Windows 11, one run: compile 100k 2.2 s / 1M 46 s / 5M 285 s
-with peak RSS 143 / 272 / 795 MiB (5M/1M growth 2.92×) and peak temp 35 / 361 /
-1838 MiB; published snapshot 15 / 156 / 794 MiB (≈165 B/sample: catalog 119,
-locations 37, bitmaps 2). Query process RSS stays 51–150 MiB at 5M (memmap +
-byte-LRU); warm typical-count p95 ≤ 0.52 ms, first-128-locations p95 ≤ 0.10 ms,
-10k-locations p95 ≤ 3.4 ms; a 2.5 M-rid result counts and returns its first 100
-rows in <1 ms. With a 1 MiB cache limit the LRU evicts (35 evictions), keeps
-resident ≤ limit, and plans stay <0.7 ms. The 100k corpus passes a 300-spec
-Python-set differential with 0 mismatches; the unit suite adds a 1000-spec
-differential on a mixed-state corpus, crash/resume at every stage boundary,
-READY reuse, and fresh-process reopen. All numbers are synthetic and
-diagnostic-only; no production performance inference is valid.
+Final-tree run (report `reports/P3/benchmark.json`, run-fingerprint bound; the
+bench re-runs any phase whose code or options fingerprint changed): compile
+100k 2.3 s / 1M 51 s / 5M 315 s, peak RSS 147 / 211 / 372 MiB (5M/1M growth
+1.76×) and peak temp 39 / 395 / 1991 MiB. Query-process peak RSS stays ≤152 MiB
+at 5M (memmap + byte-LRU, streaming hashes, no whole-file loads); warm
+typical-count p95 ≤ 1.09 ms, end-to-end query→first-128-locations p95 ≤ 0.62 ms
+(extract-only span reported separately), 10k-locations p95 ≤ 10.2 ms, and a
+100k-row location drain takes ~7 ms. The cold pass gives every query family its
+own snapshot handle and cache (no family inherits another's warm state). With a
+32 MiB budget the LRU performs real evictions (48× at 1 MiB blob size) and
+keeps resident ≤ limit; the 1 MiB demo does not substitute for it. The 100k
+corpus passes a 300-spec Python-set differential with 0 mismatches; the unit
+suite adds a 1000-spec differential on a mixed-state corpus, crash/resume at
+every stage boundary, validated READY reuse with fail-closed corruption,
+identity-trailer swap/tamper cases, and fresh-process reopen. All numbers are
+synthetic and diagnostic-only; no production performance inference is valid.
