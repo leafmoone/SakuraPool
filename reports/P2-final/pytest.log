@@ -5,16 +5,16 @@ configfile: pyproject.toml
 testpaths: tests
 plugins: anyio-4.13.0, asyncio-1.4.0
 asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
-collected 97 items
+collected 100 items
 
 tests\test_evaluator.py ..                                               [  2%]
-tests\test_indexer.py .................................................. [ 53%]
-........                                                                 [ 61%]
-tests\test_indexer_boundaries.py ..........                              [ 72%]
-tests\test_indexer_recovery.py ..........                                [ 82%]
-tests\test_p2_revision.py ........                                       [ 90%]
-tests\test_query.py .....                                                [ 95%]
-tests\test_registry.py .                                                 [ 96%]
+tests\test_indexer.py .................................................. [ 52%]
+...........                                                              [ 63%]
+tests\test_indexer_boundaries.py ..........                              [ 73%]
+tests\test_indexer_recovery.py ..........                                [ 83%]
+tests\test_p2_revision.py ........                                       [ 91%]
+tests\test_query.py .....                                                [ 96%]
+tests\test_registry.py .                                                 [ 97%]
 tests\test_schema.py ...                                                 [100%]
 
 =================================== PASSES ====================================
@@ -23,7 +23,7 @@ _______________________________ test_cli_config _______________________________
 {"error": "index scan requires --input and --output"}
 _________________________ test_cli_row_error_nonzero __________________________
 ---------------------------- Captured stdout call -----------------------------
-{"archives": 1, "errors": 1, "header_seconds": 0.006742400000803173, "json_seconds": 4.00003045797348e-07, "objects": 1, "objects_committed": 1, "objects_seen": 1, "objects_skipped": 0, "parquet_seconds": 0.017385199898853898, "samples": 1, "skipped": 0, "total_seconds": 0.04712659993674606}
+{"archives": 1, "errors": 1, "header_seconds": 0.00545069994404912, "json_seconds": 2.00001522898674e-07, "objects": 1, "objects_committed": 1, "objects_seen": 1, "objects_skipped": 0, "parquet_seconds": 0.017177199944853783, "samples": 1, "skipped": 0, "total_seconds": 0.04502109996974468}
 - generated xml file: D:\SakuraTool\SakuraPool\reports\P2-final\host-junit.xml -
 =========================== short test summary info ===========================
 PASSED tests/test_evaluator.py::test_filter_select_and_limit_are_deterministic
@@ -78,9 +78,12 @@ PASSED tests/test_indexer.py::test_spool_constructor_failure_releases_owned_file
 PASSED tests/test_indexer.py::test_handle_close_failure_keeps_pending_until_retry
 PASSED tests/test_indexer.py::test_second_spool_connect_failure_releases_both
 PASSED tests/test_indexer.py::test_close_failure_and_primary_error_cleanup
+PASSED tests/test_indexer.py::test_scan_error_exposes_retryable_cleanup_handle_after_gc
 PASSED tests/test_indexer.py::test_success_path_cleanup_failure_blocks_commit
 PASSED tests/test_indexer.py::test_primary_error_survives_cleanup_error
+PASSED tests/test_indexer.py::test_reference_error_exposes_retry_handle_after_gc
 PASSED tests/test_indexer.py::test_reference_error_keeps_primary_when_rows_unlink_fails
+PASSED tests/test_indexer.py::test_scope_cleanup_partial_success_retains_only_failed_resource
 PASSED tests/test_indexer.py::test_scan_failure_does_not_cleanup_external_scope
 PASSED tests/test_indexer.py::test_storage_profile_is_stable_but_object_id_is_not
 PASSED tests/test_indexer.py::test_input_same_size_mtime_changed
@@ -123,4 +126,4 @@ PASSED tests/test_registry.py::test_schema_and_model_registries_reject_duplicate
 PASSED tests/test_schema.py::test_rows_to_table_preserves_schema_and_values
 PASSED tests/test_schema.py::test_rows_to_table_rejects_unknown_and_missing_fields
 PASSED tests/test_schema.py::test_custom_schema
-============================= 97 passed in 7.50s ==============================
+============================= 100 passed in 7.60s =============================

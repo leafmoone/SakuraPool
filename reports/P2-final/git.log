@@ -1,3 +1,5 @@
+c496a5cac0f8725b71fb6894e58f13bbd59f8f23 fix(index): expose retryable scoped cleanup handles
+d27ef9ba66fc874ccfa4f33b91a9f8ff5ea35802 docs(index): record scoped cleanup fault evidence
 0fbade467cc808ebf9db4f6d16efafec491bb0f1 fix(index): scope spool cleanup and preserve failures
 41c2ab0febf65a41055fd0a475eff65b89c29fee docs(index): record exception-safe spool cleanup
 6491aafb6d032eaec697ae5c7596d619e534556a fix(index): make spool ownership cleanup exception safe

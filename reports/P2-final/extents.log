@@ -8,10 +8,10 @@
     "samples": 3,
     "errors": 0,
     "skipped": 0,
-    "header_seconds": 0.005091900005936623,
-    "json_seconds": 4.6500121243298054e-05,
-    "parquet_seconds": 0.02452029997948557,
-    "total_seconds": 0.049104500096291304
+    "header_seconds": 0.007354300003498793,
+    "json_seconds": 7.790001109242439e-05,
+    "parquet_seconds": 0.049742699950002134,
+    "total_seconds": 0.08321690000593662
   },
   "extents": [
     {
