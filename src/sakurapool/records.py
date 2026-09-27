@@ -37,30 +37,32 @@ class RecordKey:
 
 @dataclass(frozen=True)
 class ObjectRef:
-    dataset_id: str
+    storage_id: str
     object_id: str
-    path: str
-    validator_sha256: str
+    object_path: str
     object_size: int
+    object_version: str
+    validator: str
     backend: str = "local"
-    repo_type: str = "tar"
-    object_version: str = ""
+    repo_type: str | None = "local"
     validator_kind: str = "sha256"
     validator_strength: str = "strong:sha256"
 
     def __post_init__(self) -> None:
+        if not self.storage_id or not isinstance(self.storage_id, str):
+            raise ValueError("storage_id is required")
         canonical_object_id(self.object_id)
-        canonical_object_id(self.path)
-        if len(self.validator_sha256) != 64:
+        canonical_object_id(self.object_path)
+        if len(self.validator) != 64:
             raise ValueError("strong SHA256 validator required")
         if type(self.object_size) is not int or not 0 <= self.object_size < 2**64:
             raise ValueError("object_size must be uint64")
-        if not self.backend or not self.repo_type or not self.validator_kind:
-            raise ValueError("ObjectRef storage metadata is required")
-        if not self.object_version or not self.validator_strength.startswith("strong:"):
-            raise ValueError("strong ObjectRef version and validator are required")
-        if self.object_version != self.validator_sha256:
+        if not self.object_version or self.object_version != self.validator:
             raise ValueError("ObjectRef version must match validator")
+        if not self.backend or not self.validator_kind:
+            raise ValueError("ObjectRef storage metadata is required")
+        if not self.validator_strength.startswith("strong:"):
+            raise ValueError("strong ObjectRef validator required")
 
 
 @dataclass(frozen=True)

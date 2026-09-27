@@ -1,6 +1,6 @@
 # SakuraPool
 
-Typed P1 reference queries and a P2 local uncompressed TAR index builder. No data
+Typed P1 reference queries and a P4 local uncompressed TAR index builder. No data
 service access, image decoding, production throughput claims, P3, or model execution.
 
 ## Installation and CLI
@@ -37,7 +37,7 @@ samples one-to-one with objects. Tags were bare strings.
 there were no JSON member extents or registry-defined tag namespace/origin/category.
 P1's toy query schema is not evidence that these original domain requirements existed.
 
-**New definition (on-disk schema version 2):** one Object is one TAR shard, identified
+**New definition (on-disk schema version 4):** one Object is one TAR shard, identified
 within a dataset by its canonical relative POSIX object path. Each successfully paired
 physical sample is one samples row; invalid/unpaired candidates produce errors instead.
 `RecordKey=(dataset_id, object_id, sample_path)`, where sample_path is the adapter's
@@ -64,14 +64,14 @@ and `tools/verify_p2.py` describe the obsolete v1 protocol, not current certific
 
 ## Four Arrow tables
 
-- **objects:** dataset_id, object_id, source, logical path, size:uint64, strong validator
-  strength and SHA256. Local absolute build paths are never stored in logical identity.
+- **objects:** stable `storage_id` profile, content-bound `object_id`, backend, nullable
+  `repo_type`, `archive_format=tar`, dataset, object path/size/version, validator, and scan status. Local absolute build paths are never stored in logical identity.
 - **samples:** retained RecordKey and record_id, source/post_id, image path/offset_data/size,
-  nullable JSON path/offset_data/size, nullable metadata JSON and text, tags_state,
-  tags:list<struct<value, namespace, origin, category>>, hash_source and nullable sha256.
+  nullable JSON path/offset_data/size, nullable text and physical image metadata, tags_state,
+  tags:list<struct<value, category>>, hash_source and nullable sha256.
   Both image and JSON extents use uint64. No image decoder is imported.
-- **annotations:** retained identity plus namespace/origin/category and one JSON document
-  value per nonempty metadata document; not one row per tag.
+- **annotations:** retained identity plus namespace/origin/tags_state and
+  tags:list<struct<value, category>>; one grouped row per record/namespace/origin.
 - **errors:** dataset_id, object_id, registry source, member/logical path, code, detail.
   Empty tables retain their exact schema.
 
@@ -93,7 +93,7 @@ full logical stem. `image_prefix="images/"` and `metadata_prefix="meta/"` allow
 Prefix removal is explicit and collisions are rejected. `metadata_required` defaults
 to true and can be false. `numeric_post_id` optionally requires decimal post stems.
 `tags_field`, `text_field`, `max_json_bytes`, `tag_namespace`, `tag_category`, and
-`image_extensions` are explicit options. README.md/manifest.json, hidden paths,
+`image_extensions` are explicit options; defaults are `.jpg`, `.jpeg`, `.png`, `.webp`, and `.avif`. README.md/manifest.json, hidden paths,
 directories, and unrecognized suffixes are ignored; `ignored_names` is configurable.
 
 Error vocabulary: invalid_post_id, missing_image, missing_metadata, metadata_invalid,
@@ -136,6 +136,15 @@ git diff 52358d6fca728d2bba12814490e0974a6907b218..HEAD --check
 python -m build --wheel --outdir /tmp/sakurapool-p2-wheel
 PYTHONPATH=src python tools/benchmark_indexer.py
 ```
+
+The current on-disk contract is `FORMAT_VERSION=4`, builder `sakurapool-p2-v4`.
+`storage_id` is a stable configured profile identifier (default `local`), independent of
+content-bound `object_id`. ObjectRef carries storage_id, object_id, object_path,
+object_size, object_version, and validator. `archive_format=tar` is separate from
+`repo_type=local`. Version 3 outputs are incompatible and must not be reused; build a
+new output directory. Future ModelScope validation MUST NOT use remote full-object SHA
+rereads as the normal validation path; use fixed revisions and object validators.
+P4 MUST NOT use remote full-object SHA rereads as the normal ModelScope validation path.
 
 The benchmark generates 10,000 synthetic samples in **one** TAR. It reports
 header/json/parquet/total seconds and process peak RSS including fixture generation

@@ -29,13 +29,14 @@ KEY_FIELDS = [pa.field(k, pa.string(), nullable=False)
 OBJECTS_SCHEMA = pa.schema([
     pa.field("storage_id", pa.string(), nullable=False),
     pa.field("backend", pa.string(), nullable=False),
-    pa.field("repo_type", pa.string(), nullable=False),
+    pa.field("repo_type", pa.string()),
+    pa.field("archive_format", pa.string(), nullable=False),
     pa.field("dataset", pa.string(), nullable=False),
     pa.field("object_path", pa.string(), nullable=False),
     pa.field("object_size", pa.uint64(), nullable=False),
     pa.field("object_version", pa.string(), nullable=False),
     pa.field("validator_kind", pa.string(), nullable=False),
-    pa.field("validator_value", pa.string(), nullable=False),
+    pa.field("validator", pa.string(), nullable=False),
     pa.field("scan_status", pa.string(), nullable=False),
     pa.field("dataset_id", pa.string(), nullable=False),
     pa.field("object_id", pa.string(), nullable=False),
@@ -103,6 +104,9 @@ class _TableProxy:
         self.owner.append(self.name, row)
 
 
+_ACTIVE_SPOOLS: dict[Path, sqlite3.Connection] = {}
+
+
 class _MemberSpool:
     def __init__(self) -> None:
         handle = tempfile.NamedTemporaryFile(
@@ -111,6 +115,7 @@ class _MemberSpool:
         self.path = Path(handle.name)
         handle.close()
         self.db = sqlite3.connect(self.path)
+        _ACTIVE_SPOOLS[self.path] = self.db
         self.db.execute(
             "CREATE TABLE members (key TEXT, name TEXT, suffix TEXT, "
             "offset INTEGER, size INTEGER, is_image INTEGER)"
@@ -142,6 +147,7 @@ class _MemberSpool:
     def close(self) -> None:
         self.db.commit()
         self.db.close()
+        _ACTIVE_SPOOLS.pop(self.path, None)
         self.path.unlink(missing_ok=True)
 
 
@@ -154,6 +160,7 @@ class _SpoolRows:
         self.path = Path(handle.name)
         handle.close()
         self.db = sqlite3.connect(self.path)
+        _ACTIVE_SPOOLS[self.path] = self.db
         self.db.execute(
             "CREATE TABLE rows (kind TEXT, ordinal INTEGER, record_id TEXT, payload TEXT, "
             "PRIMARY KEY (kind, ordinal))"
@@ -200,11 +207,12 @@ class _SpoolRows:
     def close(self) -> None:
         self.db.commit()
         self.db.close()
+        _ACTIVE_SPOOLS.pop(self.path, None)
         self.path.unlink(missing_ok=True)
 
 
-FORMAT_VERSION = 3
-BUILDER = "sakurapool-p2-v3"
+FORMAT_VERSION = 4
+BUILDER = "sakurapool-p2-v4"
 BATCH_SIZE = 1024
 
 
@@ -326,16 +334,16 @@ def _object_id(rel: str, validator_sha256: str) -> str:
     return f"{rel}@sha256-{validator_sha256}"
 
 
-def _scan_shard(path: Path, rel: str, adapter: DatasetAdapter, hash_images: bool,
+def _scan_shard_impl(path: Path, rel: str, adapter: DatasetAdapter, hash_images: bool,
                 timings: dict[str, float], validator: dict[str, Any],
                 verify_offsets: bool = False) -> _SpoolRows:
     rows = _SpoolRows()
     object_id = _object_id(rel, validator["sha256"])
     rows["objects"].append(dict(
-        storage_id=object_id, backend="local", repo_type="tar",
-        dataset=adapter.dataset, object_path=rel,
+        storage_id=adapter.storage_id, backend="local", repo_type="local",
+        archive_format="tar", dataset=adapter.dataset, object_path=rel,
         object_size=validator["size"], object_version=validator["sha256"],
-        validator_kind="sha256", validator_value=validator["sha256"],
+        validator=validator["sha256"], validator_kind="sha256",
         scan_status="committed", dataset_id=adapter.dataset, object_id=object_id,
         source=adapter.source, path=rel, size=validator["size"],
         validator_strength=validator["strength"], sha256=validator["sha256"],
@@ -491,6 +499,27 @@ def _scan_shard(path: Path, rel: str, adapter: DatasetAdapter, hash_images: bool
     return rows
 
 
+def _cleanup_spools() -> None:
+    for path, connection in list(_ACTIVE_SPOOLS.items()):
+        try:
+            connection.close()
+        finally:
+            _ACTIVE_SPOOLS.pop(path, None)
+            path.unlink(missing_ok=True)
+
+
+def _scan_shard(path: Path, rel: str, adapter: DatasetAdapter, hash_images: bool,
+                timings: dict[str, float], validator: dict[str, Any],
+                verify_offsets: bool = False) -> _SpoolRows:
+    try:
+        rows = _scan_shard_impl(path, rel, adapter, hash_images, timings, validator,
+                                verify_offsets)
+    except BaseException:
+        _cleanup_spools()
+        raise
+    return rows
+
+
 def _table_from_rows(rows: list[dict], schema: pa.Schema) -> pa.Table:
     """Materialize one bounded Parquet batch, keeping the conversion seam testable."""
     return pa.Table.from_pylist(rows, schema)
@@ -635,11 +664,13 @@ def scan(root: Path, output: Path, *, hash_images: bool = False, dataset: str = 
             rows = _scan_shard(
                 path, rel, adapter, hash_images, timings, validators[rel], verify_offsets
             )
-            _validate_references(rows)
-            started_parquet = time.perf_counter()
-            info = _write_fragments(files, rows, checkpoint)
-            timings["parquet_seconds"] += time.perf_counter() - started_parquet
-            rows.close()
+            try:
+                _validate_references(rows)
+                started_parquet = time.perf_counter()
+                info = _write_fragments(files, rows, checkpoint)
+                timings["parquet_seconds"] += time.perf_counter() - started_parquet
+            finally:
+                rows.close()
             if _validator(path) != validators[rel]:
                 raise ValueError("input validator mismatch: input changed during scan")
             commit = dict(

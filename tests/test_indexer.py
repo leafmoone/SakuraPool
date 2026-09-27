@@ -78,9 +78,9 @@ def test_original_fixtures(tmp_path, case, members, samples, codes):
         assert pq.read_table(next(out.glob(f"*.{name}.parquet"))).schema == schema
     obj = read_rows(out, "objects")[0]
     ref = ObjectRef(
-        obj["dataset_id"], obj["object_id"], obj["path"], obj["sha256"], obj["object_size"],
-        backend=obj["backend"], repo_type=obj["repo_type"],
-        object_version=obj["object_version"], validator_kind=obj["validator_kind"],
+        obj["storage_id"], obj["object_id"], obj["object_path"], obj["object_size"],
+        obj["object_version"], obj["validator"], backend=obj["backend"],
+        repo_type=obj["repo_type"], validator_kind=obj["validator_kind"],
         validator_strength=obj["validator_strength"],
     )
     with tarfile.open(source, "r:") as tar, source.open("rb") as stream:
@@ -254,8 +254,8 @@ def test_identity_formula_conflict_uint64(tmp_path, monkeypatch):
     path = tmp_path / "large.parquet"
     pq.write_table(pa.Table.from_pylist([row], schema), path)
     assert pq.read_table(path).to_pylist() == [row]
-    MemberRef(ObjectRef("d", "a.tar", "a.tar", "a" * 64, 2**64 - 1,
-                        object_version="a" * 64), "1.jpg", offset_data=1, size=2)
+    MemberRef(ObjectRef("local", "a.tar", "a.tar", 2**64 - 1, "a" * 64, "a" * 64),
+              "1.jpg", offset_data=1, size=2)
 
 
 def test_optional_metadata_tags_hash_no_decode(tmp_path, monkeypatch):
@@ -399,6 +399,68 @@ def test_errors_cross_batch_roundtrip_and_resume(tmp_path, count):
     assert all(row["post_id"] is not None for row in errors)
     assert len(read_rows(out, "errors")) == count
     assert indexer.scan(source, out)["skipped"] == 1
+
+
+def test_v4_contract_constants_and_storage_roundtrip():
+    readme = Path(__file__).parents[1] / "README.md"
+    text = readme.read_text(encoding="utf-8")
+    assert f"FORMAT_VERSION={indexer.FORMAT_VERSION}" in text
+    assert indexer.BUILDER in text
+    assert "P4 MUST NOT use remote full-object SHA rereads" in text
+
+
+def test_object_ref_roundtrip_and_bounds():
+    ref = ObjectRef("modelscope-main", "same.tar@sha256-" + "a" * 64,
+                    "same.tar", 100, "a" * 64, "a" * 64)
+    payload = {"storage_id": ref.storage_id, "object_id": ref.object_id,
+               "object_path": ref.object_path, "object_size": ref.object_size,
+               "object_version": ref.object_version, "validator": ref.validator}
+    assert ObjectRef(**payload) == ObjectRef(**payload)
+    with pytest.raises(ValueError, match="exceeds"):
+        MemberRef(ref, "x.jpg", offset_data=99, size=2)
+
+
+def test_avif_pairing_and_payload_extent(tmp_path):
+    source = tmp_path / "a.tar"
+    payload = b"avif-not-decoded"
+    make_tar(source, {"42.avif": payload, "42.json": b'{"tags":[]}'})
+    out = tmp_path / "out"
+    indexer.scan(source, out)
+    row = read_rows(out, "samples")[0]
+    assert row["image_format"] == "avif"
+    with source.open("rb") as stream:
+        stream.seek(row["offset_data"])
+        assert stream.read(row["size"]) == payload
+
+
+def test_spools_are_removed_after_failure(tmp_path):
+    source = tmp_path / "a.tar"
+    make_tar(source, {"1.jpg": b"x", "1.json": b"invalid"})
+    user_temp = tmp_path / "user.partial"
+    user_temp.write_bytes(b"keep")
+    def fail(stage):
+        raise RuntimeError(stage)
+    with pytest.raises(RuntimeError):
+        indexer.scan(source, tmp_path / "out", checkpoint=fail)
+    assert not indexer._ACTIVE_SPOOLS
+    assert user_temp.read_bytes() == b"keep"
+
+
+def test_storage_profile_is_stable_but_object_id_is_not(tmp_path):
+    registry = AdapterRegistry()
+    registry.register(DatasetAdapter("one", "A", storage_id="modelscope-main"))
+    registry.register(DatasetAdapter("two", "A", storage_id="modelscope-main"))
+    first = tmp_path / "one.tar"
+    second = tmp_path / "two.tar"
+    make_tar(first, {"1.jpg": b"a", "1.json": b"{}"})
+    make_tar(second, {"1.jpg": b"b", "1.json": b"{}"})
+    first_out, second_out = tmp_path / "one-out", tmp_path / "two-out"
+    indexer.scan(first, first_out, dataset="one", registry=registry)
+    indexer.scan(second, second_out, dataset="two", registry=registry)
+    first_object = read_rows(first_out, "objects")[0]
+    second_object = read_rows(second_out, "objects")[0]
+    assert first_object["storage_id"] == second_object["storage_id"] == "modelscope-main"
+    assert first_object["object_id"] != second_object["object_id"]
 
 
 def test_input_same_size_mtime_changed(tmp_path):

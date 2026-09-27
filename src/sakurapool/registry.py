@@ -30,7 +30,8 @@ class Registry:
 class DatasetAdapter:
     dataset: str
     source: str
-    image_extensions: tuple[str, ...] = (".jpg", ".jpeg", ".png", ".webp")
+    storage_id: str = "local"
+    image_extensions: tuple[str, ...] = (".jpg", ".jpeg", ".png", ".webp", ".avif")
     tags_field: str = "tags"
     text_field: str = "text"
     max_json_bytes: int = 16 * 1024 * 1024
@@ -43,7 +44,7 @@ class DatasetAdapter:
     ignored_names: tuple[str, ...] = ("README.md", "manifest.json")
 
     def __post_init__(self) -> None:
-        for value in (self.dataset, self.source, self.tags_field, self.text_field,
+        for value in (self.dataset, self.source, self.storage_id, self.tags_field, self.text_field,
                       self.tag_namespace, self.tag_category):
             if not isinstance(value, str) or not value.strip() or value != value.strip():
                 raise ValueError("adapter names must be nonempty canonical strings")
