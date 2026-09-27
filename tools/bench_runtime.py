@@ -210,19 +210,34 @@ def phase_compile(workdir: Path, scale: str) -> dict:
 
 
 def _source_fingerprint() -> str:
-    """Bind every cached result to the exact code and options that produced
-    it: a stale JSON from a previous tree must never masquerade as a
-    final-tree measurement."""
+    """Bind every cached result to the EXACT code and environment that
+    produced it: the whole source tree (including the P2 contract modules
+    the runtime imports), the bench tool, the corpus generator, the Python
+    interpreter and the pinned dependency versions. A stale JSON from a
+    previous tree or a different environment must never masquerade as a
+    final-tree measurement - any change invalidates every cached phase.
+    """
+    import numpy
+    import pyarrow
+    import pyroaring
+
     digest = hashlib.sha256()
-    for rel in sorted(("tools/bench_runtime.py", "tests/synthetic_p2.py")
-                      + tuple(p.relative_to(REPO).as_posix()
-                              for p in sorted(
-                                  (REPO / "src/sakurapool/runtime").glob(
-                                      "*.py")))):
+    for path in sorted((REPO / "src").rglob("*.py")):
+        rel = path.relative_to(REPO).as_posix()
+        digest.update(rel.encode())
+        digest.update(path.read_bytes())
+    for rel in ("tools/bench_runtime.py", "tests/synthetic_p2.py"):
         path = REPO / rel
         if path.exists():
             digest.update(rel.encode())
             digest.update(path.read_bytes())
+    digest.update(json.dumps({
+        "python": sys.version.split()[0],
+        "platform": platform.platform(),
+        "numpy": numpy.__version__,
+        "pyarrow": pyarrow.__version__,
+        "pyroaring": pyroaring.__version__,
+    }, sort_keys=True).encode())
     return digest.hexdigest()
 
 

@@ -689,6 +689,70 @@ def _current_matches(output_root: Path, snap_id: str) -> bool:
         return False
 
 
+STAGING_OWNER_PROTOCOL = 1
+KNOWN_STAGING_FILES = frozenset({
+    "OWNER.json", "STAGE.txt", "compiler-staging.sqlite",
+    "bitmap_parts.sqlite", "ns-known.sqlite", "TAG-IDS.json",
+    "CATEGORIES.json", "STAGE1-COUNTS.json", "STAGE2-COUNTS.json",
+    "catalog.sqlite", "FORMAT-IDS.json", "bitmaps.sqlite",
+    "locations.npy", "SNAPSHOT.json", "READY",
+})
+
+
+def _marker_valid(path: Path, snap_id: str, role: str) -> bool:
+    """Ownership is proven by a marker, never by the directory name: a
+    pre-created `.staging-<snap_id>` (or `snapshots/<snap_id>`) with foreign
+    files is someone else's data and must fail closed, not be deleted.
+
+    role is "staging" while the directory is a build workspace and is
+    rewritten to "published" at publish time, so a published directory can
+    never be mistaken for an interrupted publish (and thus never deleted).
+    """
+    marker_path = path / "OWNER.json"
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return (marker.get("snapshot_id") == snap_id
+            and marker.get("owner") == RUNTIME_COMPILER
+            and marker.get("protocol") == STAGING_OWNER_PROTOCOL
+            and marker.get("role") == role)
+
+
+def _staging_owned(staging: Path, snap_id: str) -> bool:
+    if not _marker_valid(staging, snap_id, "staging"):
+        return False
+    # Known-file audit: even with a forged marker, any file outside the
+    # compiler's own file list makes the directory foreign.
+    return {entry.name for entry in staging.iterdir()} <= KNOWN_STAGING_FILES
+
+
+def _staging_owner_marker(staging: Path, snap_id: str) -> None:
+    """Write the ownership marker for a staging directory we are creating;
+    keep an existing valid marker untouched so resume stays stable."""
+    if (staging / "OWNER.json").exists():
+        if _marker_valid(staging, snap_id, "staging"):
+            return
+        raise SnapshotCorruptError(
+            f"staging OWNER.json does not match snapshot: {staging}")
+    _write_owner_marker(staging, snap_id, "staging")
+
+
+def _write_owner_marker(path: Path, snap_id: str, role: str) -> None:
+    """Unconditionally (re)write the marker - only legal for a directory
+    the caller just created or just renamed itself."""
+    marker = {
+        "protocol": STAGING_OWNER_PROTOCOL,
+        "owner": RUNTIME_COMPILER,
+        "snapshot_id": snap_id,
+        "role": role,
+        "known_files": sorted(KNOWN_STAGING_FILES),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _atomic_write(path / "OWNER.json", json.dumps(marker, sort_keys=True)
+                  .encode())
+
+
 def _verify_ready(final: Path, snap_id: str) -> dict[str, Any]:
     """Reuse validation of a published snapshot (fail closed).
 
@@ -850,10 +914,17 @@ def compile_runtime(
             manifest["tag_count"], manifest["tag_memberships"])
     staging = output_root / f".staging-{snap_id}"
     if staging.exists():
+        if not _staging_owned(staging, snap_id):
+            # Fail closed: the directory name alone proves nothing, so a
+            # pre-created .staging-<snap_id> (marker missing or foreign
+            # files inside) is never deleted or reused.
+            raise SnapshotCorruptError(
+                f"refusing to touch unowned staging directory: {staging} "
+                "(remove it manually if it is stale)")
         stage = _Stage(staging)
         if stage.current < 0:
-            # Name is derived from snap_id, so only our own staging is ever
-            # touched; foreign .staging-* directories are left alone.
+            # Ownership proven (marker + known-file audit), so every entry
+            # is a compiler artifact and resetting is safe.
             shutil.rmtree(staging)
         else:
             checks = [("stage1", lambda: _verify_stage1(staging)),
@@ -874,6 +945,7 @@ def compile_runtime(
                     stage.current = index - 1
                     break
     staging.mkdir(parents=True, exist_ok=True)
+    _staging_owner_marker(staging, snap_id)
     stage = _Stage(staging)
 
     def redo(name: str, *paths: Path) -> bool:
@@ -941,10 +1013,27 @@ def compile_runtime(
             if sidecar.exists():
                 sidecar.unlink()
         if final.exists():
+            # No READY here (a READY'd snapshot returned above). Our own
+            # interrupted publish carries the staging owner marker, but the
+            # marker alone is not enough: a directory we previously published
+            # also carries it, so deletion additionally requires the
+            # known-file audit - any file outside the compiler's own list
+            # (e.g. user data dropped into snapshots/<snap_id>) fails closed.
+            if not _staging_owned(final, snap_id):
+                raise SnapshotCorruptError(
+                    f"refusing to delete unowned snapshot directory: {final} "
+                    "(remove it manually if it is stale)")
             shutil.rmtree(final)
         final.parent.mkdir(parents=True, exist_ok=True)
         (staging / "READY").write_text(snap_id, encoding="utf-8")
         os.rename(staging, final)
+        # Flip the marker role (we just renamed this directory, so we own
+        # it) so a published directory can never be mistaken for an
+        # interrupted publish (and deleted) later. A crash between the
+        # rename and this line leaves a READY'd directory with a staging
+        # marker; READY validation returns or raises before any deletion
+        # branch is reached.
+        _write_owner_marker(final, snap_id, "published")
         _Stage(final).complete("ready")
     current = {
         "snapshot_id": snap_id,

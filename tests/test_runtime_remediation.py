@@ -15,6 +15,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -463,6 +464,97 @@ def test_ready_reuse_validated_and_current_repaired(tmp_path):
                                  root)
 
 
+def test_same_id_staging_without_marker_fail_closed(tmp_path):
+    """B (reviewer repro): a pre-created .staging-<correct snap_id> with a
+    user file and NO owner marker must fail closed - compile must raise and
+    the user file must survive."""
+    import sakurapool.runtime.compiler as compiler
+    from sakurapool.runtime import load_p2_inventory
+    from sakurapool.runtime.errors import SnapshotCorruptError
+    objs = [ObjectSpec("a.tar", [SampleSpec("1.jpg", "1", [("t", None)])])]
+    summary, root = _compile_synthetic(tmp_path, "sameid", objs)
+    # drop READY so compile reaches the staging branch (READY reuse returns
+    # earlier and would not touch staging)
+    (root / "snapshots" / summary.snapshot_id / "READY").unlink()
+    staging = root / f".staging-{summary.snapshot_id}"
+    staging.mkdir()
+    (staging / "user.txt").write_text("do not delete")
+    with pytest.raises(SnapshotCorruptError, match="unowned staging"):
+        compiler.compile_runtime(load_p2_inventory(tmp_path / "p2-sameid"),
+                                 root)
+    # fail closed: nothing deleted, nothing reused
+    assert (staging / "user.txt").read_text() == "do not delete"
+    assert staging.exists()
+    # after manual cleanup (the foreign staging and the de-READY'd publish,
+    # which the compiler also refuses to delete unowned) the compile
+    # succeeds from scratch
+    (staging / "user.txt").unlink()
+    staging.rmdir()
+    import shutil as _shutil
+    _shutil.rmtree(root / "snapshots" / summary.snapshot_id)
+    again = compiler.compile_runtime(
+        load_p2_inventory(tmp_path / "p2-sameid"), root)
+    assert again.snapshot_id == summary.snapshot_id
+
+
+def test_same_id_staging_forced_marker_fail_closed(tmp_path):
+    """B: a forged marker with foreign files still fails closed (the
+    known-file audit is independent of the marker)."""
+    import json as _json
+
+    import sakurapool.runtime.compiler as compiler
+    from sakurapool.runtime import load_p2_inventory
+    from sakurapool.runtime.errors import SnapshotCorruptError
+    objs = [ObjectSpec("a.tar", [SampleSpec("1.jpg", "1", [("t", None)])])]
+    summary, root = _compile_synthetic(tmp_path, "forged", objs)
+    (root / "snapshots" / summary.snapshot_id / "READY").unlink()
+    staging = root / f".staging-{summary.snapshot_id}"
+    staging.mkdir()
+    (staging / "OWNER.json").write_text(_json.dumps({
+        "protocol": 1, "owner": compiler.RUNTIME_COMPILER,
+        "snapshot_id": summary.snapshot_id, "role": "staging",
+        "known_files": []}))
+    (staging / "user.txt").write_text("do not delete")
+    with pytest.raises(SnapshotCorruptError, match="unowned staging"):
+        compiler.compile_runtime(load_p2_inventory(tmp_path / "p2-forged"),
+                                 root)
+    assert (staging / "user.txt").read_text() == "do not delete"
+
+
+def test_unowned_snapshot_dir_never_deleted(tmp_path):
+    """B: a pre-created snapshots/<snap_id> (no READY, no owner marker)
+    must fail closed at publish time, not be rmtree'd."""
+    import json as _json
+
+    import sakurapool.runtime.compiler as compiler
+    from sakurapool.runtime import load_p2_inventory
+    from sakurapool.runtime.errors import SnapshotCorruptError
+    objs = [ObjectSpec("a.tar", [SampleSpec("1.jpg", "1", [("t", None)])])]
+    summary, root = _compile_synthetic(tmp_path, "snapdir", objs)
+    # wipe our publish and plant a foreign directory of the same name
+    snap2 = root / "snapshots" / summary.snapshot_id
+    (snap2 / "READY").unlink()
+    (snap2 / "user.bin").write_bytes(b"keep me")
+    with pytest.raises(SnapshotCorruptError, match="unowned snapshot"):
+        compiler.compile_runtime(load_p2_inventory(tmp_path / "p2-snapdir"),
+                                 root)
+    assert (snap2 / "user.bin").read_bytes() == b"keep me"
+    # with the compiler's own staging marker the directory would be ours -
+    # but the known-file audit still rejects it while user.bin is inside.
+    # Only after manual removal of the foreign file may the publish proceed.
+    owner = root / "snapshots" / summary.snapshot_id / "OWNER.json"
+    owner.write_text(_json.dumps({
+        "protocol": 1, "owner": compiler.RUNTIME_COMPILER,
+        "snapshot_id": summary.snapshot_id, "role": "staging"}))
+    with pytest.raises(SnapshotCorruptError, match="unowned snapshot"):
+        compiler.compile_runtime(
+            load_p2_inventory(tmp_path / "p2-snapdir"), root)
+    (snap2 / "user.bin").unlink()
+    again = compiler.compile_runtime(
+        load_p2_inventory(tmp_path / "p2-snapdir"), root)
+    assert again.snapshot_id == summary.snapshot_id
+
+
 def test_staging_ownership_respected(tmp_path):
     """B: a foreign .staging-<other-id> directory is never deleted."""
     objs = [ObjectSpec("a.tar", [SampleSpec("1.jpg", "1", [("t", None)])])]
@@ -522,3 +614,89 @@ def test_cli_spec_and_flags(tmp_path, capsys):
     out = _json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert out["rid_count"] == 2
     del summary
+
+
+def test_planner_source_dataset_cardinality_order(tmp_path):
+    """E §29: source/dataset terms plan by their real stored cardinality,
+    not a hardcoded 0 - a rare tag must load before big source/dataset OR
+    terms, including with all AND conditions present."""
+    from sakurapool.runtime import RuntimeSnapshot
+    objs = [
+        ObjectSpec("a.tar",
+                   [SampleSpec(f"{i}.jpg", str(i), [("hot", None)])
+                    for i in range(50)]
+                   + [SampleSpec("r.jpg", "900",
+                                 [("rare", None), ("hot", None)])]),
+        ObjectSpec("b.tar",
+                   [SampleSpec(f"b{i}.jpg", f"b{i}",
+                               [("hot", None)]
+                               + ([("cold", None)] if i % 10 == 0 else []))
+                    for i in range(50)]),
+    ]
+    summary, root = _compile_synthetic(tmp_path, "srcord", objs)
+    rt = RuntimeSnapshot.open(root)
+    assert rt._dataset_id("ds") is not None
+    loaded: list[str] = []
+    orig = rt._get_bitmap
+
+    def tracking(kind: str, bitmap_id: int) -> Any:
+        loaded.append(kind)
+        return orig(kind, bitmap_id)
+
+    rt._get_bitmap = tracking
+    # rare tag (cardinality 1) vs source OR (101): rare must load first
+    q1 = rt.query(sources=["src"], namespace="tags",
+                  all_tags=["rare"])
+    assert q1.count() == 1
+    assert loaded and loaded[0] == "tag"
+    assert "source" in loaded and loaded.index("source") > loaded.index(
+        "tag")
+    # full AND condition set: sources + datasets + all + any + none, all
+    # pre-validated from stored cardinalities; the rare tag stays first and
+    # the count stays exact.
+    loaded.clear()
+    q2 = rt.query(sources=["src"], datasets=["ds"], namespace="tags",
+                  all_tags=["rare"], any_tags=["hot"], none_tags=["cold"])
+    assert q2.count() == 1
+    assert loaded[0] == "tag"
+    for kind in ("source", "dataset"):
+        assert kind in loaded
+        assert loaded.index(kind) > loaded.index("tag")
+
+
+def test_real_runtime_eviction_correctness(tmp_path):
+    """D §25: eviction caused by REAL Roaring bitmap loads through
+    RuntimeSnapshot (not arbitrary bytes): results identical before and
+    after eviction, stats honest, resident bounded."""
+    from sakurapool.runtime import RuntimeSnapshot
+    samples = [SampleSpec(f"{i}.jpg", str(i), [(f"t{i % 4}", None)])
+               for i in range(120000)]
+    summary, root = _compile_synthetic(
+        tmp_path, "evict-rt", [ObjectSpec("big.tar", samples)])
+    # each 30000-rid Roaring blob serializes to ~16.4 KB (measured from the
+    # bitmaps table), so a 48 KiB budget holds two of them and forces real
+    # eviction on the third and fourth load
+    budget = 48 * 1024
+    rt = RuntimeSnapshot.open(root, cache_bytes=budget)
+    first: dict[str, Any] = {}
+    # three ~16.4 KB blobs in a 48 KiB cache: the first load is evicted by
+    # the third
+    for tag in ("t0", "t1", "t2"):
+        q = rt.query(namespace="tags", all_tags=[tag])
+        first[tag] = (q.count(), tuple(q.iter_rids()))
+    assert rt.cache.evictions >= 1
+    assert all(n == 30000 for n, _ in first.values())
+    assert rt.cache.resident_bytes() <= budget
+    # t1 and t2 are still resident: warm re-queries hit and return the
+    # identical result set
+    before_hits = rt.cache.hits
+    for tag in ("t1", "t2"):
+        q = rt.query(namespace="tags", all_tags=[tag])
+        assert (q.count(), tuple(q.iter_rids())) == first[tag]
+    assert rt.cache.hits >= 2 and rt.cache.hits > before_hits
+    # t0 was evicted: the re-query reloads it and still returns the exact
+    # same result (correctness across eviction)
+    q0 = rt.query(namespace="tags", all_tags=["t0"])
+    assert (q0.count(), tuple(q0.iter_rids())) == first["t0"]
+    assert rt.cache.misses >= 4
+    assert rt.cache.resident_bytes() <= budget

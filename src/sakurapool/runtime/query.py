@@ -196,17 +196,22 @@ class _Term:
 
 def _stored_cardinality(snapshot: RuntimeSnapshot, kind: str,
                         ids: list[int]) -> int:
+    """Planner input from the catalog, read before any blob loads.
+
+    Single id: the exact stored cardinality. OR group: the pre-materialization
+    upper bound (sum of stored cardinalities) for tag/source/dataset kinds.
+    """
     if len(ids) == 1:
         row = snapshot._bitmaps.execute(
             "SELECT cardinality FROM bitmaps WHERE kind = ? AND id = ?",
             (kind, ids[0])).fetchone()
         return row[0] if row else 0
-    if kind == "tag":
+    if kind in ("tag", "source", "dataset"):
         placeholders = ",".join("?" for _ in ids)
-        # OR upper bound before materialization: sum of stored cardinalities.
         row = snapshot._bitmaps.execute(
             f"SELECT COALESCE(SUM(cardinality), 0) FROM bitmaps"
-            f" WHERE kind = 'tag' AND id IN ({placeholders})", ids).fetchone()
+            f" WHERE kind = ? AND id IN ({placeholders})",
+            [kind, *ids]).fetchone()
         return row[0]
     raise ValueError(f"unsupported union kind: {kind}")
 
@@ -214,13 +219,17 @@ def _stored_cardinality(snapshot: RuntimeSnapshot, kind: str,
 def _branch_result(snapshot: RuntimeSnapshot, spec: RuntimeQuerySpec) -> BitMap:
     terms: list[_Term] = []
     if spec.sources:
+        source_ids = [snapshot._source_id(source)
+                      for source in spec.sources]
         terms.append(_Term(
-            0, "source",
-            [snapshot._source_id(source) for source in spec.sources], None))
+            _stored_cardinality(snapshot, "source", source_ids), "source",
+            source_ids, None))
     if spec.datasets:
+        dataset_ids = [snapshot._dataset_id(dataset)
+                       for dataset in spec.datasets]
         terms.append(_Term(
-            0, "dataset",
-            [snapshot._dataset_id(dataset) for dataset in spec.datasets], None))
+            _stored_cardinality(snapshot, "dataset", dataset_ids), "dataset",
+            dataset_ids, None))
     if spec.all_tags:
         for tag_id, _ in _resolve_tags(snapshot, spec.namespace, spec.all_tags,
                                        "all_tags"):
