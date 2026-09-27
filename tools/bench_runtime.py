@@ -29,8 +29,49 @@ import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "tests"))
+
+
+# Two EXPLICIT import modes (never conflated in the evidence):
+#   installed - sakurapool is importable from the environment (a real
+#               wheel in site-packages); the repo src tree must NOT be
+#               on sys.path, and the resolved module path must be in
+#               site-packages. The assertion below enforces both.
+#   worktree  - dev mode: fall back to the repo src tree. Recorded as
+#               such, never claimed as an installed/wheel measurement.
+# The mode and the real module path are written into every phase JSON
+# and the final report; a parent run verifies its subprocess phases ran
+# with the identical module path.
+def _bootstrap_module() -> tuple[str, str]:
+    src_dir = (REPO / "src").resolve()
+    try:
+        import sakurapool as _sp
+    except ModuleNotFoundError:
+        sys.path.insert(0, str(REPO / "src"))
+        import sakurapool as _sp
+        mode = "worktree"
+    else:
+        mode = "installed"
+    mod_path = Path(_sp.__file__).resolve()
+    if mod_path.is_relative_to(src_dir):
+        mode = "worktree"
+    if mode == "installed":
+        for p in sys.path:
+            if not p:
+                continue
+            try:
+                if Path(p).resolve().is_relative_to(src_dir):
+                    raise AssertionError(
+                        f"installed mode polluted by src on sys.path: {p}")
+            except OSError:
+                continue
+        if "site-packages" not in mod_path.parts:
+            raise AssertionError(
+                f"installed mode module not in site-packages: {mod_path}")
+    return mode, str(mod_path)
+
+
+MODULE_MODE, MODULE_PATH = _bootstrap_module()
 
 from synthetic_p2 import ObjectSpec, SampleSpec, build_p2_directory  # noqa: E402
 
@@ -249,6 +290,10 @@ def _run_fingerprint(args) -> str:
                    seed_base=SEED_BASE, hot=HOT, medium=MEDIUM, rare=RARE)
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()
                           ).hexdigest()
+
+
+def _module_block() -> dict:
+    return {"mode": MODULE_MODE, "module_path": MODULE_PATH}
 
 
 _FAMILY_ORDER = ("source_only", "hot", "rare", "hot_and_medium",
@@ -630,6 +675,7 @@ def _run_phase(phase: str, scale_dir: Path, scale: str, args) -> None:
               flush=True)
     else:
         raise SystemExit(f"unknown phase {phase}")
+    data["module"] = _module_block()
     out.write_text(json.dumps(data, sort_keys=True))
 
 
@@ -683,6 +729,17 @@ def main() -> int:
             out = scale_dir / f"{phase}.json"
             if out.exists():
                 parts[phase] = json.loads(out.read_text())
+                # Parent asserts the child process measured with the
+                # IDENTICAL module (mode + resolved path): a phase whose
+                # child imported a different sakurapool would corrupt the
+                # attribution of the whole run.
+                child = parts[phase].get("module", {})
+                if (child.get("mode") != MODULE_MODE
+                        or child.get("module_path") != MODULE_PATH):
+                    raise SystemExit(
+                        f"[{scale}] {phase}: module mismatch between "
+                        f"parent ({MODULE_MODE} {MODULE_PATH}) and child "
+                        f"({child.get('mode')} {child.get('module_path')})")
         if "query" in parts:
             parts["gates"] = _gates(parts["query"])
         if "diff" in parts and parts["diff"]["mismatches"] != 0:
@@ -718,6 +775,7 @@ def main() -> int:
         "pyarrow": pyarrow.__version__,
         "pyroaring": pyroaring.__version__,
     }
+    report["module"] = _module_block()
     report["run_fingerprint"] = _run_fingerprint(args)
     report_path.write_text(json.dumps(report, sort_keys=True))
     print(json.dumps(report, sort_keys=True, indent=1))

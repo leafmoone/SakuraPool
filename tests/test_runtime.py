@@ -551,10 +551,17 @@ def test_crash_resume_after_bitmaps(tmp_path, monkeypatch):
 
 
 def test_crash_resume_ready_rename(tmp_path, monkeypatch):
-    """E: SNAPSHOT written, READY written, rename failed; retry publishes."""
+    """E: rename failed after the final markers were completed inside
+    staging. The staging directory must survive (never deleted); because
+    its marker role was already flipped to published, the compiler fails
+    closed on retry (it can never rmtree a directory it cannot prove it
+    still owns in staging state). Manual cleanup + recompile recovers.
+    No half-published directory is ever left behind."""
     import os
+    import shutil
 
     import sakurapool.runtime.compiler as compiler
+    from sakurapool.runtime.errors import SnapshotCorruptError
 
     tars = {"a.tar": {"1.jpg": b"a", "1.json": meta(["t"])}}
     index = build_p2_index(tmp_path, "crash", tars)
@@ -573,6 +580,14 @@ def test_crash_resume_ready_rename(tmp_path, monkeypatch):
     with pytest.raises(OSError, match="injected crash at rename"):
         compiler.compile_runtime(inv, root)
     monkeypatch.setattr(os, "rename", original_rename)
+    stale = list(root.glob(".staging-*"))
+    assert len(stale) == 1, "staging must survive the rename failure"
+    assert not list((root / "snapshots").glob("*/READY")), \
+        "no half-published snapshot may exist"
+    with pytest.raises(SnapshotCorruptError, match="unowned staging"):
+        compiler.compile_runtime(inv, root)
+    assert stale[0].exists(), "compiler must never delete the stale staging"
+    shutil.rmtree(stale[0])
     summary = compiler.compile_runtime(inv, root)
     with RuntimeSnapshot.open(root) as rt:
         assert rt.rid_count == 1
@@ -607,7 +622,7 @@ def test_fresh_process_open_and_query(tmp_path):
     import sakurapool.runtime.compiler as compiler
     summary = compiler.compile_runtime(load_p2_inventory(index), root)
     code = (
-        "import json, sys;"
+        "import json, sys, sakurapool;"
         "from sakurapool.runtime.snapshot import RuntimeSnapshot;"
         "from sakurapool.runtime.query import RuntimeQuerySpec;"
         "rt = RuntimeSnapshot.open(sys.argv[1]);"
@@ -617,14 +632,21 @@ def test_fresh_process_open_and_query(tmp_path):
         "print(json.dumps({'rids': rids, 'count': r.count(),"
         " 'first_rid': int(batch.rid[0]),"
         " 'first_size': int(batch.image_size[0]),"
-        " 'snapshot': rt.snapshot_id, 'cache_misses': rt.cache.misses}))"
+        " 'snapshot': rt.snapshot_id, 'cache_misses': rt.cache.misses,"
+        " 'module': sakurapool.__file__}))"
     )
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(SRC) + os.pathsep + env.get("PYTHONPATH", "")
+    # The fresh process must import the SAME module the test process uses:
+    # worktree tests (PYTHONPATH=src) forward that, installed/wheel tests
+    # must NOT force src and stay in site-packages.
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    parent_module = Path(__import__("sakurapool").__file__).resolve()
+    if parent_module.is_relative_to(SRC.resolve()):
+        env["PYTHONPATH"] = str(SRC)
     out = subprocess.run(
         [sys.executable, "-c", code, str(root)], capture_output=True,
         text=True, env=env, check=True).stdout.strip()
     result = json.loads(out)
+    assert Path(result["module"]).resolve() == parent_module
     assert result["count"] == 2
     assert result["rids"] == [0, 1]
     assert result["snapshot"] == summary.snapshot_id

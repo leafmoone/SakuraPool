@@ -21,6 +21,7 @@ import json
 import os
 import shutil
 import sqlite3
+import stat
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -699,6 +700,21 @@ KNOWN_STAGING_FILES = frozenset({
 })
 
 
+def _is_link(path: Path) -> bool:
+    """is_symlink() plus, on Windows, the reparse-point attribute:
+    CPython does NOT report junctions (mklink /J) as symlinks, and a
+    junction is exactly the escape vector we must treat as a link."""
+    if path.is_symlink():
+        return True
+    if sys.platform == "win32":
+        try:
+            return bool(os.lstat(path).st_file_attributes
+                        & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+        except OSError:
+            return False
+    return False
+
+
 def _marker_valid(path: Path, snap_id: str, role: str) -> bool:
     """Ownership is proven by a marker, never by the directory name: a
     pre-created `.staging-<snap_id>` (or `snapshots/<snap_id>`) with foreign
@@ -723,8 +739,35 @@ def _staging_owned(staging: Path, snap_id: str) -> bool:
     if not _marker_valid(staging, snap_id, "staging"):
         return False
     # Known-file audit: even with a forged marker, any file outside the
-    # compiler's own file list makes the directory foreign.
-    return {entry.name for entry in staging.iterdir()} <= KNOWN_STAGING_FILES
+    # compiler's own file list makes the directory foreign. The audit also
+    # checks entry TYPES, not just names: a directory, symlink, junction
+    # or reparse point named like a known file (e.g. a directory called
+    # catalog.sqlite hiding user data) is foreign and fails closed, so
+    # nothing nested inside it can ever be rmtree'd.
+    try:
+        entries = list(staging.iterdir())
+    except OSError:
+        return False
+    names = set()
+    for entry in entries:
+        if _is_link(entry) or not entry.is_file():
+            return False
+        names.add(entry.name)
+    return names <= KNOWN_STAGING_FILES
+
+
+def _refuse_link_escape(output_root: Path, child: Path) -> None:
+    """The runtime root and everything we create inside it must resolve
+    within the declared root: a symlink/junction pointing outside would
+    let the compiler read, overwrite or delete files elsewhere."""
+    root = output_root.resolve()
+    try:
+        resolved = child.resolve()
+    except OSError:
+        raise SnapshotCorruptError(f"cannot resolve path: {child}")
+    if not resolved.is_relative_to(root):
+        raise SnapshotCorruptError(
+            f"link escape refused: {child} resolves outside {root}")
 
 
 def _staging_owner_marker(staging: Path, snap_id: str) -> None:
@@ -912,8 +955,15 @@ def compile_runtime(
             snap_id, final, manifest["rid_count"], manifest["object_count"],
             manifest["source_count"], manifest["dataset_count"],
             manifest["tag_count"], manifest["tag_memberships"])
+    # The runtime root itself must be a real directory we can reason
+    # about: a symlink/junction root would point the whole build (and its
+    # deletion branches) somewhere else.
+    if _is_link(output_root):
+        raise SnapshotCorruptError(
+            f"runtime root must not be a symlink or junction: {output_root}")
     staging = output_root / f".staging-{snap_id}"
     if staging.exists():
+        _refuse_link_escape(output_root, staging)
         if not _staging_owned(staging, snap_id):
             # Fail closed: the directory name alone proves nothing, so a
             # pre-created .staging-<snap_id> (marker missing or foreign
@@ -945,6 +995,7 @@ def compile_runtime(
                     stage.current = index - 1
                     break
     staging.mkdir(parents=True, exist_ok=True)
+    _refuse_link_escape(output_root, staging)
     _staging_owner_marker(staging, snap_id)
     stage = _Stage(staging)
 
@@ -1025,16 +1076,19 @@ def compile_runtime(
                     "(remove it manually if it is stale)")
             shutil.rmtree(final)
         final.parent.mkdir(parents=True, exist_ok=True)
+        # The published directory is IMMUTABLE: every final marker
+        # (STAGE=ready, OWNER role=published, READY) is completed inside
+        # staging BEFORE the atomic rename. After the rename this process
+        # writes nothing inside final (only the external current.json),
+        # so a failure after the rename can never leave a half-marked
+        # published directory. Crash before the rename leaves staging
+        # with role=published and no READY: that staging fails closed on
+        # the next compile (its role no longer matches) and is cleaned
+        # up manually, never rmtree'd by us.
+        _Stage(staging).complete("ready")
+        _write_owner_marker(staging, snap_id, "published")
         (staging / "READY").write_text(snap_id, encoding="utf-8")
         os.rename(staging, final)
-        # Flip the marker role (we just renamed this directory, so we own
-        # it) so a published directory can never be mistaken for an
-        # interrupted publish (and deleted) later. A crash between the
-        # rename and this line leaves a READY'd directory with a staging
-        # marker; READY validation returns or raises before any deletion
-        # branch is reached.
-        _write_owner_marker(final, snap_id, "published")
-        _Stage(final).complete("ready")
     current = {
         "snapshot_id": snap_id,
         "path": f"snapshots/{snap_id}",

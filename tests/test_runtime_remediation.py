@@ -700,3 +700,343 @@ def test_real_runtime_eviction_correctness(tmp_path):
     assert (q0.count(), tuple(q0.iter_rids())) == first["t0"]
     assert rt.cache.misses >= 4
     assert rt.cache.resident_bytes() <= budget
+
+
+# ---------------------------------------------------------------------------
+# Reviewer round 3
+# ---------------------------------------------------------------------------
+
+class _SimpleMonkey:
+    """Tiny setattr/undo helper to keep the tests import-agnostic."""
+
+    def __init__(self) -> None:
+        self._saved: list[tuple[Any, str, Any]] = []
+
+    def set(self, obj: Any, name: str, value: Any) -> None:
+        self._saved.append((obj, name, getattr(obj, name)))
+        setattr(obj, name, value)
+
+    def undo(self) -> None:
+        for obj, name, value in reversed(self._saved):
+            setattr(obj, name, value)
+        self._saved.clear()
+
+
+def _mk_inventory(p2_dir: Path, objs) -> Any:
+    from synthetic_p2 import build_p2_directory
+
+    from sakurapool.runtime import load_p2_inventory
+    build_p2_directory(
+        p2_dir, dataset="ds", source="src", objects=objs,
+        created_at="2025-01-01T00:00:00+00:00")
+    return load_p2_inventory(p2_dir)
+
+
+def test_staging_audit_rejects_directory_named_like_known_file(tmp_path):
+    """R3-1 (reviewer repro): a legitimate owner staging containing a
+    DIRECTORY named catalog.sqlite (with user data inside) and no STAGE.txt
+    must fail closed - the old name-only audit rmtree'd it and deleted the
+    user file."""
+    import json as _json
+
+    import sakurapool.runtime.compiler as compiler
+    from sakurapool.runtime import load_p2_inventory
+    from sakurapool.runtime.errors import SnapshotCorruptError
+    objs = [ObjectSpec("a.tar", [SampleSpec("1.jpg", "1", [("t", None)])])]
+    summary, root = _compile_synthetic(tmp_path, "dirinj", objs)
+    (root / "snapshots" / summary.snapshot_id / "READY").unlink()
+    staging = root / f".staging-{summary.snapshot_id}"
+    staging.mkdir()
+    (staging / "OWNER.json").write_text(_json.dumps({
+        "protocol": 1, "owner": compiler.RUNTIME_COMPILER,
+        "snapshot_id": summary.snapshot_id, "role": "staging",
+        "known_files": sorted(compiler.KNOWN_STAGING_FILES)}))
+    (staging / "catalog.sqlite").mkdir()
+    (staging / "catalog.sqlite" / "user.txt").write_text("do not delete")
+    with pytest.raises(SnapshotCorruptError, match="unowned staging"):
+        compiler.compile_runtime(load_p2_inventory(tmp_path / "p2-dirinj"),
+                                 root)
+    # nothing inside the nested directory was touched
+    assert (staging / "catalog.sqlite" / "user.txt").read_text() \
+        == "do not delete"
+    assert staging.exists()
+
+
+def test_staging_audit_rejects_symlink_entry(tmp_path):
+    """R3-1: a symlink entry (even with a known file name) fails closed."""
+    import json as _json
+    import os
+
+    import sakurapool.runtime.compiler as compiler
+    from sakurapool.runtime import load_p2_inventory
+    from sakurapool.runtime.errors import SnapshotCorruptError
+    objs = [ObjectSpec("a.tar", [SampleSpec("1.jpg", "1", [("t", None)])])]
+    summary, root = _compile_synthetic(tmp_path, "syminj", objs)
+    (root / "snapshots" / summary.snapshot_id / "READY").unlink()
+    staging = root / f".staging-{summary.snapshot_id}"
+    staging.mkdir()
+    (staging / "OWNER.json").write_text(_json.dumps({
+        "protocol": 1, "owner": compiler.RUNTIME_COMPILER,
+        "snapshot_id": summary.snapshot_id, "role": "staging",
+        "known_files": sorted(compiler.KNOWN_STAGING_FILES)}))
+    outside = tmp_path / "outside.txt"
+    outside.write_text("user data")
+    try:
+        os.symlink(outside, staging / "STAGE.txt")
+    except OSError:
+        pytest.skip("this OS/user cannot create file symlinks")
+    with pytest.raises(SnapshotCorruptError, match="unowned staging"):
+        compiler.compile_runtime(load_p2_inventory(tmp_path / "p2-syminj"),
+                                 root)
+    assert outside.read_text() == "user data"
+
+
+def test_runtime_root_symlink_refused(tmp_path):
+    """R3-1: the runtime root itself must not be a symlink/junction
+    (link escape: deletion branches would hit the linked-to tree)."""
+    import os
+    import stat
+
+    import sakurapool.runtime.compiler as compiler
+    from sakurapool.runtime import load_p2_inventory
+    from sakurapool.runtime.errors import SnapshotCorruptError
+    objs = [ObjectSpec("a.tar", [SampleSpec("1.jpg", "1", [("t", None)])])]
+    _compile_synthetic(tmp_path, "linkroot", objs)
+    real_root = tmp_path / "realroot"
+    real_root.mkdir()
+    link_root = tmp_path / "linkroot"
+    if sys.platform == "win32":
+        rc = os.system(f'mklink /J "{link_root}" "{real_root}" >nul 2>&1')
+        # CPython does not report junctions via is_symlink; the reparse
+        # attribute is the ground truth (same check the compiler uses)
+        if rc != 0 or not bool(
+                os.lstat(link_root).st_file_attributes
+                & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+            pytest.skip("cannot create a directory junction here")
+    else:
+        link_root.symlink_to(real_root)
+    with pytest.raises(SnapshotCorruptError, match="symlink or junction"):
+        compiler.compile_runtime(
+            load_p2_inventory(tmp_path / "p2-linkroot"), link_root)
+
+
+def test_staging_audit_rejects_junction_entry(tmp_path):
+    """R3-1 (Windows): a junction inside the staging directory (even
+    named like a known file) is a link: fail closed, keep the linked-to
+    bytes untouched."""
+    import json as _json
+    import os
+    import stat
+
+    import sakurapool.runtime.compiler as compiler
+    from sakurapool.runtime import load_p2_inventory
+    from sakurapool.runtime.errors import SnapshotCorruptError
+    if sys.platform != "win32":
+        pytest.skip("junctions are a Windows filesystem feature")
+    objs = [ObjectSpec("a.tar", [SampleSpec("1.jpg", "1", [("t", None)])])]
+    summary, root = _compile_synthetic(tmp_path, "junctinj", objs)
+    (root / "snapshots" / summary.snapshot_id / "READY").unlink()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "user.txt").write_text("keep me")
+    staging = root / f".staging-{summary.snapshot_id}"
+    staging.mkdir()
+    (staging / "OWNER.json").write_text(_json.dumps({
+        "protocol": 1, "owner": compiler.RUNTIME_COMPILER,
+        "snapshot_id": summary.snapshot_id, "role": "staging",
+        "known_files": sorted(compiler.KNOWN_STAGING_FILES)}))
+    rc = os.system(
+        f'mklink /J "{staging / "catalog.sqlite"}" "{outside}" >nul 2>&1')
+    if rc != 0 or not bool(
+            os.lstat(staging / "catalog.sqlite").st_file_attributes
+            & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+        pytest.skip("cannot create a directory junction here")
+    with pytest.raises(SnapshotCorruptError, match="unowned staging"):
+        compiler.compile_runtime(
+            load_p2_inventory(tmp_path / "p2-junctinj"), root)
+    assert (outside / "user.txt").read_text() == "keep me"
+
+
+def test_published_markers_completed_before_rename(tmp_path):
+    """R3-6: every final marker (STAGE=ready, OWNER role=published, READY)
+    is written inside staging BEFORE the atomic rename; after the rename
+    the compiler writes nothing inside the published directory."""
+    import hashlib as _hashlib
+    import json as _json
+
+    import sakurapool.runtime.compiler as compiler
+    objs = [ObjectSpec("a.tar", [SampleSpec("1.jpg", "1", [("t", None)])])]
+    summary, root = _compile_synthetic(tmp_path, "markers", objs)
+    snap = root / "snapshots" / summary.snapshot_id
+    marker = _json.loads((snap / "OWNER.json").read_text(encoding="utf-8"))
+    assert marker["role"] == "published"
+    assert (snap / "STAGE.txt").read_text(encoding="utf-8").strip() == "ready"
+    assert (snap / "READY").read_text(encoding="utf-8") == summary.snapshot_id
+
+    # order proof via spies on a fresh root: the published-role marker
+    # write must target a staging path, i.e. happen before os.rename
+    root2 = tmp_path / "rt2"
+    calls: list[tuple[str, str, str, bool]] = []
+    rename_calls = [0]
+    real_wom = compiler._write_owner_marker
+    real_rename = compiler.os.rename
+
+    def spy_wom(path, snap_id, role):
+        calls.append(("wom", role, str(path), rename_calls[0] > 0))
+        real_wom(path, snap_id, role)
+
+    def spy_rename(a, b):
+        rename_calls[0] += 1
+        return real_rename(a, b)
+
+    monkey = _SimpleMonkey()
+    monkey.set(compiler, "_write_owner_marker", spy_wom)
+    monkey.set(compiler.os, "rename", spy_rename)
+    try:
+        again = compiler.compile_runtime(
+            _mk_inventory(tmp_path / "p2-markers2", objs), root2)
+    finally:
+        monkey.undo()
+    assert again.snapshot_id == summary.snapshot_id
+    published_writes = [c for c in calls if c[1] == "published"]
+    assert published_writes, "no published-role marker written"
+    for _, _, path, after_rename in published_writes:
+        assert not after_rename, f"marker written after rename: {path}"
+        assert ".staging-" in path, f"marker not in staging: {path}"
+
+    # immutability: a validated reuse recompile changes no byte inside the
+    # published directory
+    def digest(d: Path) -> dict:
+        return {p.name: _hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in d.iterdir()}
+    before = digest(snap)
+    compiler.compile_runtime(_mk_inventory(tmp_path / "p2-markers3", objs),
+                             root)
+    assert digest(snap) == before
+
+
+def test_rename_failure_recovers_fail_closed(tmp_path):
+    """R3-6: a failed os.rename leaves staging in place (never deleted,
+    never half-published); after manual cleanup the same input compiles to
+    the identical snapshot."""
+    import shutil as _shutil
+
+    import sakurapool.runtime.compiler as compiler
+    from sakurapool.runtime import load_p2_inventory
+    objs = [ObjectSpec("a.tar", [SampleSpec("1.jpg", "1", [("t", None)])])]
+    summary, root = _compile_synthetic(tmp_path, "renfail", objs)
+    root_r = tmp_path / "rt-renfail2"
+    rename_calls = [0]
+    real_rename = compiler.os.rename
+
+    def flaky_rename(a, b):
+        rename_calls[0] += 1
+        if rename_calls[0] == 1:
+            raise OSError("simulated rename failure")
+        return real_rename(a, b)
+
+    monkey = _SimpleMonkey()
+    monkey.set(compiler.os, "rename", flaky_rename)
+    try:
+        with pytest.raises(OSError, match="simulated rename failure"):
+            compiler.compile_runtime(
+                load_p2_inventory(tmp_path / "p2-renfail"), root_r)
+    finally:
+        monkey.undo()
+    staging = root_r / f".staging-{summary.snapshot_id}"
+    assert staging.exists(), "staging must survive a rename failure"
+    # fail-closed recovery: the marker role was already flipped, so the
+    # compiler refuses to rmtree it; manual cleanup then recompiles clean
+    _shutil.rmtree(staging)
+    again = compiler.compile_runtime(
+        load_p2_inventory(tmp_path / "p2-renfail"), root_r)
+    assert again.snapshot_id == summary.snapshot_id
+
+
+def test_real_32mib_runtime_roaring_eviction(tmp_path):
+    """R3-2: real runtime Roaring eviction at a real 32 MiB budget. The
+    corpus is a tiny real snapshot; its bitmaps/catalog are extended with
+    40 deterministically generated ~1 MiB real pyroaring blobs loaded by
+    the real query path, totaling > 32 MiB so eviction is forced."""
+    import hashlib as _hashlib
+    import random
+    import sqlite3
+
+    from pyroaring import BitMap
+
+    from sakurapool.runtime import RuntimeSnapshot
+    objs = [ObjectSpec("a.tar", [SampleSpec("1.jpg", "1", [("t", None)])])]
+    summary, root = _compile_synthetic(tmp_path, "mib32", objs)
+    snap = root / "snapshots" / summary.snapshot_id
+
+    n_rids = 524288  # ~1.05 MiB serialized Roaring each (array containers)
+    n_tags = 40      # 40 x ~1.05 MiB = ~42 MiB > 32 MiB budget
+
+    cat = sqlite3.connect(str(snap / "catalog.sqlite"))
+    cat.execute("INSERT INTO namespaces (namespace) VALUES ('syn')")
+    ns_id = cat.execute(
+        "SELECT namespace_id FROM namespaces WHERE namespace = 'syn'"
+    ).fetchone()[0]
+    for i in range(n_tags):
+        cat.execute(
+            "INSERT INTO tags (tag_id, namespace_id, value, category,"
+            " cardinality) VALUES (?,?,?,?,?)",
+            (9000 + i, ns_id, f"syn{i:02d}", None, n_rids))
+    cat.commit()
+    cat.close()
+
+    bits = sqlite3.connect(str(snap / "bitmaps.sqlite"))
+    total_bytes = 0
+    expected_rids: dict[str, Any] = {}
+    for i in range(n_tags):
+        # deterministic collision-free rids (odd stride 31 over a 24-bit
+        # space: unique for the first 524288 values), still scattered so
+        # Roaring stores real array containers (~2 B/rid)
+        rng = random.Random(20260709 + i)
+        base = rng.randrange(0, 400_000)
+        bmap = BitMap((base + 31 * k) % (1 << 24) for k in range(n_rids))
+        blob = bytes(bmap.serialize())
+        total_bytes += len(blob)
+        assert len(blob) > 512 * 1024, f"blob too small: {len(blob)}"
+        expected_rids[f"syn{i:02d}"] = tuple(sorted(bmap))
+        bits.execute(
+            "INSERT INTO bitmaps (kind, id, cardinality, serialized_bytes,"
+            " blob_sha256, blob) VALUES (?,?,?,?,?,?)",
+            ("tag", 9000 + i, n_rids, len(blob),
+             _hashlib.sha256(blob).hexdigest(), blob))
+    bits.commit()
+    bits.close()
+    assert total_bytes > 32 * 1024 * 1024, (
+        f"total blobs {total_bytes} B do not exceed the 32 MiB budget")
+
+    # keep the SNAPSHOT.json manifest consistent with the injected bytes
+    # (open() checks per-file sizes; full sha verify is not used here)
+    import json as _json
+    manifest_path = snap / "SNAPSHOT.json"
+    manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+    for name in ("catalog.sqlite", "bitmaps.sqlite"):
+        manifest["files"][name]["bytes"] =             (snap / name).stat().st_size
+    manifest_path.write_text(_json.dumps(manifest), encoding="utf-8")
+
+    budget = 32 * 1024 * 1024
+    rt = RuntimeSnapshot.open(root, cache_bytes=budget)
+    first: dict[str, Any] = {}
+    for i in range(n_tags):
+        tag = f"syn{i:02d}"
+        q = rt.query(namespace="syn", all_tags=[tag])
+        first[tag] = (q.count(), tuple(q.iter_rids()))
+    assert rt.cache.evictions >= 8
+    assert all(n == n_rids for n, _ in first.values())
+    assert rt.cache.resident_bytes() <= budget
+    # the two most recently used blobs are still resident: warm hits with
+    # identical results
+    before_hits = rt.cache.hits
+    for tag in (f"syn{n_tags - 2:02d}", f"syn{n_tags - 1:02d}"):
+        q = rt.query(namespace="syn", all_tags=[tag])
+        assert (q.count(), tuple(q.iter_rids())) == first[tag]
+    assert rt.cache.hits >= 2 and rt.cache.hits > before_hits
+    # an evicted tag reloads and still returns the exact same result set
+    q0 = rt.query(namespace="syn", all_tags=["syn00"])
+    assert (q0.count(), tuple(q0.iter_rids())) == first["syn00"]
+    assert rt.cache.misses >= n_tags
+    assert rt.cache.resident_bytes() <= budget
