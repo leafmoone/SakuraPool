@@ -80,8 +80,8 @@ def test_original_fixtures(tmp_path, case, members, samples, codes):
     ref = ObjectRef(
         obj["storage_id"], obj["object_id"], obj["object_path"], obj["object_size"],
         obj["object_version"], obj["validator"], backend=obj["backend"],
-        repo_type=obj["repo_type"], validator_kind=obj["validator_kind"],
-        validator_strength=obj["validator_strength"],
+        repo_type=obj["repo_type"], archive_format=obj["archive_format"],
+        validator_kind=obj["validator_kind"], validator_strength=obj["validator_strength"],
     )
     with tarfile.open(source, "r:") as tar, source.open("rb") as stream:
         for row in read_rows(out, "samples"):
@@ -254,7 +254,8 @@ def test_identity_formula_conflict_uint64(tmp_path, monkeypatch):
     path = tmp_path / "large.parquet"
     pq.write_table(pa.Table.from_pylist([row], schema), path)
     assert pq.read_table(path).to_pylist() == [row]
-    MemberRef(ObjectRef("local", "a.tar", "a.tar", 2**64 - 1, "a" * 64, "a" * 64),
+    MemberRef(ObjectRef("local", "a.tar", "a.tar", 2**64 - 1, "a" * 64, "a" * 64,
+                        archive_format="tar"),
               "1.jpg", offset_data=1, size=2)
 
 
@@ -411,13 +412,45 @@ def test_v4_contract_constants_and_storage_roundtrip():
 
 def test_object_ref_roundtrip_and_bounds():
     ref = ObjectRef("modelscope-main", "same.tar@sha256-" + "a" * 64,
-                    "same.tar", 100, "a" * 64, "a" * 64)
+                    "same.tar", 100, "a" * 64, "a" * 64,
+                    archive_format="tar")
     payload = {"storage_id": ref.storage_id, "object_id": ref.object_id,
                "object_path": ref.object_path, "object_size": ref.object_size,
-               "object_version": ref.object_version, "validator": ref.validator}
+               "object_version": ref.object_version, "validator": ref.validator,
+               "backend": ref.backend, "repo_type": ref.repo_type,
+               "archive_format": ref.archive_format, "validator_kind": ref.validator_kind,
+               "validator_strength": ref.validator_strength}
     assert ObjectRef(**payload) == ObjectRef(**payload)
     with pytest.raises(ValueError, match="exceeds"):
         MemberRef(ref, "x.jpg", offset_data=99, size=2)
+
+
+def test_objects_parquet_objectref_and_memberrefs_are_lossless(tmp_path):
+    source = tmp_path / "a.tar"
+    members = {"1.jpg": b"image", "1.json": b'{"tags":[]}',
+               "2.png": b"json-image", "2.json": b'{"tags":[]}' }
+    make_tar(source, members)
+    out = tmp_path / "out"
+    indexer.scan(source, out)
+    object_row = read_rows(out, "objects")[0]
+    ref = ObjectRef(
+        object_row["storage_id"], object_row["object_id"], object_row["object_path"],
+        object_row["object_size"], object_row["object_version"], object_row["validator"],
+        backend=object_row["backend"], repo_type=object_row["repo_type"],
+        archive_format=object_row["archive_format"],
+        validator_kind=object_row["validator_kind"],
+        validator_strength=object_row["validator_strength"],
+    )
+    assert (ref.storage_id, ref.repo_type, ref.archive_format) == ("local", "local", "tar")
+    with source.open("rb") as stream:
+        for row in read_rows(out, "samples"):
+            for member_path, offset, size in (
+                (row["image_path"], row["offset_data"], row["size"]),
+                (row["json_path"], row["json_offset_data"], row["json_size"]),
+            ):
+                member = MemberRef(ref, member_path, offset, size)
+                stream.seek(member.offset_data)
+                assert stream.read(member.size) == members[member.path]
 
 
 def test_avif_pairing_and_payload_extent(tmp_path):
@@ -504,6 +537,19 @@ def test_handle_close_failure_keeps_pending_until_retry(tmp_path, monkeypatch):
     assert scope.cleanup() == []
     assert not resource.path.exists()
     assert state["handle"].handle.closed
+
+
+def test_object_ref_archive_format_contract():
+    values = ("local", "object.tar@sha256-" + "a" * 64, "object.tar", 100,
+              "a" * 64, "a" * 64)
+    ref = ObjectRef(*values, backend="local", repo_type="local", archive_format="tar")
+    assert ref.archive_format == "tar"
+    with pytest.raises(ValueError, match="archive_format"):
+        ObjectRef(*values, archive_format="")
+    with pytest.raises(ValueError, match="archive_format"):
+        ObjectRef(*values, archive_format="Tar")
+    with pytest.raises(ValueError, match="must not be tar"):
+        ObjectRef(*values, repo_type="tar")
 
 
 def test_second_spool_connect_failure_releases_both(tmp_path, monkeypatch):

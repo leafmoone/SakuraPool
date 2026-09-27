@@ -56,7 +56,11 @@ includes the SHA256 object version. Canonical paths are nonempty and have no emp
 dot, dot-dot, backslash, or colon components. Noncanonical IDs are rejected, never silently mapped.
 Original key fields are retained with every sample/annotation. Duplicate/colliding
 keys fail without publishing that shard. This is physical-record identity, not dedup.
-`records.ObjectRef` and `records.MemberRef` construct references without opening images.
+`records.ObjectRef` is a self-contained retrieval object descriptor with
+`storage_id/object_id/object_path/object_size/object_version/validator/backend/repo_type/
+archive_format/validator_kind/validator_strength`; `MemberRef` adds member path and
+uint64 extent without opening or decoding images. P2 local objects use
+`repo_type=local` and `archive_format=tar`; remote revision retrieval is not implemented.
 
 **Migration impact:** version 1 outputs must not be reused. Build a new output directory;
 there is no in-place migration. Object IDs, record IDs, table columns, error codes,

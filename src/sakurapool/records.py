@@ -45,6 +45,7 @@ class ObjectRef:
     validator: str
     backend: str = "local"
     repo_type: str | None = "local"
+    archive_format: str = "tar"
     validator_kind: str = "sha256"
     validator_strength: str = "strong:sha256"
 
@@ -61,6 +62,13 @@ class ObjectRef:
             raise ValueError("ObjectRef version must match validator")
         if not self.backend or not self.validator_kind:
             raise ValueError("ObjectRef storage metadata is required")
+        if (not isinstance(self.archive_format, str) or not self.archive_format
+                or self.archive_format != self.archive_format.strip()
+                or any(char.isspace() for char in self.archive_format)
+                or self.archive_format != self.archive_format.lower()):
+            raise ValueError("archive_format must be a canonical nonempty string")
+        if self.repo_type == "tar":
+            raise ValueError("repo_type must not be tar; use archive_format")
         if not self.validator_strength.startswith("strong:"):
             raise ValueError("strong ObjectRef validator required")
 
