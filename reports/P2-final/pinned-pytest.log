@@ -20,7 +20,7 @@ _______________________________ test_cli_config _______________________________
 {"error": "index scan requires --input and --output"}
 _________________________ test_cli_row_error_nonzero __________________________
 ---------------------------- Captured stdout call -----------------------------
-{"archives": 1, "errors": 1, "header_seconds": 0.008176299976184964, "json_seconds": 4.00003045797348e-07, "objects": 1, "objects_committed": 1, "objects_seen": 1, "objects_skipped": 0, "parquet_seconds": 0.033911299891769886, "samples": 1, "skipped": 0, "total_seconds": 0.06349670002236962}
+{"archives": 1, "errors": 1, "header_seconds": 0.0074136999901384115, "json_seconds": 5.00003807246685e-07, "objects": 1, "objects_committed": 1, "objects_seen": 1, "objects_skipped": 0, "parquet_seconds": 0.023660399951040745, "samples": 1, "skipped": 0, "total_seconds": 0.05649220000486821}
 - generated xml file: D:\SakuraTool\SakuraPool\reports\P2-final\pinned-junit.xml -
 =========================== short test summary info ===========================
 PASSED D:\SakuraTool\SakuraPool\tests\test_evaluator.py::test_filter_select_and_limit_are_deterministic
@@ -125,4 +125,4 @@ PASSED D:\SakuraTool\SakuraPool\tests\test_registry.py::test_schema_and_model_re
 PASSED D:\SakuraTool\SakuraPool\tests\test_schema.py::test_rows_to_table_preserves_schema_and_values
 PASSED D:\SakuraTool\SakuraPool\tests\test_schema.py::test_rows_to_table_rejects_unknown_and_missing_fields
 PASSED D:\SakuraTool\SakuraPool\tests\test_schema.py::test_custom_schema
-============================= 102 passed in 8.82s =============================
+============================ 102 passed in 11.11s =============================

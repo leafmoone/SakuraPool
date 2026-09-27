@@ -1,6 +1,6 @@
 {
   "base_sha": "52358d6fca728d2bba12814490e0974a6907b218",
-  "new_implementation": "44b30f36f844285d03f298c9cdc6664437717e43",
+  "new_implementation": "f66f6946cd04de05100275735b4910942379da69",
   "hash_basis": "Git index blob bytes for report artifacts; filesystem bytes for requested binary diff",
   "artifacts": [
     {
@@ -292,11 +292,6 @@
       "path": "reports/P2-final/wheelhouse-provenance.log",
       "bytes": 766,
       "sha256": "9afe38044a1b40ae2f4b702a995b4c745e0a3fc7237100597a64d34d50d393ac"
-    },
-    {
-      "path": "SakuraPool-P2-final-repair.diff",
-      "bytes": 7257,
-      "sha256": "d1a1a725ba31d35d7563f4ce6d9c3fff5d342f8fea0b16b6cdafee2e57b77b9c"
     }
   ]
 }

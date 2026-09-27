@@ -1,7 +1,9 @@
 {
   "base_sha": "52358d6fca728d2bba12814490e0974a6907b218",
   "previous_submission": "2f13b0d2153347644c8d7342546580d0fb1579ce",
-  "new_implementation": "44b30f36f844285d03f298c9cdc6664437717e43",
+  "new_implementation": "f66f6946cd04de05100275735b4910942379da69",
+  "api_compatibility": "archive_format keyword-only; old 9/10 positional calls preserved",
+  "new_submission": "pending evidence commit SHA",
   "format_version": 4,
   "builder": "sakurapool-p2-v4",
   "objectref_fields": ["storage_id", "object_id", "object_path", "object_size", "object_version", "validator", "backend", "repo_type", "archive_format", "validator_kind", "validator_strength"],
@@ -10,24 +12,23 @@
     "host": {"tests": 102, "failures": 0, "errors": 0},
     "pinned": {"tests": 102, "failures": 0, "errors": 0}
   },
-  "objectref_specialized_tests": {"count": 4, "passed": 4},
+  "objectref_specialized_tests": {"count": 5, "passed": 5},
   "benchmark": {
     "exit": 0,
     "pairs": 10000,
     "samples": 10000,
     "errors": 0,
-    "total_seconds": 1.5289890000130981,
-    "header_seconds": 0.4298747999127954,
-    "json_seconds": 0.07875250291544944,
-    "parquet_seconds": 0.2044273999053985,
-    "peak_rss_bytes": 84914176,
+    "total_seconds": 1.5712986000580713,
+    "header_seconds": 0.4625489000463858,
+    "json_seconds": 0.08327471243683249,
+    "parquet_seconds": 0.18602690007537603,
+    "peak_rss_bytes": 84541440,
     "scope": "synthetic local TAR; not production or ModelScope performance"
   },
   "incremental_diff": {
-    "path": "SakuraPool-P2-final-repair.diff",
-    "range": "2f13b0d2153347644c8d7342546580d0fb1579ce..44b30f36f844285d03f298c9cdc6664437717e43",
-    "bytes": 7257,
-    "sha256": "d1a1a725ba31d35d7563f4ce6d9c3fff5d342f8fea0b16b6cdafee2e57b77b9c"
+    "historical_range": "2f13b0d2153347644c8d7342546580d0fb1579ce..44b30f36f844285d03f298c9cdc6664437717e43",
+    "historical_status": "incomplete implementation range, not the final submission patch; trailing-whitespace context caused diff-check failure",
+    "final_patch": "generated untracked after final evidence submission; hash reported in final response"
   },
   "gates": {
     "host_pytest": 0,

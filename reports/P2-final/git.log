@@ -1,3 +1,5 @@
+f66f6946cd04de05100275735b4910942379da69 fix(records): preserve ObjectRef positional ABI
+4e770cefc39fa0a93ad694effe6e2955fc4e4d84 docs(records): record ObjectRef archive format repair
 44b30f36f844285d03f298c9cdc6664437717e43 fix(records): make ObjectRef archive format explicit
 2f13b0d2153347644c8d7342546580d0fb1579ce docs(index): record retryable pending cleanup
 c496a5cac0f8725b71fb6894e58f13bbd59f8f23 fix(index): expose retryable scoped cleanup handles
