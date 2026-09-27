@@ -107,11 +107,29 @@ class _TableProxy:
 class _SpoolState:
     def __init__(self, path: Path, handle) -> None:
         self.path, self.handle, self.db = path, handle, None
+        self.errors: list[BaseException] = []
+
+
+class CleanupHandle:
+    """Controlled retry handle for owned spool resources after a scan failure."""
+    def __init__(self, scope: "_SpoolScope") -> None:
+        self._scope = scope
+        self.errors: list[BaseException] = []
+
+    @property
+    def pending_resources(self) -> list[dict[str, Any]]:
+        return [{"path": resource.path, "errors": list(resource.errors)}
+                for resource in self._scope.resources]
+
+    def retry(self) -> list[dict[str, Any]]:
+        self.errors = self._scope.cleanup()
+        return self.pending_resources
 
 
 class _SpoolScope:
     def __init__(self) -> None:
         self.resources: set[_SpoolState] = set()
+        self.handle = CleanupHandle(self)
 
     def add(self, resource: _SpoolState) -> None:
         self.resources.add(resource)
@@ -122,7 +140,11 @@ class _SpoolScope:
     def cleanup(self) -> list[BaseException]:
         errors = []
         for resource in list(self.resources):
-            errors.extend(_release_spool(resource))
+            resource_errors = _release_spool(resource)
+            errors.extend(resource_errors)
+            if not resource_errors:
+                self.discard(resource)
+        self.handle.errors = errors
         return errors
 
 
@@ -150,6 +172,7 @@ def _release_spool(resource: _SpoolState) -> list[BaseException]:
         except BaseException as exc:
             errors.append(exc)
     errors.extend(_remove_spool_files(resource.path))
+    resource.errors = errors
     if not errors:
         resource.db = None
         resource.handle = None
@@ -183,7 +206,9 @@ class _MemberSpool:
             cleanup_errors = _release_spool(self.resource)
             for cleanup_error in cleanup_errors:
                 primary.add_note(f"spool cleanup failed: {cleanup_error!r}")
-            if not cleanup_errors:
+            if cleanup_errors:
+                primary.cleanup_handle = self.scope.handle
+            else:
                 self.scope.discard(self.resource)
             raise
 
@@ -214,7 +239,9 @@ class _MemberSpool:
             self.scope.discard(self.resource)
             self.db = None
         if errors:
-            raise SpoolCleanupError("spool cleanup failed: " + repr(errors[0]))
+            error = SpoolCleanupError("spool cleanup failed: " + repr(errors[0]))
+            error.cleanup_handle = self.scope.handle
+            raise error
 
 
 class _SpoolRows:
@@ -247,7 +274,9 @@ class _SpoolRows:
             cleanup_errors = _release_spool(self.resource)
             for cleanup_error in cleanup_errors:
                 primary.add_note(f"spool cleanup failed: {cleanup_error!r}")
-            if not cleanup_errors:
+            if cleanup_errors:
+                primary.cleanup_handle = self.scope.handle
+            else:
                 self.scope.discard(self.resource)
             raise
 
@@ -291,7 +320,9 @@ class _SpoolRows:
             self.scope.discard(self.resource)
             self.db = None
         if errors:
-            raise SpoolCleanupError("spool cleanup failed: " + repr(errors[0]))
+            error = SpoolCleanupError("spool cleanup failed: " + repr(errors[0]))
+            error.cleanup_handle = self.scope.handle
+            raise error
 
 
 FORMAT_VERSION = 4
@@ -601,6 +632,8 @@ def _scan_shard(path: Path, rel: str, adapter: DatasetAdapter, hash_images: bool
                                 verify_offsets, scope)
     except BaseException as primary:
         cleanup_errors = _cleanup_spools(scope)
+        if cleanup_errors:
+            primary.cleanup_handle = scope.handle
         for cleanup_error in cleanup_errors:
             primary.add_note(f"spool cleanup failed: {cleanup_error!r}")
         raise
@@ -766,7 +799,9 @@ def scan(root: Path, output: Path, *, hash_images: bool = False, dataset: str = 
                 except BaseException as cleanup_error:
                     if primary is not None:
                         primary.add_note(f"row spool cleanup failed: {cleanup_error!r}")
+                        primary.cleanup_handle = rows.scope.handle
                     else:
+                        cleanup_error.cleanup_handle = rows.scope.handle
                         raise
             if _validator(path) != validators[rel]:
                 raise ValueError("input validator mismatch: input changed during scan")

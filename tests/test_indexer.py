@@ -559,6 +559,31 @@ def test_close_failure_and_primary_error_cleanup(tmp_path, monkeypatch):
     assert not created[0].exists()
 
 
+def test_scan_error_exposes_retryable_cleanup_handle_after_gc(tmp_path, monkeypatch):
+    source = tmp_path / "a.tar"
+    make_tar(source, {"1.jpg": b"x", "1.json": b"{}"})
+    original_remove = indexer._remove_spool_files
+    denied = {"active": True}
+    def fail_remove(path):
+        if denied["active"] and path.name.startswith("sakurapool-spool-"):
+            return [PermissionError("unlink denied")]
+        return original_remove(path)
+    monkeypatch.setattr(indexer, "_remove_spool_files", fail_remove)
+    with pytest.raises(indexer.SpoolCleanupError) as caught:
+        indexer.scan(source, tmp_path / "out")
+    error = caught.value
+    handle = error.cleanup_handle
+    assert handle.pending_resources
+    assert all(item["path"].is_absolute() for item in handle.pending_resources)
+    del caught, error
+    import gc
+    gc.collect()
+    denied["active"] = False
+    assert handle.retry() == []
+    assert not list(tmp_path.glob("**/sakurapool-*.sqlite*"))
+    monkeypatch.setattr(indexer, "_remove_spool_files", original_remove)
+
+
 def test_success_path_cleanup_failure_blocks_commit(tmp_path, monkeypatch):
     source = tmp_path / "a.tar"
     make_tar(source, {"1.jpg": b"x", "1.json": b"{}"})
@@ -589,6 +614,32 @@ def test_primary_error_survives_cleanup_error(tmp_path, monkeypatch):
     monkeypatch.setattr(indexer, "_cleanup_spools", original_cleanup)
 
 
+def test_reference_error_exposes_retry_handle_after_gc(tmp_path, monkeypatch):
+    source = tmp_path / "a.tar"
+    make_tar(source, {"1.jpg": b"x", "1.json": b"{}"})
+    original_validate = indexer._validate_references
+    original_remove = indexer._remove_spool_files
+    def fail_validate(rows):
+        raise RuntimeError("reference primary")
+    def fail_remove(path):
+        if path.name.startswith("sakurapool-spool-"):
+            return [PermissionError("unlink denied")]
+        return original_remove(path)
+    monkeypatch.setattr(indexer, "_validate_references", fail_validate)
+    monkeypatch.setattr(indexer, "_remove_spool_files", fail_remove)
+    with pytest.raises(RuntimeError, match="reference primary") as caught:
+        indexer.scan(source, tmp_path / "out")
+    error = caught.value
+    handle = error.cleanup_handle
+    assert handle.pending_resources
+    del caught, error
+    import gc
+    gc.collect()
+    monkeypatch.setattr(indexer, "_remove_spool_files", original_remove)
+    assert handle.retry() == []
+    monkeypatch.setattr(indexer, "_validate_references", original_validate)
+
+
 def test_reference_error_keeps_primary_when_rows_unlink_fails(tmp_path, monkeypatch):
     source = tmp_path / "a.tar"
     make_tar(source, {"1.jpg": b"x", "1.json": b"{}"})
@@ -608,6 +659,31 @@ def test_reference_error_keeps_primary_when_rows_unlink_fails(tmp_path, monkeypa
     assert not list((tmp_path / "out").glob("*.COMMIT"))
     monkeypatch.setattr(indexer, "_validate_references", original_validate)
     monkeypatch.setattr(indexer, "_remove_spool_files", original_remove)
+
+
+def test_scope_cleanup_partial_success_retains_only_failed_resource(tmp_path, monkeypatch):
+    scope = indexer._SpoolScope()
+    first = indexer._SpoolRows(scope)
+    second = indexer._SpoolRows(scope)
+    original_remove = indexer._remove_spool_files
+    failed = first.path
+    def fail_one(path):
+        if path == failed:
+            return [PermissionError("one resource denied")]
+        return original_remove(path)
+    monkeypatch.setattr(indexer, "_remove_spool_files", fail_one)
+    errors = scope.cleanup()
+    assert len(errors) == 1
+    assert len(scope.resources) == 1
+    pending = scope.handle.pending_resources
+    assert pending[0]["path"] == failed
+    assert pending[0]["errors"]
+    assert next(iter(scope.resources)).path == failed
+    assert second.path.exists() is False
+    monkeypatch.setattr(indexer, "_remove_spool_files", original_remove)
+    assert scope.handle.retry() == []
+    assert not scope.resources
+    assert not scope.handle.pending_resources
 
 
 def test_scan_failure_does_not_cleanup_external_scope(tmp_path, monkeypatch):
