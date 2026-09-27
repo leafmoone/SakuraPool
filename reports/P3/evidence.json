@@ -1,16 +1,25 @@
 {
  "base": "6c45548e01b0856d6d4bbce18e240be0b22ae7e7",
- "base_note": "P2 final == main == origin main (root-confirmed; earlier report wrongly cited P1 52358d6f)",
+ "base_note": "P2 final == main == origin main (root-confirmed)",
  "benchmark": {
+  "env": {
+   "numpy": "2.2.6",
+   "platform": "Windows-11-10.0.26100-SP0",
+   "pyarrow": "18.1.0",
+   "pyroaring": "1.1.0",
+   "python": "3.12.13"
+  },
   "file": "benchmark.json",
-  "memory_growth_5m_over_1m": 1.76,
+  "fingerprint_basis": "sha256 over the whole src tree (incl. records.py/indexer.py), tools/bench_runtime.py, tests/synthetic_p2.py, Python version, numpy/pyarrow/pyroaring versions, and bench options",
+  "memory_growth_5m_over_1m": 1.79,
+  "query_file": "query-benchmark.json",
   "raw_log": "raw/bench-final.log",
-  "run_bound": "each phase JSON carries run_id = sha256(runtime source tree + bench options); stale trees re-run",
+  "run_fingerprint": "802601867b19e64804332ae4efc36cac7799ae286c2c0515653c1586f6da061c",
   "scales": {
    "100k": {
-    "compile_peak_rss_bytes": 154816512,
-    "compile_peak_temp_bytes": 41026020,
-    "compile_wall_s": 2.317,
+    "compile_peak_rss_bytes": 166797312,
+    "compile_peak_temp_bytes": 41026506,
+    "compile_wall_s": 5.15,
     "diff_mismatches": 0,
     "gates": {
      "note": "gates apply at 5M scale only"
@@ -20,12 +29,12 @@
      "s": 0.003
     },
     "query_open_s": 0.001,
-    "query_peak_rss_bytes": 55513088
+    "query_peak_rss_bytes": 56594432
    },
    "1M": {
-    "compile_peak_rss_bytes": 221904896,
-    "compile_peak_temp_bytes": 414408255,
-    "compile_wall_s": 51.158,
+    "compile_peak_rss_bytes": 264245248,
+    "compile_peak_temp_bytes": 414408823,
+    "compile_wall_s": 82.4,
     "diff_mismatches": null,
     "gates": {
      "note": "gates apply at 5M scale only"
@@ -35,12 +44,12 @@
      "s": 0.007
     },
     "query_open_s": 0.001,
-    "query_peak_rss_bytes": 76627968
+    "query_peak_rss_bytes": 77434880
    },
    "5M": {
-    "compile_peak_rss_bytes": 390856704,
-    "compile_peak_temp_bytes": 2088730157,
-    "compile_wall_s": 315.031,
+    "compile_peak_rss_bytes": 471683072,
+    "compile_peak_temp_bytes": 2088730643,
+    "compile_wall_s": 466.015,
     "diff_mismatches": null,
     "gates": {
      "cache_resident_bounded": true,
@@ -51,42 +60,29 @@
     },
     "locations100k": {
      "rows": 100000,
-     "s": 0.007
+     "s": 0.008
     },
     "query_open_s": 0.001,
-    "query_peak_rss_bytes": 159080448
+    "query_peak_rss_bytes": 160522240
    }
   }
  },
- "corrections": [
-  "fingerprint never included COMMIT.created_at (code was correct; old report wrong; now pinned by test)",
-  "query CLI existed; --index/--snapshot/--spec/--full + JSON any_of added",
-  "BASE is 6c45548e (P2 final), not 52358d6f (P1)",
-  "5M peak RSS 795MiB was pre-remediation (whole-file hashing); final tree is 372MiB"
- ],
  "implementation_commits": [
+  "9d85c4bf570e5ae8e480850d29f9dbc105e1ce28",
   "8aaa2998330d74ca576c0e56a1629f499e23c83a",
   "d1852ea105c7e876bc5bb75d9c82831a1806b995",
   "6ee1841315c5f871445b86f62a0c828b6967b2d0",
   "ea65bf27acc3fac450e86f9c0da30552c5e4d27e",
   "27939cbfb74a6b68ef9fb0252dd4e07cc6c111d7",
   "9d05e02c8434ebac4676f56566135accfedcbde9",
-  "9e62fd6b3b54eaebb906b9e5d484b7f1df316e13"
+  "9e62fd6b3b54eaebb906b9e5d484b7f1df316e13",
+  "addaa7c86b2c17bdaa7cb1129669375431b75b0d",
+  "27799c5b20e4839a8c06f8717c90c468f300e307",
+  "7c2f220e1c9cb5b96e3352059556b0c748e11aaf"
  ],
- "item_map": {
-  "A": "tests/test_runtime_remediation.py::test_locations_payload_tamper_only_full_verify, ::test_whole_file_swap_same_shape_rejected, ::test_explicit_snapshot_dir_open, ::test_keyword_query_entry_and_len_and_object_ref",
-  "B": "::test_ready_reuse_validated_and_current_repaired, ::test_staging_ownership_respected + existing crash/resume suite",
-  "C": "::test_streaming_hash_parity + 5M query RSS 152MiB in benchmark.json",
-  "D": "::test_byte_lru_oversized_and_budget, ::test_byte_lru_32mib_real_eviction, ::test_default_cache_budget_is_256mib",
-  "E": "::test_bare_unknown_namespace_errors, ::test_record_batches_carry_names, ::test_planner_short_circuits_on_stored_cardinality, ::test_keyword_query_entry_and_len_and_object_ref",
-  "F": "::test_cli_spec_and_flags, ::test_created_at_does_not_change_snapshot_id",
-  "G": "::test_inventory_rejects_stray_files, ::test_inventory_rejects_row_ownership_violation, ::test_synthetic_p2_follows_real_contract",
-  "H": "::test_uint64_offsets_and_metadata_presence",
-  "I": "benchmark.json (e2e gate, per-family cold cache, 10k cap, run fingerprint, locations100k)",
-  "J": "tests-3.12.log, raw/venv312.txt, reports/P3 committed with hashes.sha256"
- },
  "pinned_env": {
-  "cli": "compile rc=0, query rc=0, --spec/--full rc=0 (raw/venv312.txt)",
+  "cli_rc": "7/7 rc=0 (compile, query --all-tag --full, query --snapshot --any-tag, query --spec any_of JSON, verify --full, inspect, lookup), all from outside the repo with PYTHONPATH removed",
+  "log": "raw/pinned-env.txt + raw/venv312-cli-verify.log",
   "pins": {
    "numpy": "2.2.6",
    "pyarrow": "18.1.0",
@@ -94,20 +90,31 @@
   },
   "pip_check": "No broken requirements found (exit 0)",
   "python": "3.12.13",
-  "tool": "uv venv + uv pip install -e . (normal wheel installs, not --no-deps)"
+  "tool": "uv build --wheel; uv venv (clean); uv pip install <wheel> + pip + pytest"
  },
- "ruff": "All checks passed (exit 0)",
+ "round2_item_map": {
+  "R2-1": "tests/test_runtime_remediation.py::test_same_id_staging_without_marker_fail_closed, ::test_same_id_staging_forced_marker_fail_closed, ::test_unowned_snapshot_dir_never_deleted, ::test_staging_ownership_respected + crash/resume suite",
+  "R2-2": "hashes.sha256 rebuilt from index/blob bytes (git cat-file), verified against committed blobs",
+  "R2-3": "raw/venv312-cli-verify.log (full CLI, outside repo, clean env), tests-wheel-3.12.log (159/159 on the wheel install), raw/pinned-env.txt",
+  "R2-4": "::test_real_runtime_eviction_correctness (real Roaring loads, 3x16.4KB in 48KiB, identical results across eviction, honest stats) + existing 32MiB ByteLRU test",
+  "R2-5": "::test_planner_source_dataset_cardinality_order (rare tag before source/dataset, full AND condition set)",
+  "R2-6": "evidence-manifest.json, query-benchmark.json, full raw logs, implementation list includes 9d85c4bf",
+  "R2-7": "run fingerprint now covers whole src tree + Python + dependency versions + options; report records env + run_fingerprint; 100k/1M/5M actually re-run in the pinned 3.12 wheel environment"
+ },
+ "ruff": "All checks passed (exit 0, raw/ruff.log)",
  "tests": {
-  "host_3.14": {
+  "host_3.14.5": {
    "exit_code": 0,
    "failed": 0,
-   "passed": 154
+   "log": "tests-host-3.14.log",
+   "passed": 159
   },
-  "pinned_3.12.13": {
+  "wheel_3.12.13": {
    "exit_code": 0,
    "failed": 0,
-   "log": "tests-3.12.log",
-   "passed": 154
+   "install": "real wheel dist/sakurapool-0.1.0-py3-none-any.whl, normal dependency resolution, clean venv .venv312w, no editable, no PYTHONPATH",
+   "log": "tests-wheel-3.12.log",
+   "passed": 159
   }
  }
 }

@@ -1,0 +1,59 @@
+{
+ "commands": [
+  {
+   "command": "env -u PYTHONPATH .venv312w/Scripts/python -m pytest tests -q -p no:cacheprovider",
+   "cwd": "D:/SakuraTool/SakuraPool",
+   "exit": 0,
+   "label": "tests wheel 3.12 (outside-repo venv, clean PYTHONPATH)",
+   "log": "tests-wheel-3.12.log",
+   "log_bytes": 268,
+   "log_sha256": "4722089c56e98ece817edd9ed3b532f71155b7a9ef12fdcf765f69fa5278bdca"
+  },
+  {
+   "command": "PYTHONPATH=src python -m pytest tests -q -p no:cacheprovider",
+   "cwd": "D:/SakuraTool/SakuraPool",
+   "exit": 0,
+   "label": "tests host 3.14.5",
+   "log": "tests-host-3.14.log",
+   "log_bytes": 268,
+   "log_sha256": "8fdbf3d96d6c2f0e2e8011e162576ed05551062a085807ce25df550924cc2c70"
+  },
+  {
+   "command": "python -m ruff check .",
+   "cwd": "D:/SakuraTool/SakuraPool",
+   "exit": 0,
+   "label": "ruff",
+   "log": "raw/ruff.log",
+   "log_bytes": 26,
+   "log_sha256": "7e8e995beb6b942867c80817910cf3a80d4b9cb10974bc60ce55e6e21f00e688"
+  },
+  {
+   "command": "env -u PYTHONPATH .venv312w/Scripts/python tools/bench_runtime.py --workdir build/bench-final",
+   "cwd": "D:/SakuraTool/SakuraPool",
+   "exit": 0,
+   "label": "benchmark 100k/1M/5M (pinned 3.12 wheel env, final tree)",
+   "log": "raw/bench-final.log",
+   "log_bytes": 21400,
+   "log_sha256": "6b780d2f0a6a4362cffe3043306d8243c60cc3676eab5c1748c2dd358aabc205"
+  },
+  {
+   "command": "see raw/venv312-cli-verify.log for per-command lines (pip check, import assert, compile, query x3, verify --full, inspect, lookup)",
+   "cwd": "C:/Users/PC/AppData/Local/Temp/sp3-wheel-verify",
+   "exit": 0,
+   "label": "pip check + import-path assertion + full CLI (outside repo, PYTHONPATH removed)",
+   "log": "raw/venv312-cli-verify.log",
+   "log_bytes": 4115,
+   "log_sha256": "a3e51de94cff3b9ab39c9de28366c25ff16277e216345b6b8c13d11e24da687f"
+  },
+  {
+   "command": ".venv312w/Scripts/python -m pip list --format=freeze | ...",
+   "cwd": "D:/SakuraTool/SakuraPool",
+   "exit": 0,
+   "label": "pinned env summary (python --version, pip check, pip list freeze)",
+   "log": "raw/pinned-env.txt",
+   "log_bytes": 121,
+   "log_sha256": "81001eb882bc2381aa6d12f3d45fa06e9ac775303197b5d45c6dd8c984b464e0"
+  }
+ ],
+ "generated_at_note": "hashes/bytes refer to the committed blob bytes (see hashes.sha256)"
+}
