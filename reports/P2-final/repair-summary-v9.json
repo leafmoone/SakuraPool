@@ -3,7 +3,7 @@
   "previous_submission": "2f13b0d2153347644c8d7342546580d0fb1579ce",
   "new_implementation": "f66f6946cd04de05100275735b4910942379da69",
   "api_compatibility": "archive_format keyword-only; old 9/10 positional calls preserved",
-  "new_submission": "pending evidence commit SHA",
+  "new_submission": "final evidence commit SHA supplied in delivery reply",
   "format_version": 4,
   "builder": "sakurapool-p2-v4",
   "objectref_fields": ["storage_id", "object_id", "object_path", "object_size", "object_version", "validator", "backend", "repo_type", "archive_format", "validator_kind", "validator_strength"],

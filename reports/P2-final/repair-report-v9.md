@@ -5,7 +5,7 @@
 - BASE: `52358d6fca728d2bba12814490e0974a6907b218`
 - PREVIOUS_SUBMISSION: `2f13b0d2153347644c8d7342546580d0fb1579ce`
 - NEW_IMPLEMENTATION: `f66f6946cd04de05100275735b4910942379da69`
-- NEW_SUBMISSION: 本轮最终 evidence 提交后的新 SHA
+- NEW_SUBMISSION: 最终 evidence commit SHA 在本轮交付回复中提供
 - main: `52358d6fca728d2bba12814490e0974a6907b218`，未修改
 - dev: implementation 后追加本报告/evidence commit
 - status: `WAITING_REVIEW`
@@ -81,7 +81,7 @@ README 已说明 ObjectRef 是 self-contained retrieval descriptor，P2 local �
 此前生成并提交的 `SakuraPool-P2-final-repair.diff` 仅覆盖
 `2f13b0d2153347644c8d7342546580d0fb1579ce..44b30f36f844285d03f298c9cdc6664437717e43`，其 bytes/hash 是历史 implementation 范围，不能冒称用户要求的完整送审 patch；该历史 patch 含 trailing-whitespace context，BASE..历史提交的 diff-check 曾 exit 2。已取消其 Git 跟踪但保留为审查材料。
 
-本轮最终 submission 产生后，用 `git diff --binary 2f13b0d2153347644c8d7342546580d0fb1579ce..FINAL_SUBMISSION` 覆盖同名未跟踪文件。最终 bytes/hash只在最终回复给出，避免自引用。evidence manifest 不记录该未跟踪最终 patch；历史报告和旧 hash 保留为历史证据，不表示最终完整送审 patch。
+本轮最终 submission 产生后，用 `git diff --binary 2f13b0d2153347644c8d7342546580d0fb1579ce..FINAL_SUBMISSION` 覆盖同名未跟踪文件。最终 bytes/hash只在最终回复给出，避免自引用。evidence manifest 不记录该未跟踪最终 patch；manifest 自身也不列入自己的 artifact 清单。历史报告和旧 hash 保留为历史证据，不表示最终完整送审 patch。
 
 ## 终止声明
 
