@@ -542,8 +542,15 @@ def test_handle_close_failure_keeps_pending_until_retry(tmp_path, monkeypatch):
 def test_object_ref_archive_format_contract():
     values = ("local", "object.tar@sha256-" + "a" * 64, "object.tar", 100,
               "a" * 64, "a" * 64)
+    old_nine = ObjectRef(*values, "local", "local", "sha256")
+    old_ten = ObjectRef(*values, "local", "local", "sha256", "strong:sha256")
+    assert old_nine.validator_kind == old_ten.validator_kind == "sha256"
+    assert old_nine.validator_strength == old_ten.validator_strength == "strong:sha256"
+    assert old_nine.archive_format == old_ten.archive_format == "tar"
     ref = ObjectRef(*values, backend="local", repo_type="local", archive_format="tar")
     assert ref.archive_format == "tar"
+    assert ref.validator_kind == "sha256"
+    assert ref.validator_strength == "strong:sha256"
     with pytest.raises(ValueError, match="archive_format"):
         ObjectRef(*values, archive_format="")
     with pytest.raises(ValueError, match="archive_format"):

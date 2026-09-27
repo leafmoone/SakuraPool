@@ -58,7 +58,8 @@ Original key fields are retained with every sample/annotation. Duplicate/collidi
 keys fail without publishing that shard. This is physical-record identity, not dedup.
 `records.ObjectRef` is a self-contained retrieval object descriptor with
 `storage_id/object_id/object_path/object_size/object_version/validator/backend/repo_type/
-archive_format/validator_kind/validator_strength`; `MemberRef` adds member path and
+archive_format/validator_kind/validator_strength`; `archive_format` is keyword-only to
+preserve the pre-existing positional ObjectRef ABI. `MemberRef` adds member path and
 uint64 extent without opening or decoding images. P2 local objects use
 `repo_type=local` and `archive_format=tar`; remote revision retrieval is not implemented.
 

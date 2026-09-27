@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
 
@@ -45,9 +45,9 @@ class ObjectRef:
     validator: str
     backend: str = "local"
     repo_type: str | None = "local"
-    archive_format: str = "tar"
     validator_kind: str = "sha256"
     validator_strength: str = "strong:sha256"
+    archive_format: str = field(default="tar", kw_only=True)
 
     def __post_init__(self) -> None:
         if not self.storage_id or not isinstance(self.storage_id, str):
