@@ -1,6 +1,6 @@
 # SakuraPool
 
-Typed P1 reference queries and a P4 local uncompressed TAR index builder. No data
+Typed P1 reference queries and a P2 local uncompressed TAR index builder. No data
 service access, image decoding, production throughput claims, P3, or model execution.
 
 ## Installation and CLI
@@ -38,8 +38,9 @@ there were no JSON member extents or registry-defined tag namespace/origin/categ
 P1's toy query schema is not evidence that these original domain requirements existed.
 
 **New definition (on-disk schema version 4):** one Object is one TAR shard, identified
-within a dataset by its canonical relative POSIX object path. Each successfully paired
-physical sample is one samples row; invalid/unpaired candidates produce errors instead.
+by a stable storage profile plus a content-bound object_id. Each successfully paired
+physical sample is one samples row; invalid/unpaired candidates produce errors while
+required missing metadata retains the sample row.
 `RecordKey=(dataset_id, object_id, sample_path)`, where sample_path is the adapter's
 full logical member stem, not an image byte offset. `record_id` is exactly:
 
@@ -50,8 +51,9 @@ hashlib.blake2b(json.dumps(
 ).encode("utf-8"), digest_size=16).hexdigest()
 ```
 
-Canonical object IDs are nonempty relative POSIX paths without empty, dot, dot-dot,
-backslash, or colon components. Noncanonical IDs are rejected, never silently mapped.
+The object_path is a canonical relative POSIX path; object_id is content-bound and
+includes the SHA256 object version. Canonical paths are nonempty and have no empty,
+dot, dot-dot, backslash, or colon components. Noncanonical IDs are rejected, never silently mapped.
 Original key fields are retained with every sample/annotation. Duplicate/colliding
 keys fail without publishing that shard. This is physical-record identity, not dedup.
 `records.ObjectRef` and `records.MemberRef` construct references without opening images.

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import tarfile
 import tempfile
 import time
@@ -104,7 +105,30 @@ class _TableProxy:
         self.owner.append(self.name, row)
 
 
-_ACTIVE_SPOOLS: dict[Path, sqlite3.Connection] = {}
+_ACTIVE_SPOOLS: dict[Path, sqlite3.Connection | None] = {}
+
+
+def _remove_spool_files(path: Path) -> list[BaseException]:
+    errors = []
+    for candidate in (path, Path(str(path) + "-journal"), Path(str(path) + "-wal"),
+                      Path(str(path) + "-shm")):
+        try:
+            candidate.unlink(missing_ok=True)
+        except BaseException as exc:
+            errors.append(exc)
+    return errors
+
+
+def _release_spool(path: Path, db: sqlite3.Connection | None) -> list[BaseException]:
+    errors = []
+    if db is not None:
+        try:
+            db.close()
+        except BaseException as exc:
+            errors.append(exc)
+    errors.extend(_remove_spool_files(path))
+    _ACTIVE_SPOOLS.pop(path, None)
+    return errors
 
 
 class _MemberSpool:
@@ -114,14 +138,24 @@ class _MemberSpool:
         )
         self.path = Path(handle.name)
         handle.close()
-        self.db = sqlite3.connect(self.path)
-        _ACTIVE_SPOOLS[self.path] = self.db
-        self.db.execute(
-            "CREATE TABLE members (key TEXT, name TEXT, suffix TEXT, "
-            "offset INTEGER, size INTEGER, is_image INTEGER)"
-        )
-        self.db.execute("CREATE INDEX members_lookup ON members(key, is_image, name)")
-        self.db.commit()
+        _ACTIVE_SPOOLS[self.path] = None
+        self.db: sqlite3.Connection | None = None
+        try:
+            self.db = sqlite3.connect(self.path)
+            _ACTIVE_SPOOLS[self.path] = self.db
+            if getattr(self, "_ddl_injection", False):
+                raise RuntimeError("ddl injection")
+            self.db.execute(
+                "CREATE TABLE members (key TEXT, name TEXT, suffix TEXT, "
+                "offset INTEGER, size INTEGER, is_image INTEGER)"
+            )
+            self.db.execute("CREATE INDEX members_lookup ON members(key, is_image, name)")
+            self.db.commit()
+        except BaseException as primary:
+            cleanup_errors = _release_spool(self.path, self.db)
+            for cleanup_error in cleanup_errors:
+                primary.add_note(f"spool cleanup failed: {cleanup_error!r}")
+            raise
 
     def add(self, key: str, member: tarfile.TarInfo, suffix: str, is_image: bool) -> None:
         self.db.execute("INSERT INTO members VALUES (?, ?, ?, ?, ?, ?)",
@@ -145,10 +179,10 @@ class _MemberSpool:
         return result
 
     def close(self) -> None:
-        self.db.commit()
-        self.db.close()
-        _ACTIVE_SPOOLS.pop(self.path, None)
-        self.path.unlink(missing_ok=True)
+        errors = _release_spool(self.path, self.db)
+        self.db = None
+        if errors:
+            raise SpoolCleanupError("spool cleanup failed: " + repr(errors[0]))
 
 
 class _SpoolRows:
@@ -159,16 +193,26 @@ class _SpoolRows:
         )
         self.path = Path(handle.name)
         handle.close()
-        self.db = sqlite3.connect(self.path)
-        _ACTIVE_SPOOLS[self.path] = self.db
-        self.db.execute(
-            "CREATE TABLE rows (kind TEXT, ordinal INTEGER, record_id TEXT, payload TEXT, "
-            "PRIMARY KEY (kind, ordinal))"
-        )
-        self.db.execute("CREATE TABLE identities (record_id TEXT PRIMARY KEY, identity TEXT)")
-        self.db.execute("CREATE INDEX rows_record_lookup ON rows(kind, record_id)")
-        self.db.commit()
-        self.counts = {name: 0 for name in SCHEMAS}
+        _ACTIVE_SPOOLS[self.path] = None
+        self.db: sqlite3.Connection | None = None
+        try:
+            self.db = sqlite3.connect(self.path)
+            _ACTIVE_SPOOLS[self.path] = self.db
+            if getattr(self, "_ddl_injection", False):
+                raise RuntimeError("ddl injection")
+            self.db.execute(
+                "CREATE TABLE rows (kind TEXT, ordinal INTEGER, record_id TEXT, payload TEXT, "
+                "PRIMARY KEY (kind, ordinal))"
+            )
+            self.db.execute("CREATE TABLE identities (record_id TEXT PRIMARY KEY, identity TEXT)")
+            self.db.execute("CREATE INDEX rows_record_lookup ON rows(kind, record_id)")
+            self.db.commit()
+            self.counts = {name: 0 for name in SCHEMAS}
+        except BaseException as primary:
+            cleanup_errors = _release_spool(self.path, self.db)
+            for cleanup_error in cleanup_errors:
+                primary.add_note(f"spool cleanup failed: {cleanup_error!r}")
+            raise
 
     def __getitem__(self, name: str) -> _TableProxy:
         return _TableProxy(self, name)
@@ -205,15 +249,19 @@ class _SpoolRows:
             yield from batch
 
     def close(self) -> None:
-        self.db.commit()
-        self.db.close()
-        _ACTIVE_SPOOLS.pop(self.path, None)
-        self.path.unlink(missing_ok=True)
+        errors = _release_spool(self.path, self.db)
+        self.db = None
+        if errors:
+            raise SpoolCleanupError("spool cleanup failed: " + repr(errors[0]))
 
 
 FORMAT_VERSION = 4
 BUILDER = "sakurapool-p2-v4"
 BATCH_SIZE = 1024
+
+
+class SpoolCleanupError(OSError):
+    """One or more owned spool resources could not be fully removed."""
 
 
 class UnsupportedArchiveError(ValueError):
@@ -499,13 +547,11 @@ def _scan_shard_impl(path: Path, rel: str, adapter: DatasetAdapter, hash_images:
     return rows
 
 
-def _cleanup_spools() -> None:
+def _cleanup_spools() -> list[BaseException]:
+    errors = []
     for path, connection in list(_ACTIVE_SPOOLS.items()):
-        try:
-            connection.close()
-        finally:
-            _ACTIVE_SPOOLS.pop(path, None)
-            path.unlink(missing_ok=True)
+        errors.extend(_release_spool(path, connection))
+    return errors
 
 
 def _scan_shard(path: Path, rel: str, adapter: DatasetAdapter, hash_images: bool,
@@ -514,8 +560,10 @@ def _scan_shard(path: Path, rel: str, adapter: DatasetAdapter, hash_images: bool
     try:
         rows = _scan_shard_impl(path, rel, adapter, hash_images, timings, validator,
                                 verify_offsets)
-    except BaseException:
-        _cleanup_spools()
+    except BaseException as primary:
+        cleanup_errors = _cleanup_spools()
+        for cleanup_error in cleanup_errors:
+            primary.add_note(f"spool cleanup failed: {cleanup_error!r}")
         raise
     return rows
 
@@ -670,7 +718,15 @@ def scan(root: Path, output: Path, *, hash_images: bool = False, dataset: str = 
                 info = _write_fragments(files, rows, checkpoint)
                 timings["parquet_seconds"] += time.perf_counter() - started_parquet
             finally:
-                rows.close()
+                try:
+                    rows.close()
+                except BaseException as cleanup_error:
+                    if sys.exc_info()[0] is not None:
+                        sys.exc_info()[1].add_note(
+                            f"row spool cleanup failed: {cleanup_error!r}"
+                        )
+                    else:
+                        raise
             if _validator(path) != validators[rel]:
                 raise ValueError("input validator mismatch: input changed during scan")
             commit = dict(

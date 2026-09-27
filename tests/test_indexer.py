@@ -433,17 +433,119 @@ def test_avif_pairing_and_payload_extent(tmp_path):
         assert stream.read(row["size"]) == payload
 
 
-def test_spools_are_removed_after_failure(tmp_path):
-    source = tmp_path / "a.tar"
-    make_tar(source, {"1.jpg": b"x", "1.json": b"invalid"})
-    user_temp = tmp_path / "user.partial"
-    user_temp.write_bytes(b"keep")
-    def fail(stage):
-        raise RuntimeError(stage)
+@pytest.mark.parametrize("failure", ["connect", "ddl", "commit"])
+def test_spool_constructor_failure_releases_owned_files(tmp_path, monkeypatch, failure):
+    owned = tmp_path / "owned"
+    owned.mkdir()
+    user_db = owned / "user.sqlite"
+    user_db.write_bytes(b"user-data")
+    original_temp = indexer.tempfile.NamedTemporaryFile
+    def temp_file(*args, **kwargs):
+        kwargs["dir"] = owned
+        return original_temp(*args, **kwargs)
+    monkeypatch.setattr(indexer.tempfile, "NamedTemporaryFile", temp_file)
+    original_connect = indexer.sqlite3.connect
+    created = []
+    class ConnectionProxy:
+        def __init__(self, db):
+            self.db = db
+        def execute(self, *args, **kwargs):
+            return self.db.execute(*args, **kwargs)
+        def commit(self):
+            if failure == "commit":
+                raise RuntimeError("commit injection")
+            return self.db.commit()
+        def close(self):
+            return self.db.close()
+        def __getattr__(self, name):
+            return getattr(self.db, name)
+    def connect(path, *args, **kwargs):
+        if failure == "connect":
+            raise RuntimeError("connect injection")
+        created.append(Path(path))
+        return ConnectionProxy(original_connect(path, *args, **kwargs))
+    monkeypatch.setattr(indexer.sqlite3, "connect", connect)
+    if failure == "ddl":
+        monkeypatch.setattr(indexer._MemberSpool, "_ddl_injection", True, raising=False)
     with pytest.raises(RuntimeError):
-        indexer.scan(source, tmp_path / "out", checkpoint=fail)
+        indexer._MemberSpool()
+    assert user_db.read_bytes() == b"user-data"
+    assert not list(owned.glob("sakurapool-*.sqlite"))
+    assert not list(owned.glob("sakurapool-*.sqlite-*"))
+    assert user_db.read_bytes() == b"user-data"
+
+
+def test_second_spool_connect_failure_releases_both(tmp_path, monkeypatch):
+    owned = tmp_path / "owned"
+    owned.mkdir()
+    original_temp = indexer.tempfile.NamedTemporaryFile
+    def temp_file(*args, **kwargs):
+        kwargs["dir"] = owned
+        return original_temp(*args, **kwargs)
+    monkeypatch.setattr(indexer.tempfile, "NamedTemporaryFile", temp_file)
+    original_connect = indexer.sqlite3.connect
+    calls = 0
+    def connect(path, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("second connect injection")
+        return original_connect(path, *args, **kwargs)
+    monkeypatch.setattr(indexer.sqlite3, "connect", connect)
+    member = indexer._MemberSpool()
+    with pytest.raises(RuntimeError, match="second connect"):
+        indexer._SpoolRows()
+    member.close()
+    assert not list(owned.glob("sakurapool-*.sqlite*"))
+
+
+def test_close_failure_and_primary_error_cleanup(tmp_path, monkeypatch):
+    original_connect = indexer.sqlite3.connect
+    created = []
+    class ConnectionProxy:
+        def __init__(self, db):
+            self.db = db
+        def execute(self, *args, **kwargs):
+            return self.db.execute(*args, **kwargs)
+        def commit(self):
+            return self.db.commit()
+        def close(self):
+            self.db.close()
+            raise OSError("close injection")
+        def __getattr__(self, name):
+            return getattr(self.db, name)
+    def connect(path, *args, **kwargs):
+        created.append(Path(path))
+        return ConnectionProxy(original_connect(path, *args, **kwargs))
+    monkeypatch.setattr(indexer.sqlite3, "connect", connect)
+    spool = indexer._SpoolRows()
+    user_db = tmp_path / "user.sqlite"
+    user_db.write_bytes(b"keep")
+    with pytest.raises(indexer.SpoolCleanupError):
+        spool.close()
+    assert all(not path.exists() for path in created)
+    assert user_db.read_bytes() == b"keep"
+    assert indexer._ACTIVE_SPOOLS == {}
+
+
+def test_primary_error_survives_cleanup_error(tmp_path, monkeypatch):
+    original_impl = indexer._scan_shard_impl
+    original_cleanup = indexer._cleanup_spools
+    def fail_impl(*args, **kwargs):
+        indexer._SpoolRows()
+        raise RuntimeError("primary reference")
+    def fail_cleanup():
+        original_cleanup()
+        return [OSError("cleanup injection")]
+    monkeypatch.setattr(indexer, "_scan_shard_impl", fail_impl)
+    monkeypatch.setattr(indexer, "_cleanup_spools", fail_cleanup)
+    with pytest.raises(RuntimeError, match="primary reference") as caught:
+        indexer._scan_shard(Path("input.tar"), "input.tar", DatasetAdapter("d", "s"),
+                            False, {}, {"sha256": "a" * 64, "size": 0, "strength": "strong:sha256"})
+    assert any("cleanup" in note for note in caught.value.__notes__)
     assert not indexer._ACTIVE_SPOOLS
-    assert user_temp.read_bytes() == b"keep"
+    monkeypatch.setattr(indexer, "_scan_shard_impl", original_impl)
+    monkeypatch.setattr(indexer, "_cleanup_spools", original_cleanup)
 
 
 def test_storage_profile_is_stable_but_object_id_is_not(tmp_path):
