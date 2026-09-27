@@ -34,13 +34,83 @@ import pyroaring
 from pyroaring import BitMap
 
 from . import RUNTIME_COMPILER, RUNTIME_FORMAT_VERSION
-from .errors import CorruptInputError
+from .errors import (
+    CorruptInputError,
+    SnapshotCorruptError,
+    SnapshotMixError,
+)
 from .identity import check_rid_capacity, snapshot_id
 from .inventory import P2Inventory
 
 HAS_METADATA = 1
 NO_FORMAT = 0
 DEFAULT_CHUNK = 500_000
+LOCATION_IDENTITY_MARKER = b"SAP3LOC1"
+LOCATION_IDENTITY_SIZE = 82  # marker(8) + '\n'(1) + snapshot_id(64) + '\n'(1) + <Q rid_count>(8)
+
+
+def _u64(value: int | None) -> bytes:
+    """Lossless uint64 SQLite encoding: fixed-length big-endian BLOB."""
+    if value is None:
+        value = 0
+    if not isinstance(value, int) or value < 0 or value >= 2**64:
+        _fail(f"uint64 value out of range: {value!r}")
+    return value.to_bytes(8, "big")
+
+
+def _from_u64(blob: bytes | None) -> int:
+    if not blob:
+        return 0
+    return int.from_bytes(bytes(blob), "big")
+
+
+def _sha256_file(path: Path) -> str:
+    """Streaming SHA-256 so full-file verification never holds the file in RAM."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _location_identity(snap_id: str, rid_count: int) -> bytes:
+    return (LOCATION_IDENTITY_MARKER + b"\n"
+            + snap_id.encode("ascii") + b"\n"
+            + rid_count.to_bytes(8, "little"))
+
+
+def _write_location_identity(path: Path, snap_id: str, rid_count: int) -> None:
+    with path.open("r+b") as handle:
+        handle.seek(0, os.SEEK_END)
+        handle.write(_location_identity(snap_id, rid_count))
+
+
+def _check_location_identity(path: Path, snap_id: str,
+                             rid_count: int) -> None:
+    """Fast whole-file snapshot binding for locations.npy.
+
+    Detects any foreign or truncated file (same-shape swap from another
+    snapshot included). In-place payload edits of the same length are NOT
+    detectable here; those are covered only by the full SHA-256 verification.
+    """
+    # Only the 6-byte npy magic and the 85-byte identity trailer are read:
+    # the fast open must not pull a 185 MiB locations.npy into Python RAM.
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        size = handle.tell()
+        if size < LOCATION_IDENTITY_SIZE:
+            raise SnapshotCorruptError("locations.npy identity trailer missing")
+        handle.seek(0)
+        magic = handle.read(6)
+        handle.seek(-LOCATION_IDENTITY_SIZE, os.SEEK_END)
+        trailer = handle.read(LOCATION_IDENTITY_SIZE)
+    if magic != b"\x93NUMPY":
+        raise SnapshotCorruptError("locations.npy identity trailer missing")
+    if (trailer[:8] != LOCATION_IDENTITY_MARKER
+            or trailer[9:73].decode("ascii") != snap_id
+            or int.from_bytes(trailer[74:82], "little") != rid_count):
+        raise SnapshotMixError(
+            "locations.npy snapshot identity mismatch (mixed snapshot?)")
 
 LOCATION_DTYPE = np.dtype([
     ("object_idx", "u4"),
@@ -135,10 +205,11 @@ def _stage1(inventory: P2Inventory, staging: Path) -> None:
                 record_id BLOB(16) NOT NULL,
                 source TEXT NOT NULL,
                 post_id TEXT NOT NULL,
-                image_offset UBIGINT NOT NULL,
-                image_size UBIGINT NOT NULL,
-                metadata_offset UBIGINT NOT NULL DEFAULT 0,
-                metadata_size UBIGINT NOT NULL DEFAULT 0,
+                image_offset BLOB(8) NOT NULL,
+                image_size BLOB(8) NOT NULL,
+                metadata_offset BLOB(8) NOT NULL DEFAULT x'0000000000000000',
+                metadata_size BLOB(8) NOT NULL DEFAULT x'0000000000000000',
+                has_metadata INTEGER NOT NULL DEFAULT 0,
                 image_format TEXT
             )
             """)
@@ -147,15 +218,16 @@ def _stage1(inventory: P2Inventory, staging: Path) -> None:
         insert_sql = (
             "INSERT INTO samples (dataset_id, object_id, sample_path, record_id, source,"
             " post_id, image_offset, image_size, metadata_offset, metadata_size,"
-            " image_format) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+            " has_metadata, image_format) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
         sample_count = 0
         for obj in objects:
             for batch in _read_batches(_fragment_path(obj, "samples")):
                 db.executemany(insert_sql, [
                     (s["dataset_id"], s["object_id"], s["sample_path"],
                      bytes.fromhex(s["record_id"]), s["source"], s["post_id"],
-                     s["offset_data"], s["size"], s["json_offset_data"] or 0,
-                     s["json_size"] or 0, s["image_format"])
+                     _u64(s["offset_data"]), _u64(s["size"]),
+                     _u64(s["json_offset_data"]), _u64(s["json_size"]),
+                     1 if s["json_path"] is not None else 0, s["image_format"])
                     for s in batch
                 ])
                 sample_count += len(batch)
@@ -337,7 +409,7 @@ def _catalog(inventory: P2Inventory, staging: Path, snap_id: str) -> int:
                 storage_id TEXT NOT NULL,
                 object_id TEXT NOT NULL,
                 object_path TEXT NOT NULL,
-                object_size UBIGINT NOT NULL,
+                object_size BLOB(8) NOT NULL,
                 object_version TEXT NOT NULL,
                 validator TEXT NOT NULL,
                 backend TEXT NOT NULL,
@@ -405,7 +477,8 @@ def _catalog(inventory: P2Inventory, staging: Path, snap_id: str) -> int:
             cat.execute(
                 "INSERT INTO objects VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (object_idx, first["storage_id"], first["object_id"],
-                 first["object_path"], first["object_size"], first["object_version"],
+                 first["object_path"], _u64(first["object_size"]),
+                 first["object_version"],
                  first["validator"], first["backend"], first["repo_type"],
                  first["archive_format"], first["validator_kind"],
                  first["validator_strength"], obj.dataset_id))
@@ -460,7 +533,7 @@ def _catalog(inventory: P2Inventory, staging: Path, snap_id: str) -> int:
         raise
 
 
-def _bitmaps(staging: Path) -> None:
+def _bitmaps(staging: Path, snap_id: str) -> None:
     """OR-merge tag parts per tag; write final bitmaps.sqlite; drop parts."""
     catalog_path = staging / "catalog.sqlite"
     bitmaps_path = staging / "bitmaps.sqlite"
@@ -476,6 +549,9 @@ def _bitmaps(staging: Path) -> None:
             " cardinality INTEGER NOT NULL, serialized_bytes INTEGER NOT NULL,"
             " blob_sha256 TEXT NOT NULL, blob BLOB NOT NULL,"
             " PRIMARY KEY (kind, id))")
+        bits.execute(
+            "CREATE TABLE bitmaps_meta (snapshot_id TEXT PRIMARY KEY,"
+            " rid_count INTEGER NOT NULL)")
 
         def store(kind: str, bitmap_id: int, bitmap: BitMap) -> None:
             blob = bytes(bitmap.serialize())
@@ -512,6 +588,8 @@ def _bitmaps(staging: Path) -> None:
             store("namespace", ns_id, BitMap.deserialize(bytes(blob)))
         ns_db.close()
 
+        rid_count = cat.execute("SELECT rid_count FROM meta").fetchone()[0]
+        bits.execute("INSERT INTO bitmaps_meta VALUES (?,?)", (snap_id, rid_count))
         bits.commit()
         bits.close()
         parts.close()
@@ -526,8 +604,8 @@ def _bitmaps(staging: Path) -> None:
         raise
 
 
-def _locations(staging: Path, rid_count: int) -> None:
-    """Write locations.npy in a single rid-ordered pass."""
+def _locations(staging: Path, rid_count: int, snap_id: str) -> None:
+    """Write locations.npy in a single rid-ordered pass plus identity trailer."""
     db = sqlite3.connect(staging / "compiler-staging.sqlite")
     catalog = sqlite3.connect(staging / "catalog.sqlite")
     locations_path = staging / "locations.npy"
@@ -541,7 +619,8 @@ def _locations(staging: Path, rid_count: int) -> None:
         try:
             cursor = db.execute(
                 "SELECT r.rid, s.image_offset, s.image_size, s.metadata_offset,"
-                " s.metadata_size, s.image_format, s.object_id, s.dataset_id"
+                " s.metadata_size, s.has_metadata, s.image_format, s.object_id,"
+                " s.dataset_id"
                 " FROM rids r JOIN samples s ON s.seq = r.seq ORDER BY r.rid")
             object_idx = {
                 (dataset, object_id): idx for dataset, object_id, idx in
@@ -550,17 +629,19 @@ def _locations(staging: Path, rid_count: int) -> None:
             }
             for row in cursor:
                 (rid, image_offset, image_size, metadata_offset, metadata_size,
-                 image_format, object_id, dataset_id) = row
+                 has_metadata, image_format, object_id, dataset_id) = row
                 array[rid] = (
-                    object_idx[(dataset_id, object_id)], image_offset, image_size,
-                    metadata_offset, metadata_size,
+                    object_idx[(dataset_id, object_id)],
+                    _from_u64(image_offset), _from_u64(image_size),
+                    _from_u64(metadata_offset), _from_u64(metadata_size),
                     format_ids.get(image_format, NO_FORMAT)
                     if image_format else NO_FORMAT,
-                    HAS_METADATA if metadata_size else 0,
+                    HAS_METADATA if has_metadata else 0,
                 )
             array.flush()
         finally:
             del array
+        _write_location_identity(locations_path, snap_id, rid_count)
     finally:
         db.close()
         catalog.close()
@@ -572,9 +653,8 @@ def _snapshot(staging: Path, snap_id: str, rid_count: int,
               counts: dict[str, Any]) -> None:
     files = {}
     for name in ("catalog.sqlite", "bitmaps.sqlite", "locations.npy"):
-        data = (staging / name).read_bytes()
-        files[name] = {"path": name, "bytes": len(data),
-                       "sha256": hashlib.sha256(data).hexdigest()}
+        files[name] = {"path": name, "bytes": (staging / name).stat().st_size,
+                       "sha256": _sha256_file(staging / name)}
     manifest = {
         "snapshot_id": snap_id,
         "runtime_format_version": RUNTIME_FORMAT_VERSION,
@@ -598,6 +678,145 @@ def _snapshot(staging: Path, snap_id: str, rid_count: int,
                   json.dumps(manifest, indent=2, sort_keys=True).encode())
 
 
+def _current_matches(output_root: Path, snap_id: str) -> bool:
+    current = output_root / "current.json"
+    if not current.exists():
+        return False
+    try:
+        return (json.loads(current.read_text(encoding="utf-8"))
+                .get("snapshot_id") == snap_id)
+    except (OSError, json.JSONDecodeError):
+        return False
+
+
+def _verify_ready(final: Path, snap_id: str) -> dict[str, Any]:
+    """Reuse validation of a published snapshot (fail closed).
+
+    Reuse is stricter than a fast open: every published file is streamed
+    and hashed against the manifest, so a silently corrupted snapshot is
+    never reopened. The streaming hash keeps RSS bounded.
+    """
+    from .snapshot import RuntimeSnapshot
+    ready = final / "READY"
+    if not ready.exists():
+        raise SnapshotCorruptError("published snapshot has no READY")
+    if ready.read_text(encoding="utf-8").strip() != snap_id:
+        raise SnapshotCorruptError("READY content does not match snapshot_id")
+    manifest = json.loads((final / "SNAPSHOT.json").read_text(encoding="utf-8"))
+    if manifest.get("snapshot_id") != snap_id:
+        raise SnapshotMixError("SNAPSHOT.json snapshot_id mismatch")
+    for entry in manifest["files"].values():
+        path = final / entry["path"]
+        if not path.is_file():
+            raise SnapshotCorruptError(f"missing published file: {entry['path']}")
+        if path.stat().st_size != entry["bytes"]:
+            raise SnapshotCorruptError(f"size mismatch: {entry['path']}")
+        if _sha256_file(path) != entry["sha256"]:
+            raise SnapshotCorruptError(f"sha256 mismatch: {entry['path']}")
+    opened = RuntimeSnapshot.open(final)  # meta/identity fast checks
+    opened.close()
+    return manifest
+
+
+def _sqlite_one(path: Path, sql: str) -> tuple | None:
+    """Single SELECT with explicit close (a sqlite3 with-block does not
+    close the connection, and a live handle locks files on Windows)."""
+    db = sqlite3.connect(path)
+    try:
+        return db.execute(sql).fetchone()
+    finally:
+        db.close()
+
+
+def _staging_rid_count(staging: Path) -> int | None:
+    db_path = staging / "compiler-staging.sqlite"
+    if not db_path.exists():
+        return None
+    try:
+        row = _sqlite_one(db_path, "SELECT COUNT(*) FROM samples")
+        return row[0] if row else None
+    except (sqlite3.Error, OSError):
+        return None
+
+
+def _verify_stage1(staging: Path) -> bool:
+    try:
+        counts = json.loads(
+            (staging / "STAGE1-COUNTS.json").read_text(encoding="utf-8"))
+        actual = _staging_rid_count(staging)
+        return (counts["samples"] == actual
+                and (staging / "compiler-staging.sqlite").exists())
+    except (OSError, json.JSONDecodeError, KeyError):
+        return False
+
+
+def _verify_stage2(staging: Path) -> bool:
+    try:
+        ids = json.loads((staging / "TAG-IDS.json").read_text(encoding="utf-8"))
+        json.loads((staging / "CATEGORIES.json").read_text(encoding="utf-8"))
+        counts = json.loads(
+            (staging / "STAGE2-COUNTS.json").read_text(encoding="utf-8"))
+        return (isinstance(ids, list)
+                and (staging / "bitmap_parts.sqlite").exists()
+                and (staging / "ns-known.sqlite").exists()
+                and isinstance(counts["memberships"], int))
+    except (OSError, json.JSONDecodeError, KeyError):
+        return False
+
+
+def _verify_catalog(staging: Path, snap_id: str) -> bool:
+    path = staging / "catalog.sqlite"
+    if not path.exists():
+        return False
+    try:
+        row = _sqlite_one(path, "SELECT snapshot_id, rid_count FROM meta")
+        return (row is not None and row[0] == snap_id
+                and row[1] == _staging_rid_count(staging))
+    except (sqlite3.Error, OSError):
+        return False
+
+
+def _verify_bitmaps(staging: Path, snap_id: str) -> bool:
+    path = staging / "bitmaps.sqlite"
+    if not path.exists():
+        return False
+    try:
+        row = _sqlite_one(path, "SELECT snapshot_id, rid_count FROM bitmaps_meta")
+        expected = _sqlite_one(staging / "catalog.sqlite",
+                               "SELECT rid_count FROM meta")
+        expected = expected[0] if expected else None
+        return (row is not None and row[0] == snap_id
+                and row[1] == expected == _staging_rid_count(staging))
+    except (sqlite3.Error, OSError):
+        return False
+
+
+def _verify_locations(staging: Path, snap_id: str) -> bool:
+    path = staging / "locations.npy"
+    rid_count = _staging_rid_count(staging)
+    if not path.exists() or rid_count is None:
+        return False
+    try:
+        _check_location_identity(path, snap_id, rid_count)
+        return True
+    except SnapshotCorruptError:
+        return False
+
+
+def _verify_snapshot(staging: Path, snap_id: str) -> bool:
+    path = staging / "SNAPSHOT.json"
+    if not path.exists():
+        return False
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        return (manifest.get("snapshot_id") == snap_id
+                and manifest.get("rid_count") == _staging_rid_count(staging)
+                and all((staging / entry["path"]).exists()
+                        for entry in manifest["files"].values()))
+    except (OSError, json.JSONDecodeError, KeyError):
+        return False
+
+
 def compile_runtime(
     inventory: P2Inventory,
     output_root: Path,
@@ -614,7 +833,17 @@ def compile_runtime(
     output_root.mkdir(parents=True, exist_ok=True)
     final = output_root / "snapshots" / snap_id
     if (final / "READY").exists():
-        manifest = json.loads((final / "SNAPSHOT.json").read_text(encoding="utf-8"))
+        # Reuse is allowed only after validating the published snapshot.
+        manifest = _verify_ready(final, snap_id)
+        if not _current_matches(output_root, snap_id):
+            current = {
+                "snapshot_id": snap_id,
+                "path": f"snapshots/{snap_id}",
+                "runtime_format_version": RUNTIME_FORMAT_VERSION,
+                "compiler": RUNTIME_COMPILER,
+            }
+            _atomic_write(output_root / "current.json",
+                          json.dumps(current, indent=2, sort_keys=True).encode())
         return CompiledSnapshot(
             snap_id, final, manifest["rid_count"], manifest["object_count"],
             manifest["source_count"], manifest["dataset_count"],
@@ -623,7 +852,27 @@ def compile_runtime(
     if staging.exists():
         stage = _Stage(staging)
         if stage.current < 0:
+            # Name is derived from snap_id, so only our own staging is ever
+            # touched; foreign .staging-* directories are left alone.
             shutil.rmtree(staging)
+        else:
+            checks = [("stage1", lambda: _verify_stage1(staging)),
+                      ("stage2", lambda: _verify_stage2(staging)),
+                      ("catalog", lambda: _verify_catalog(staging, snap_id)),
+                      ("bitmaps", lambda: _verify_bitmaps(staging, snap_id)),
+                      ("locations", lambda: _verify_locations(staging, snap_id)),
+                      ("snapshot", lambda: _verify_snapshot(staging, snap_id))]
+            for index, (name, check) in enumerate(checks):
+                if index > stage.current:
+                    break
+                if not check():
+                    if index == 0:
+                        (staging / "STAGE.txt").unlink()
+                    else:
+                        (staging / "STAGE.txt").write_text(checks[index - 1][0],
+                                                           encoding="utf-8")
+                    stage.current = index - 1
+                    break
     staging.mkdir(parents=True, exist_ok=True)
     stage = _Stage(staging)
 
@@ -650,7 +899,7 @@ def compile_runtime(
             # parts already consumed but the stage marker was lost: rebuild.
             _stage2(inventory, staging, chunk_size)
             stage.complete("stage2")
-        _bitmaps(staging)
+        _bitmaps(staging, snap_id)
         stage.complete("bitmaps")
     rid_count = 0
     if redo("locations", staging / "locations.npy"):
@@ -659,7 +908,7 @@ def compile_runtime(
             rid_count = db.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
         finally:
             db.close()
-        _locations(staging, rid_count)
+        _locations(staging, rid_count, snap_id)
         stage.complete("locations")
     if redo("snapshot", staging / "SNAPSHOT.json"):
         db = sqlite3.connect(staging / "catalog.sqlite")

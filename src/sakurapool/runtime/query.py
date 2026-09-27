@@ -78,6 +78,8 @@ class RecordBatch:
     record_id: list[str]
     source_id: list[int]
     dataset_id: list[int]
+    source_name: list[str]
+    dataset_name: list[str]
     post_id: list[str]
 
 
@@ -93,6 +95,9 @@ class QueryResult:
         return self._snapshot.snapshot_id
 
     def count(self) -> int:
+        return len(self._bitmap)
+
+    def __len__(self) -> int:
         return len(self._bitmap)
 
     def iter_rids(self) -> Iterator[int]:
@@ -133,8 +138,11 @@ class QueryResult:
         for chunk in _chunked(self._bitmap, batch_size):
             placeholders = ",".join("?" for _ in chunk)
             rows = catalog.execute(
-                "SELECT rid, record_id, source_id, dataset_id, post_id FROM records"
-                f" WHERE rid IN ({placeholders}) ORDER BY rid", chunk).fetchall()
+                "SELECT r.rid, r.record_id, r.source_id, r.dataset_id,"
+                " s.name, d.name, r.post_id"
+                " FROM records r JOIN sources s ON s.source_id = r.source_id"
+                " JOIN datasets d ON d.dataset_id = r.dataset_id"
+                f" WHERE r.rid IN ({placeholders}) ORDER BY r.rid", chunk).fetchall()
             rows.sort(key=lambda row: row[0])
             yield RecordBatch(
                 self._snapshot.snapshot_id,
@@ -143,6 +151,8 @@ class QueryResult:
                 [row[2] for row in rows],
                 [row[3] for row in rows],
                 [row[4] for row in rows],
+                [row[5] for row in rows],
+                [row[6] for row in rows],
             )
 
 
@@ -155,47 +165,95 @@ def _chunked(bitmap: BitMap, size: int) -> Iterator[list[int]]:
         yield chunk
 
 
+class _Term:
+    """One AND term planned from stored cardinality before any blob loads."""
+
+    def __init__(self, stored: int, kind: str,
+                 ids: list[int], namespace_id: int | None) -> None:
+        self.stored = stored
+        self.kind = kind
+        self.ids = ids
+        self.namespace_id = namespace_id
+
+    def materialize(self, snapshot: RuntimeSnapshot) -> BitMap:
+        if self.kind == "tag":
+            bitmap = snapshot._get_bitmap("tag", self.ids[0])
+            for tag_id in self.ids[1:]:
+                bitmap |= snapshot._get_bitmap("tag", tag_id)
+            return bitmap
+        if self.kind == "namespace_minus":
+            excluded = BitMap()
+            for tag_id in self.ids:
+                excluded |= snapshot._get_bitmap("tag", tag_id)
+            known = snapshot._get_bitmap("namespace", self.namespace_id)
+            return known - excluded
+        # source/dataset terms: OR over every selected id.
+        union = snapshot._get_bitmap(self.kind, self.ids[0])
+        for bitmap_id in self.ids[1:]:
+            union |= snapshot._get_bitmap(self.kind, bitmap_id)
+        return union
+
+
+def _stored_cardinality(snapshot: RuntimeSnapshot, kind: str,
+                        ids: list[int]) -> int:
+    if len(ids) == 1:
+        row = snapshot._bitmaps.execute(
+            "SELECT cardinality FROM bitmaps WHERE kind = ? AND id = ?",
+            (kind, ids[0])).fetchone()
+        return row[0] if row else 0
+    if kind == "tag":
+        placeholders = ",".join("?" for _ in ids)
+        # OR upper bound before materialization: sum of stored cardinalities.
+        row = snapshot._bitmaps.execute(
+            f"SELECT COALESCE(SUM(cardinality), 0) FROM bitmaps"
+            f" WHERE kind = 'tag' AND id IN ({placeholders})", ids).fetchone()
+        return row[0]
+    raise ValueError(f"unsupported union kind: {kind}")
+
+
 def _branch_result(snapshot: RuntimeSnapshot, spec: RuntimeQuerySpec) -> BitMap:
-    terms: list[tuple[int, BitMap]] = []
+    terms: list[_Term] = []
     if spec.sources:
-        union = BitMap()
-        for source in spec.sources:
-            union |= snapshot._get_bitmap(
-                "source", snapshot._source_id(source))
-        terms.append((len(union), union))
+        terms.append(_Term(
+            0, "source",
+            [snapshot._source_id(source) for source in spec.sources], None))
     if spec.datasets:
-        union = BitMap()
-        for dataset in spec.datasets:
-            union |= snapshot._get_bitmap(
-                "dataset", snapshot._dataset_id(dataset))
-        terms.append((len(union), union))
+        terms.append(_Term(
+            0, "dataset",
+            [snapshot._dataset_id(dataset) for dataset in spec.datasets], None))
     if spec.all_tags:
         for tag_id, _ in _resolve_tags(snapshot, spec.namespace, spec.all_tags,
                                        "all_tags"):
-            bitmap = snapshot._get_bitmap("tag", tag_id)
-            terms.append((len(bitmap), bitmap))
+            terms.append(_Term(
+                _stored_cardinality(snapshot, "tag", [tag_id]), "tag",
+                [tag_id], None))
     if spec.any_tags:
-        union = BitMap()
-        for tag_id, _ in _resolve_tags(snapshot, spec.namespace, spec.any_tags,
-                                       "any_tags"):
-            union |= snapshot._get_bitmap("tag", tag_id)
-        terms.append((len(union), union))
+        ids = [tag_id for tag_id, _ in _resolve_tags(
+            snapshot, spec.namespace, spec.any_tags, "any_tags")]
+        terms.append(_Term(
+            _stored_cardinality(snapshot, "tag", ids), "tag", ids, None))
     if spec.none_tags:
         by_namespace: dict[int, list[int]] = {}
         for tag_id, namespace_id in _resolve_tags(
                 snapshot, spec.namespace, spec.none_tags, "none_tags"):
             by_namespace.setdefault(namespace_id, []).append(tag_id)
         for namespace_id, tag_ids in sorted(by_namespace.items()):
-            excluded = BitMap()
-            for tag_id in tag_ids:
-                excluded |= snapshot._get_bitmap("tag", tag_id)
-            known = snapshot._get_bitmap("namespace", namespace_id)
-            terms.append((len(known - excluded), known - excluded))
+            stored_known = _stored_cardinality(
+                snapshot, "namespace", [namespace_id])
+            terms.append(_Term(stored_known, "namespace_minus", tag_ids,
+                               namespace_id))
     if not terms:
         return BitMap(range(snapshot.rid_count))
+    # Plan by stored cardinality: OR terms use their pre-materialization
+    # bound, so the smallest constraint is applied first and the AND can
+    # short-circuit without loading the remaining blobs at all.
+    terms.sort(key=lambda term: term.stored)
     result: BitMap | None = None
-    for _, bitmap in sorted(terms, key=lambda pair: pair[0]):
+    for term in terms:
+        bitmap = term.materialize(snapshot)
         result = bitmap if result is None else (result & bitmap)
+        if result is not None and not result:
+            return result
     return result
 
 

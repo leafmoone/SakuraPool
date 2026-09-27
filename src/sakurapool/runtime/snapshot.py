@@ -8,20 +8,17 @@ import sqlite3
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from .query import QueryResult
 
 import numpy as np
 from pyroaring import BitMap
 
 from . import RUNTIME_FORMAT_VERSION
-from .compiler import LOCATION_DTYPE
+from .compiler import LOCATION_DTYPE, _check_location_identity, _from_u64, _sha256_file
 from .errors import (
     AmbiguousRecordError,
     SnapshotClosedError,
     SnapshotCorruptError,
+    SnapshotMixError,
     UnknownQueryValueError,
 )
 
@@ -33,6 +30,8 @@ class ByteLRU:
     """Byte-budget LRU for serialized bitmaps."""
 
     def __init__(self, byte_limit: int) -> None:
+        if byte_limit <= 0:
+            raise ValueError("cache byte_limit must be positive")
         self.byte_limit = byte_limit
         self._entries: OrderedDict[tuple[str, int], bytes] = OrderedDict()
         self._resident = 0
@@ -50,6 +49,10 @@ class ByteLRU:
         return value
 
     def put(self, key: tuple[str, int], value: bytes) -> None:
+        # A single blob that alone exceeds the budget is never cached: it
+        # would permanently evict everything else and breach the budget.
+        if len(value) > self.byte_limit:
+            return
         if key in self._entries:
             self._resident -= len(self._entries[key])
             del self._entries[key]
@@ -113,7 +116,9 @@ class RuntimeSnapshot:
         elif (base / "SNAPSHOT.json").exists():
             root = base.parent.parent
             snap_dir = base
-            snapshot_id = None
+            # Explicit snapshot directory: the directory name is the id and
+            # must agree with both READY and the SNAPSHOT.json manifest.
+            snapshot_id = base.name
         else:
             raise SnapshotCorruptError(
                 f"not a runtime root or snapshot: {base}")
@@ -138,7 +143,9 @@ class RuntimeSnapshot:
             if file_path.stat().st_size != entry["bytes"]:
                 raise SnapshotCorruptError(f"size mismatch: {entry['path']}")
             if full_verify:
-                digest = hashlib.sha256(file_path.read_bytes()).hexdigest()
+                # Streaming hash: full verification must not hold the whole
+                # file in Python memory (a 185 MiB locations.npy would).
+                digest = _sha256_file(file_path)
                 if digest != entry["sha256"]:
                     raise SnapshotCorruptError(f"sha256 mismatch: {entry['path']}")
 
@@ -162,6 +169,11 @@ class RuntimeSnapshot:
             rid_count = meta[4]
             if rid_count != manifest["rid_count"]:
                 raise SnapshotCorruptError("rid_count mismatch")
+            bitmap_meta = bitmaps.execute(
+                "SELECT snapshot_id, rid_count FROM bitmaps_meta").fetchone()
+            if bitmap_meta != (snapshot_id, rid_count):
+                raise SnapshotMixError(
+                    "bitmaps.sqlite snapshot identity mismatch (mixed snapshot?)")
         except BaseException:
             catalog.close()
             bitmaps.close()
@@ -172,6 +184,12 @@ class RuntimeSnapshot:
                 raise SnapshotCorruptError("locations dtype mismatch")
             if locations.shape != (rid_count,):
                 raise SnapshotCorruptError("locations shape mismatch")
+            # Whole-file snapshot binding: an entire locations.npy swapped in
+            # from another snapshot of identical shape is rejected here. Same
+            # length in-place payload edits stay detectable only by the
+            # streaming full SHA-256 verification, by design.
+            _check_location_identity(snap_dir / "locations.npy", snapshot_id,
+                                     rid_count)
         except BaseException:
             locations = None
             catalog.close()
@@ -285,10 +303,32 @@ class RuntimeSnapshot:
         record_id, source_id, dataset_id, post = row
         return ResolvedRecord(rid, record_id.hex(), source_id, dataset_id, post)
 
-    def query(self, spec) -> QueryResult:  # noqa: ANN401
-        from .query import evaluate_spec
+    def query(self, spec=None, *, sources=(), datasets=(), namespace=None,
+              all_tags=(), any_tags=(), none_tags=(), any_of=()):
+        """Run a query. Accepts a RuntimeQuerySpec or keyword terms.
+
+        Keyword form (the P3 keyword entry): any combination of
+        sources=(), datasets=(), namespace=, all_tags=(), any_tags=(),
+        none_tags=(), any_of=() builds the spec. An explicitly named
+        namespace is validated even without tags.
+        """
+        from .query import RuntimeQuerySpec, evaluate_spec
         self._check_open()
+        if spec is None:
+            spec = RuntimeQuerySpec(
+                sources=tuple(sources), datasets=tuple(datasets),
+                namespace=namespace, all_tags=tuple(all_tags),
+                any_tags=tuple(any_tags), none_tags=tuple(none_tags),
+                any_of=tuple(any_of))
+        self._validate_namespaces(spec)
         return evaluate_spec(self, spec)
+
+    def _validate_namespaces(self, spec) -> None:  # noqa: ANN401
+        if spec.namespace is not None:
+            self._namespace_id(spec.namespace)
+        if spec.any_of:
+            for branch in spec.any_of:
+                self._validate_namespaces(branch)
 
     def location(self, rid: int) -> dict:
         """Plain-dict view of one locations row (for CLI/tooling)."""
@@ -297,3 +337,21 @@ class RuntimeSnapshot:
             raise UnknownQueryValueError(f"rid out of range: {rid}")
         row = self._locations[rid]
         return {name: int(row[name]) for name in row.dtype.names}
+
+    def object_ref(self, object_idx: int) -> dict:
+        """Full ObjectRef for one catalog object (object_idx from a location)."""
+        self._check_open()
+        row = self._catalog.execute(
+            "SELECT storage_id, object_id, object_path, object_size,"
+            " object_version, validator, backend, repo_type,"
+            " archive_format, validator_kind, validator_strength"
+            " FROM objects WHERE object_idx = ?", (object_idx,)).fetchone()
+        if row is None:
+            raise UnknownQueryValueError(f"unknown object_idx: {object_idx}")
+        return {
+            "storage_id": row[0], "object_id": row[1], "object_path": row[2],
+            "object_size": _from_u64(row[3]), "object_version": row[4],
+            "validator": row[5], "backend": row[6], "repo_type": row[7],
+            "archive_format": row[8], "validator_kind": row[9],
+            "validator_strength": row[10],
+        }

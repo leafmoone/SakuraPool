@@ -115,6 +115,24 @@ def _regular_child(root: Path, relative: str) -> Path:
     return path
 
 
+def _check_row_ownership(path: Path, dataset: str, object_id: str) -> None:
+    """Every fragment row must belong to this commit's (dataset, object).
+
+    Column-projected streaming so the check never loads whole fragments.
+    """
+    with pq.ParquetFile(path) as handle:
+        for batch in handle.iter_batches(batch_size=10_000,
+                                        columns=["dataset_id", "object_id"]):
+            rows = batch.to_pylist()
+            for row in rows:
+                if row["dataset_id"] != dataset:
+                    _fail(f"row dataset_id {row['dataset_id']!r} != commit "
+                          f"{dataset!r} in {path.name}")
+                if row["object_id"] != object_id:
+                    _fail(f"row object_id {row['object_id']!r} != commit "
+                          f"{object_id!r} in {path.name}")
+
+
 def _validate_fragment(path: Path, name: str, info: dict[str, Any]) -> int:
     if set(info) != {"path", "sha256", "bytes", "rows"}:
         _fail(f"invalid fragment inventory keys: {name}")
@@ -158,6 +176,15 @@ def _load_directory(root: Path, dataset: str) -> tuple[dict[str, Any], list[P2Ob
                       if p.name.endswith(".COMMIT") and not p.is_symlink()}
     if actual_markers != expected_markers:
         _fail("COMMIT marker set does not match derived shard ids")
+    # Fail closed on anything not declared: stray partial/fragment/temp files
+    # next to INPUT.json must never be accepted silently.
+    allowed = {"INPUT.json"} | expected_markers
+    allowed.update(f"{_shard_id(dataset, rel)}.{name}.parquet"
+                   for rel in contract["inputs"]
+                   for name in _FRAGMENT_SCHEMAS)
+    for entry in root.iterdir():
+        if entry.name not in allowed:
+            _fail(f"unexpected file in P2 root (fail closed): {entry.name}")
     objects: list[P2Object] = []
     seen: set[tuple[str, str]] = set()
     for rel in sorted(contract["inputs"]):
@@ -175,6 +202,10 @@ def _load_directory(root: Path, dataset: str) -> tuple[dict[str, Any], list[P2Ob
                 or commit["input"] != contract["inputs"][rel]):
             _fail(f"COMMIT identity/validator mismatch: {marker_path.name}")
         object_id = commit["object_id"]
+        expected_object_id = f"{rel}@sha256-{commit['input']['sha256']}"
+        if object_id != expected_object_id:
+            _fail(f"commit object_id {object_id!r} is not rel@sha256(input) "
+                  f"({expected_object_id!r}): {marker_path.name}")
         if (dataset, object_id) in seen:
             _fail(f"duplicate committed object: {dataset}/{object_id}")
         seen.add((dataset, object_id))
@@ -188,6 +219,8 @@ def _load_directory(root: Path, dataset: str) -> tuple[dict[str, Any], list[P2Ob
             if path.name != expected_fragment:
                 _fail(f"fragment name mismatch: {path.name}")
             _validate_fragment(path, name, info)
+            if name in ("objects", "samples", "annotations"):
+                _check_row_ownership(path, dataset, object_id)
             fragments.append(Fragment(dataset, object_id, name, path,
                                       info["rows"], info["bytes"], info["sha256"]))
         objects.append(P2Object(dataset, object_id, commit["input"], tuple(fragments)))

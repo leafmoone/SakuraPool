@@ -3,6 +3,16 @@
 Generates P2-contract-correct fragment Parquet + COMMIT markers +
 INPUT.json without any real images, so tag distribution, namespaces,
 origins and row order are fully controllable.
+
+Contract fidelity (review requirement): the synthetic directory must be a
+model the real P2 contract accepts, not a P3-only fixture:
+- record_id is the real RecordKey BLAKE2b-16 derivation
+  ("sakurapool-record-v1" payload, digest_size=16).
+- object_id is exactly `rel@sha256-<input sha256>` with the input sha256
+  declared in INPUT.json; object_version and validator equal that sha256.
+- objects rows carry the real field semantics (storage_id/backend
+  "local", repo_type "local", archive_format "tar", path == rel).
+- ObjectRef constructed from a synthetic object row must pass validation.
 """
 
 from __future__ import annotations
@@ -17,7 +27,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from sakurapool.indexer import BUILDER, FORMAT_VERSION, SCHEMAS, _json
+from sakurapool.records import ObjectRef, RecordKey
 from sakurapool.registry import DatasetAdapter
+
+_UINT64_STRESS_BASE = 2**63
 
 
 @dataclass(frozen=True)
@@ -27,6 +40,10 @@ class SampleSpec:
     post_id: str
     tags: list[tuple[str, str | None]] = field(default_factory=list)
     tags_state: str = "known"
+    # Metadata (json) presence is independent of its size: json=False means
+    # no json_path at all; json_size=0 keeps a zero-length metadata entry.
+    has_json: bool = True
+    json_size: int = 64
 
 
 @dataclass(frozen=True)
@@ -36,22 +53,43 @@ class ObjectSpec:
     samples: list[SampleSpec] = field(default_factory=list)
     namespace: str = "tags"
     origin: str = "default"
+    size: int = 1000
+    # Set true to emit offsets/sizes beyond 2**63 (uint64 stress): no real
+    # file is allocated, only the fragment columns carry the values.
+    uint64_offsets: bool = False
 
 
 def _record_id(dataset: str, object_id: str, sample_path: str) -> str:
-    digest = hashlib.sha256(_json([dataset, object_id, sample_path])).hexdigest()
-    return digest[:32]
+    """Real P2 record identity: BLAKE2b-16 over the canonical payload."""
+    return RecordKey(dataset, object_id, sample_path).record_id
 
 
-def _object_id(rel: str, seed: str) -> tuple[str, str]:
-    digest = hashlib.sha256(_json(["synthetic", seed, rel])).hexdigest()
-    return f"{rel}@sha256-{digest}", digest
+def _input_digest(rel: str, seed: str) -> str:
+    """Declared input sha256; it drives object_id/version/validator."""
+    return hashlib.sha256(_json(["synthetic", seed, rel])).hexdigest()
+
+
+def _object_id(rel: str, digest: str) -> str:
+    return f"{rel}@sha256-{digest}"
 
 
 def _table(name: str, columns: dict[str, list[Any]]) -> pa.Table:
     schema = SCHEMAS[name]
     arrays = [pa.array(columns[field.name], type=field.type) for field in schema]
     return pa.Table.from_arrays(arrays, schema=schema)
+
+
+def _object_row(dataset: str, source: str, obj: ObjectSpec, digest: str) -> dict:
+    object_id = _object_id(obj.rel, digest)
+    return dict(
+        storage_id="local", backend="local", repo_type="local",
+        archive_format="tar", dataset=dataset,
+        object_path=obj.rel, object_size=obj.size, object_version=digest,
+        validator_kind="sha256", validator=digest,
+        scan_status="committed", dataset_id=dataset,
+        object_id=object_id, source=source, path=obj.rel,
+        size=obj.size, validator_strength="strong:sha256",
+        sha256=digest)
 
 
 def build_p2_directory(
@@ -67,26 +105,20 @@ def build_p2_directory(
     contract = dict(format_version=FORMAT_VERSION, builder=BUILDER,
                     adapter=adapter.to_dict(), hash_images=False, inputs={})
     contract["inputs"] = {obj.rel: dict(
-        size=1000, mtime_ns=0,
-        sha256=hashlib.sha256(_json(["synthetic", obj.rel])).hexdigest(),
+        size=obj.size, mtime_ns=0,
+        sha256=_input_digest(obj.rel, dataset),
         strength="strong:sha256", version=1) for obj in objects}
     (root / "INPUT.json").write_bytes(_json(contract))
     contract_hash = hashlib.sha256(_json(contract)).hexdigest()
 
     counts = dict(objects=0, samples=0, annotations=0, errors=0)
     for obj in objects:
-        object_id, seed_sha = _object_id(obj.rel, dataset)
+        digest = _input_digest(obj.rel, dataset)
+        object_id = _object_id(obj.rel, digest)
         shard_id = hashlib.sha256(_json([dataset, obj.rel])).hexdigest()
 
-        objects_rows = dict(
-            storage_id=["local"], backend=["fs"], repo_type=[None],
-            archive_format=["synthetic"], dataset=[dataset],
-            object_path=[obj.rel], object_size=[1000], object_version=[object_id],
-            validator_kind=["sha256"], validator=[seed_sha],
-            scan_status=["committed"], dataset_id=[dataset],
-            object_id=[object_id], source=[source], path=[f"{obj.rel}/"],
-            size=[1000], validator_strength=["strong:sha256"],
-            sha256=[seed_sha])
+        objects_rows = {name: [value] for name, value
+                        in _object_row(dataset, source, obj, digest).items()}
 
         samples_rows = {name: [] for name in (
             "record_id", "dataset_id", "object_id", "sample_path", "source",
@@ -98,15 +130,15 @@ def build_p2_directory(
             "record_id", "dataset_id", "object_id", "sample_path",
             "namespace", "origin", "tags_state", "tags")}
 
-        for sample in obj.samples:
+        for index, sample in enumerate(obj.samples):
             record_id = _record_id(dataset, object_id, sample.path)
             image_size = 32
-            json_size = 64
             tag_structs = [
                 dict(value=value, category=category)
                 for value, category in sorted(sample.tags,
                                               key=lambda pair: (pair[0],
                                                                 pair[1] or ""))]
+            base = _UINT64_STRESS_BASE + index if obj.uint64_offsets else 0
             samples_rows["record_id"].append(record_id)
             samples_rows["dataset_id"].append(dataset)
             samples_rows["object_id"].append(object_id)
@@ -114,12 +146,14 @@ def build_p2_directory(
             samples_rows["source"].append(source)
             samples_rows["post_id"].append(sample.post_id)
             samples_rows["image_path"].append(f"{obj.rel}/{sample.path}")
-            samples_rows["offset_data"].append(0)
+            samples_rows["offset_data"].append(base)
             samples_rows["size"].append(image_size)
             samples_rows["json_path"].append(
-                f"{obj.rel}/{sample.path}.json")
-            samples_rows["json_offset_data"].append(image_size)
-            samples_rows["json_size"].append(json_size)
+                f"{obj.rel}/{sample.path}.json" if sample.has_json else None)
+            samples_rows["json_offset_data"].append(
+                None if not sample.has_json else base + obj.size)
+            samples_rows["json_size"].append(
+                None if not sample.has_json else sample.json_size)
             samples_rows["text"].append(None)
             samples_rows["tags_state"].append(sample.tags_state)
             samples_rows["tags"].append(tag_structs)
@@ -168,6 +202,23 @@ def build_p2_directory(
         counts["samples"] += len(obj.samples)
         counts["annotations"] += len(obj.samples)
     return counts
+
+
+def assert_object_ref_valid(dataset: str, source: str, obj: ObjectSpec) -> None:
+    """A synthetic object must construct a valid real-Contract ObjectRef."""
+    digest = _input_digest(obj.rel, dataset)
+    ObjectRef(
+        storage_id="local",
+        object_id=_object_id(obj.rel, digest),
+        object_path=obj.rel,
+        object_size=obj.size,
+        object_version=digest,
+        validator=digest,
+        backend="local",
+        repo_type="local",
+        validator_kind="sha256",
+        validator_strength="strong:sha256",
+        archive_format="tar")
 
 
 def make_tag_specs(hot: list[str], medium: list[str], rare: list[str],

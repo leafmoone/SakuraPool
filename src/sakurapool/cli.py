@@ -1,10 +1,15 @@
 """Command-line boundary for queries, registry validation and local indexing."""
 
+from __future__ import annotations
+
 import argparse
 import json
 import tarfile
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .runtime import RuntimeQuerySpec
 
 from .evaluator import ReferenceEvaluator
 from .indexer import scan
@@ -18,9 +23,39 @@ def _load_json(path: str) -> Any:
         return json.load(handle)
 
 
+def _spec_tags(value: Any) -> tuple:
+    tags = tuple(value or ())
+    return tags
+
+
+def _spec_from_dict(data: dict[str, Any]) -> "RuntimeQuerySpec":
+    """Build a RuntimeQuerySpec from a --spec JSON document (any_of included)."""
+    from .runtime import RuntimeQuerySpec
+    if not isinstance(data, dict):
+        raise ValueError("spec must be a JSON object")
+    branches = []
+    for branch in data.get("any_of", ()) or ():
+        if not isinstance(branch, dict):
+            raise ValueError("any_of branches must be objects")
+        branches.append(_spec_from_dict(branch))
+    known = {"sources", "datasets", "namespace", "all_tags", "any_tags",
+             "none_tags", "any_of"}
+    unknown = set(data) - known
+    if unknown:
+        raise ValueError(f"unknown spec keys: {sorted(unknown)}")
+    return RuntimeQuerySpec(
+        sources=tuple(data.get("sources", ()) or ()),
+        datasets=tuple(data.get("datasets", ()) or ()),
+        namespace=data.get("namespace"),
+        all_tags=_spec_tags(data.get("all_tags")),
+        any_tags=_spec_tags(data.get("any_tags")),
+        none_tags=_spec_tags(data.get("none_tags")),
+        any_of=tuple(branches),
+    )
+
+
 def _runtime_command(args: argparse.Namespace) -> int:
     from .runtime import (  # lazy: numpy/pyroaring are heavy
-        RuntimeQuerySpec,
         RuntimeSnapshot,
         combine_inventories,
         compile_runtime,
@@ -41,7 +76,17 @@ def _runtime_command(args: argparse.Namespace) -> int:
             "path": str(summary.path),
         }, sort_keys=True))
         return 0
-    with RuntimeSnapshot.open(args.path, full_verify=args.full_verify) as rt:
+    path = args.snapshot if args.snapshot is not None else args.path
+    if path is None:
+        raise ValueError("a snapshot path (positional or --snapshot) is required")
+    if args.runtime_command == "query" and args.spec:
+        from .runtime import RuntimeQuerySpec  # noqa: F401 - import check
+        spec_data = (_load_json(args.spec)
+                     if Path(args.spec).is_file() else json.loads(args.spec))
+        spec = _spec_from_dict(spec_data)
+    else:
+        spec = None
+    with RuntimeSnapshot.open(path, full_verify=args.full_verify) as rt:
         if args.runtime_command == "inspect":
             print(json.dumps({
                 "snapshot_id": rt.snapshot_id,
@@ -58,6 +103,7 @@ def _runtime_command(args: argparse.Namespace) -> int:
         if args.runtime_command == "lookup":
             if not args.source or not args.post_id:
                 raise ValueError("lookup requires --source and --post-id")
+            # fall through: lookup returns before the query branch below
             record = rt.resolve_one(args.source, args.post_id, args.dataset)
             location = rt.location(record.rid)
             print(json.dumps({
@@ -69,15 +115,23 @@ def _runtime_command(args: argparse.Namespace) -> int:
                 **location,
             }, sort_keys=True))
             return 0
-    spec = RuntimeQuerySpec(
-        sources=tuple(args.source or ()),
-        datasets=tuple(args.dataset or ()),
-        namespace=args.namespace,
-        all_tags=tuple(args.all_tags or ()),
-        any_tags=tuple(args.any_tags or ()),
-        none_tags=tuple(args.none_tags or ()),
-    )
-    with RuntimeSnapshot.open(args.path, full_verify=args.full_verify) as rt:
+        if args.runtime_command != "query":
+            raise ValueError(
+                f"unhandled runtime command: {args.runtime_command}")
+        if spec is not None:
+            if any((args.source, args.dataset, args.namespace,
+                    args.all_tags, args.any_tags, args.none_tags)):
+                raise ValueError("--spec cannot be combined with term flags")
+        else:
+            from .runtime import RuntimeQuerySpec
+            spec = RuntimeQuerySpec(
+                sources=tuple(args.source or ()),
+                datasets=tuple(args.dataset or ()),
+                namespace=args.namespace,
+                all_tags=_spec_tags(args.all_tags),
+                any_tags=_spec_tags(args.any_tags),
+                none_tags=_spec_tags(args.none_tags),
+            )
         result = rt.query(spec)
         rids = result.limit(args.limit if args.limit is not None else 10)
         print(json.dumps({
@@ -86,7 +140,7 @@ def _runtime_command(args: argparse.Namespace) -> int:
             "rids": rids,
             "truncated": result.count() > len(rids),
         }, sort_keys=True))
-    return 0
+        return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -106,33 +160,45 @@ def main(argv: list[str] | None = None) -> int:
     runtime_sub = runtime.add_subparsers(dest="runtime_command", required=True)
     rc = runtime_sub.add_parser("compile", help="compile P2 indexes into a snapshot")
     rc.add_argument(
-        "paths", type=Path, nargs="+",
+        "paths", type=Path, nargs="*",
         metavar="P2_DIR|RUNTIME_ROOT",
         help="P2 index dirs; the last positional is RUNTIME_ROOT unless --output")
+    rc.add_argument("--index", dest="index_dirs", action="append",
+                    default=[], type=Path, help="P2 index dir (repeatable)")
     rc.add_argument("--output", dest="named_output", type=Path)
     rc.add_argument("--chunk-size", type=int, default=500_000)
     ri = runtime_sub.add_parser("inspect", help="show the current snapshot meta")
-    ri.add_argument("path", type=Path)
+    ri.add_argument("path", type=Path, nargs="?")
+    ri.add_argument("--snapshot", type=Path, default=None)
     ri.add_argument("--full-verify", action="store_true")
+    ri.add_argument("--full", dest="full_verify", action="store_true")
     rv = runtime_sub.add_parser("verify", help="verify the current snapshot")
-    rv.add_argument("path", type=Path)
+    rv.add_argument("path", type=Path, nargs="?")
+    rv.add_argument("--snapshot", type=Path, default=None)
     rv.add_argument("--full-verify", action="store_true")
+    rv.add_argument("--full", dest="full_verify", action="store_true")
     rl = runtime_sub.add_parser("lookup", help="resolve (source, post_id) to rid+location")
-    rl.add_argument("path", type=Path)
+    rl.add_argument("path", type=Path, nargs="?")
+    rl.add_argument("--snapshot", type=Path, default=None)
     rl.add_argument("--source", required=True)
     rl.add_argument("--post-id", required=True)
     rl.add_argument("--dataset")
     rl.add_argument("--full-verify", action="store_true")
+    rl.add_argument("--full", dest="full_verify", action="store_true")
     rq = runtime_sub.add_parser("query", help="run a runtime query")
-    rq.add_argument("path", type=Path)
+    rq.add_argument("path", type=Path, nargs="?")
+    rq.add_argument("--snapshot", type=Path, default=None)
     rq.add_argument("--source", action="append", default=[])
     rq.add_argument("--dataset", action="append", default=[])
     rq.add_argument("--namespace")
     rq.add_argument("--all-tag", dest="all_tags", action="append", default=[])
     rq.add_argument("--any-tag", dest="any_tags", action="append", default=[])
     rq.add_argument("--none-tag", dest="none_tags", action="append", default=[])
+    rq.add_argument("--spec",
+                    help="query JSON document (file or inline) incl. any_of")
     rq.add_argument("--limit", type=int)
     rq.add_argument("--full-verify", action="store_true")
+    rq.add_argument("--full", dest="full_verify", action="store_true")
     index = subparsers.add_parser("index", help="build a local index")
     index_subparsers = index.add_subparsers(dest="index_command", required=True)
     scan_command = index_subparsers.add_parser("scan", help="scan uncompressed TAR archives")
@@ -144,10 +210,28 @@ def main(argv: list[str] | None = None) -> int:
     scan_command.add_argument("--dataset", default="local")
     scan_command.add_argument("--hash-images", action="store_true")
     args = parser.parse_args(argv)
+    if (args.command == "runtime" and args.runtime_command == "compile"
+            and not args.index_dirs and not args.paths):
+        parser.error("runtime compile requires --index or P2_DIR arguments")
     try:
         if args.command == "runtime":
             if args.runtime_command == "compile":
-                if args.named_output:
+                if args.index_dirs and args.paths[:-1]:
+                    raise ValueError(
+                        "--index cannot be mixed with positional P2 dirs")
+                if args.index_dirs:
+                    if args.named_output:
+                        if args.paths:
+                            raise ValueError(
+                                "--index + --output takes no positional args")
+                        args.inputs = list(args.index_dirs)
+                        args.output = args.named_output
+                    elif args.paths:
+                        args.inputs = list(args.index_dirs)
+                        args.output = args.paths[-1]
+                    else:
+                        raise ValueError("--index requires --output or a RUNTIME_ROOT positional")
+                elif args.named_output:
                     args.inputs = list(args.paths)
                     args.output = args.named_output
                 else:

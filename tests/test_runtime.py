@@ -152,11 +152,11 @@ def test_snapshot_verify_and_corruption(tmp_path):
 def test_compile_crash_resume(tmp_path, monkeypatch):
     import sakurapool.runtime.compiler as compiler
 
-    def flaky_bitmaps(staging):
+    def flaky_bitmaps(staging, snap_id):
         flaky_bitmaps.calls += 1
         if flaky_bitmaps.calls == 1:
             raise OSError("injected crash at bitmaps")
-        return compiler._real_bitmaps(staging)
+        return compiler._real_bitmaps(staging, snap_id)
 
     flaky_bitmaps.calls = 0
     compiler._real_bitmaps = compiler._bitmaps
