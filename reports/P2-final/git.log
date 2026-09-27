@@ -1,3 +1,5 @@
+6491aafb6d032eaec697ae5c7596d619e534556a fix(index): make spool ownership cleanup exception safe
+573f28cbe8a5b1e6c39b472de69d660bf29c078d docs(index): record v4 storage contract repair
 75d8ce6c7837aafd9c8eff2b5b2c3639a00859e9 fix(index): establish v4 storage profile contract
 9ec051928d9b6c871febe6b1e4bd1bc8e2790acb docs(index): record indexed spool repair
 9f70c4c2e7ca73bacce1ab75d2ba064556e1defb fix(verify): isolate raw reports from diff check

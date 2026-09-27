@@ -2,14 +2,14 @@
 platform win32 -- Python 3.12.13, pytest-8.3.4, pluggy-1.6.0
 rootdir: D:\SakuraTool\SakuraPool
 configfile: pyproject.toml
-collected 88 items
+collected 93 items
 
 D:\SakuraTool\SakuraPool\tests\test_evaluator.py ..                      [  2%]
-D:\SakuraTool\SakuraPool\tests\test_indexer.py ......................... [ 30%]
-........................                                                 [ 57%]
-D:\SakuraTool\SakuraPool\tests\test_indexer_boundaries.py ..........     [ 69%]
-D:\SakuraTool\SakuraPool\tests\test_indexer_recovery.py ..........       [ 80%]
-D:\SakuraTool\SakuraPool\tests\test_p2_revision.py ........              [ 89%]
+D:\SakuraTool\SakuraPool\tests\test_indexer.py ......................... [ 29%]
+.............................                                            [ 60%]
+D:\SakuraTool\SakuraPool\tests\test_indexer_boundaries.py ..........     [ 70%]
+D:\SakuraTool\SakuraPool\tests\test_indexer_recovery.py ..........       [ 81%]
+D:\SakuraTool\SakuraPool\tests\test_p2_revision.py ........              [ 90%]
 D:\SakuraTool\SakuraPool\tests\test_query.py .....                       [ 95%]
 D:\SakuraTool\SakuraPool\tests\test_registry.py .                        [ 96%]
 D:\SakuraTool\SakuraPool\tests\test_schema.py ...                        [100%]
@@ -20,7 +20,7 @@ _______________________________ test_cli_config _______________________________
 {"error": "index scan requires --input and --output"}
 _________________________ test_cli_row_error_nonzero __________________________
 ---------------------------- Captured stdout call -----------------------------
-{"archives": 1, "errors": 1, "header_seconds": 0.01208519993815571, "json_seconds": 1.400010660290718e-06, "objects": 1, "objects_committed": 1, "objects_seen": 1, "objects_skipped": 0, "parquet_seconds": 0.06269379996228963, "samples": 1, "skipped": 0, "total_seconds": 0.11137369996868074}
+{"archives": 1, "errors": 1, "header_seconds": 0.00631190009880811, "json_seconds": 4.00003045797348e-07, "objects": 1, "objects_committed": 1, "objects_seen": 1, "objects_skipped": 0, "parquet_seconds": 0.021036399994045496, "samples": 1, "skipped": 0, "total_seconds": 0.04541690007317811}
 - generated xml file: D:\SakuraTool\SakuraPool\reports\P2-final\pinned-junit.xml -
 =========================== short test summary info ===========================
 PASSED D:\SakuraTool\SakuraPool\tests\test_evaluator.py::test_filter_select_and_limit_are_deterministic
@@ -69,7 +69,12 @@ PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_errors_cross_batch_r
 PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_v4_contract_constants_and_storage_roundtrip
 PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_object_ref_roundtrip_and_bounds
 PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_avif_pairing_and_payload_extent
-PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_spools_are_removed_after_failure
+PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_spool_constructor_failure_releases_owned_files[connect]
+PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_spool_constructor_failure_releases_owned_files[ddl]
+PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_spool_constructor_failure_releases_owned_files[commit]
+PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_second_spool_connect_failure_releases_both
+PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_close_failure_and_primary_error_cleanup
+PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_primary_error_survives_cleanup_error
 PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_storage_profile_is_stable_but_object_id_is_not
 PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_input_same_size_mtime_changed
 PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_fresh_process_roundtrip_determinism
@@ -111,4 +116,4 @@ PASSED D:\SakuraTool\SakuraPool\tests\test_registry.py::test_schema_and_model_re
 PASSED D:\SakuraTool\SakuraPool\tests\test_schema.py::test_rows_to_table_preserves_schema_and_values
 PASSED D:\SakuraTool\SakuraPool\tests\test_schema.py::test_rows_to_table_rejects_unknown_and_missing_fields
 PASSED D:\SakuraTool\SakuraPool\tests\test_schema.py::test_custom_schema
-============================= 88 passed in 11.14s =============================
+============================= 93 passed in 7.84s ==============================
