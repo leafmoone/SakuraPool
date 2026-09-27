@@ -9,8 +9,9 @@
  M reports/P2-final/pinned-junit.xml
  M reports/P2-final/pinned-pytest.log
  M reports/P2-final/pytest.log
- M reports/P2-final/status.log
  M reports/P2-final/venv.log
  M reports/P2-final/wheel-install.log
  M reports/P2-final/wheel-scan.log
+?? SakuraPool-P2-9ec0519.tar.gz
+?? SakuraPool-P2.diff
 ?? agents.md

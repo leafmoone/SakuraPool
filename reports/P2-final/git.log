@@ -1,3 +1,5 @@
+75d8ce6c7837aafd9c8eff2b5b2c3639a00859e9 fix(index): establish v4 storage profile contract
+9ec051928d9b6c871febe6b1e4bd1bc8e2790acb docs(index): record indexed spool repair
 9f70c4c2e7ca73bacce1ab75d2ba064556e1defb fix(verify): isolate raw reports from diff check
 b6bb9a6d9eea8048ab9d1c0251e44bf7a21a5056 fix(index): remove residual spool scans
 d159c6b2cbfe78693bb3e933f37955f2611d09d7 docs(index): record emergency streaming repair
