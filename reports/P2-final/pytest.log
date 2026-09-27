@@ -5,11 +5,11 @@ configfile: pyproject.toml
 testpaths: tests
 plugins: anyio-4.13.0, asyncio-1.4.0
 asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
-collected 100 items
+collected 102 items
 
-tests\test_evaluator.py ..                                               [  2%]
-tests\test_indexer.py .................................................. [ 52%]
-...........                                                              [ 63%]
+tests\test_evaluator.py ..                                               [  1%]
+tests\test_indexer.py .................................................. [ 50%]
+.............                                                            [ 63%]
 tests\test_indexer_boundaries.py ..........                              [ 73%]
 tests\test_indexer_recovery.py ..........                                [ 83%]
 tests\test_p2_revision.py ........                                       [ 91%]
@@ -23,7 +23,7 @@ _______________________________ test_cli_config _______________________________
 {"error": "index scan requires --input and --output"}
 _________________________ test_cli_row_error_nonzero __________________________
 ---------------------------- Captured stdout call -----------------------------
-{"archives": 1, "errors": 1, "header_seconds": 0.00545069994404912, "json_seconds": 2.00001522898674e-07, "objects": 1, "objects_committed": 1, "objects_seen": 1, "objects_skipped": 0, "parquet_seconds": 0.017177199944853783, "samples": 1, "skipped": 0, "total_seconds": 0.04502109996974468}
+{"archives": 1, "errors": 1, "header_seconds": 0.006556899985298514, "json_seconds": 2.00001522898674e-07, "objects": 1, "objects_committed": 1, "objects_seen": 1, "objects_skipped": 0, "parquet_seconds": 0.03631870006211102, "samples": 1, "skipped": 0, "total_seconds": 0.06173349998425692}
 - generated xml file: D:\SakuraTool\SakuraPool\reports\P2-final\host-junit.xml -
 =========================== short test summary info ===========================
 PASSED tests/test_evaluator.py::test_filter_select_and_limit_are_deterministic
@@ -71,11 +71,13 @@ PASSED tests/test_indexer.py::test_errors_cross_batch_roundtrip_and_resume[1025]
 PASSED tests/test_indexer.py::test_errors_cross_batch_roundtrip_and_resume[2051]
 PASSED tests/test_indexer.py::test_v4_contract_constants_and_storage_roundtrip
 PASSED tests/test_indexer.py::test_object_ref_roundtrip_and_bounds
+PASSED tests/test_indexer.py::test_objects_parquet_objectref_and_memberrefs_are_lossless
 PASSED tests/test_indexer.py::test_avif_pairing_and_payload_extent
 PASSED tests/test_indexer.py::test_spool_constructor_failure_releases_owned_files[connect]
 PASSED tests/test_indexer.py::test_spool_constructor_failure_releases_owned_files[ddl]
 PASSED tests/test_indexer.py::test_spool_constructor_failure_releases_owned_files[commit]
 PASSED tests/test_indexer.py::test_handle_close_failure_keeps_pending_until_retry
+PASSED tests/test_indexer.py::test_object_ref_archive_format_contract
 PASSED tests/test_indexer.py::test_second_spool_connect_failure_releases_both
 PASSED tests/test_indexer.py::test_close_failure_and_primary_error_cleanup
 PASSED tests/test_indexer.py::test_scan_error_exposes_retryable_cleanup_handle_after_gc
@@ -126,4 +128,4 @@ PASSED tests/test_registry.py::test_schema_and_model_registries_reject_duplicate
 PASSED tests/test_schema.py::test_rows_to_table_preserves_schema_and_values
 PASSED tests/test_schema.py::test_rows_to_table_rejects_unknown_and_missing_fields
 PASSED tests/test_schema.py::test_custom_schema
-============================= 100 passed in 7.60s =============================
+============================= 102 passed in 8.47s =============================

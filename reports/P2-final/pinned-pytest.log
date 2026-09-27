@@ -2,11 +2,11 @@
 platform win32 -- Python 3.12.13, pytest-8.3.4, pluggy-1.6.0
 rootdir: D:\SakuraTool\SakuraPool
 configfile: pyproject.toml
-collected 100 items
+collected 102 items
 
-D:\SakuraTool\SakuraPool\tests\test_evaluator.py ..                      [  2%]
-D:\SakuraTool\SakuraPool\tests\test_indexer.py ......................... [ 27%]
-....................................                                     [ 63%]
+D:\SakuraTool\SakuraPool\tests\test_evaluator.py ..                      [  1%]
+D:\SakuraTool\SakuraPool\tests\test_indexer.py ......................... [ 26%]
+......................................                                   [ 63%]
 D:\SakuraTool\SakuraPool\tests\test_indexer_boundaries.py ..........     [ 73%]
 D:\SakuraTool\SakuraPool\tests\test_indexer_recovery.py ..........       [ 83%]
 D:\SakuraTool\SakuraPool\tests\test_p2_revision.py ........              [ 91%]
@@ -20,7 +20,7 @@ _______________________________ test_cli_config _______________________________
 {"error": "index scan requires --input and --output"}
 _________________________ test_cli_row_error_nonzero __________________________
 ---------------------------- Captured stdout call -----------------------------
-{"archives": 1, "errors": 1, "header_seconds": 0.005998599925078452, "json_seconds": 5.00003807246685e-07, "objects": 1, "objects_committed": 1, "objects_seen": 1, "objects_skipped": 0, "parquet_seconds": 0.015508400043472648, "samples": 1, "skipped": 0, "total_seconds": 0.040473600034601986}
+{"archives": 1, "errors": 1, "header_seconds": 0.008176299976184964, "json_seconds": 4.00003045797348e-07, "objects": 1, "objects_committed": 1, "objects_seen": 1, "objects_skipped": 0, "parquet_seconds": 0.033911299891769886, "samples": 1, "skipped": 0, "total_seconds": 0.06349670002236962}
 - generated xml file: D:\SakuraTool\SakuraPool\reports\P2-final\pinned-junit.xml -
 =========================== short test summary info ===========================
 PASSED D:\SakuraTool\SakuraPool\tests\test_evaluator.py::test_filter_select_and_limit_are_deterministic
@@ -68,11 +68,13 @@ PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_errors_cross_batch_r
 PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_errors_cross_batch_roundtrip_and_resume[2051]
 PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_v4_contract_constants_and_storage_roundtrip
 PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_object_ref_roundtrip_and_bounds
+PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_objects_parquet_objectref_and_memberrefs_are_lossless
 PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_avif_pairing_and_payload_extent
 PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_spool_constructor_failure_releases_owned_files[connect]
 PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_spool_constructor_failure_releases_owned_files[ddl]
 PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_spool_constructor_failure_releases_owned_files[commit]
 PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_handle_close_failure_keeps_pending_until_retry
+PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_object_ref_archive_format_contract
 PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_second_spool_connect_failure_releases_both
 PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_close_failure_and_primary_error_cleanup
 PASSED D:\SakuraTool\SakuraPool\tests\test_indexer.py::test_scan_error_exposes_retryable_cleanup_handle_after_gc
@@ -123,4 +125,4 @@ PASSED D:\SakuraTool\SakuraPool\tests\test_registry.py::test_schema_and_model_re
 PASSED D:\SakuraTool\SakuraPool\tests\test_schema.py::test_rows_to_table_preserves_schema_and_values
 PASSED D:\SakuraTool\SakuraPool\tests\test_schema.py::test_rows_to_table_rejects_unknown_and_missing_fields
 PASSED D:\SakuraTool\SakuraPool\tests\test_schema.py::test_custom_schema
-============================= 100 passed in 7.50s =============================
+============================= 102 passed in 8.82s =============================

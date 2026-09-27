@@ -1,3 +1,5 @@
+44b30f36f844285d03f298c9cdc6664437717e43 fix(records): make ObjectRef archive format explicit
+2f13b0d2153347644c8d7342546580d0fb1579ce docs(index): record retryable pending cleanup
 c496a5cac0f8725b71fb6894e58f13bbd59f8f23 fix(index): expose retryable scoped cleanup handles
 d27ef9ba66fc874ccfa4f33b91a9f8ff5ea35802 docs(index): record scoped cleanup fault evidence
 0fbade467cc808ebf9db4f6d16efafec491bb0f1 fix(index): scope spool cleanup and preserve failures
