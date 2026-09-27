@@ -702,6 +702,23 @@ def main() -> int:
             failed = True
     report["platform"] = platform.platform()
     report["python"] = sys.version.split()[0]
+    # Full environment + source basis recorded in the artifact: the run
+    # fingerprint below is the sha256 over the whole src tree, the bench
+    # tool, the generator, the Python version and the pinned dependency
+    # versions, so a cached phase from another tree or environment can
+    # never masquerade as this run.
+    import numpy
+    import pyarrow
+    import pyroaring
+
+    report["env"] = {
+        "python": sys.version.split()[0],
+        "platform": platform.platform(),
+        "numpy": numpy.__version__,
+        "pyarrow": pyarrow.__version__,
+        "pyroaring": pyroaring.__version__,
+    }
+    report["run_fingerprint"] = _run_fingerprint(args)
     report_path.write_text(json.dumps(report, sort_keys=True))
     print(json.dumps(report, sort_keys=True, indent=1))
     if failed:
