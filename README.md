@@ -1,7 +1,9 @@
 # SakuraPool
 
-Typed P1 reference queries and a P2 local uncompressed TAR index builder. No data
-service access, image decoding, production throughput claims, P3, or model execution.
+Typed P1 reference queries, a P2 local uncompressed TAR index builder, and a P3
+read-only runtime (compile committed P2 into a bitmap snapshot, query, resolve).
+No data service access, image decoding, production throughput claims, or model
+execution.
 
 ## Installation and CLI
 
@@ -158,3 +160,63 @@ header/json/parquet/total seconds and process peak RSS including fixture generat
 and imports; total excludes fixture generation but includes whole-TAR validation.
 No production performance inference is valid. See the revision report for actual
 command logs, compatible installation failures/successes, and remaining gates.
+
+## P3 runtime (dev)
+
+The runtime compiles one or more committed P2 directories into an immutable
+snapshot and answers queries from bitmaps without touching original archives.
+
+```console
+sakura runtime compile INDEX_DIR [INDEX_DIR ...] RUNTIME_ROOT
+sakura runtime verify RUNTIME_ROOT [--full-verify]
+sakura runtime inspect RUNTIME_ROOT [--full-verify]
+sakura runtime lookup RUNTIME_ROOT --source SRC --post-id ID [--dataset DS]
+```
+
+Layout per `RUNTIME_ROOT`: `current.json` (atomic pointer) plus
+`snapshots/<snapshot_id>/{catalog.sqlite, bitmaps.sqlite, locations.npy,
+SNAPSHOT.json, READY}`. Nothing is openable before `READY`; compilation is
+stage-resumable (`STAGE.txt` marks stage1/catalog/bitmaps/locations/snapshot/ready)
+and a second `compile` against the same published snapshot is a no-op. `rid` is a
+dense `uint32` in canonical order `(dataset_id, object_id, sample_path,
+record_id)`. `locations.npy` is a rid-ordered numpy memmap
+(`object_idx u4, image_offset u8, image_size u8, metadata_offset u8,
+metadata_size u8, format_id u2, flags u1`); `catalog.sqlite` holds names/IDs
+(records, sources, datasets, namespaces, tags with categories) and every lookup
+resolves via index (asserted by `EXPLAIN QUERY PLAN` tests). Tag identity is
+`(namespace, value)`; one namespace may be served by multiple sources/origins
+(bitmap union). `tags_state in (known, empty)` defines a record's known set;
+`missing`/`invalid` records contribute no tags. Conflicting categories for one
+`(namespace, value)` fail the compile with `TAG_CATEGORY_CONFLICT`.
+
+Query domain (`RuntimeQuerySpec`): `sources` OR, `datasets` OR, then AND with
+per-tag `all_tags`, one OR group of `any_tags`, and per-namespace `none_tags`
+(`known_ns − excluded`); `any_of` is a union of flat branches. `query()` returns a
+lazy bitmap result: `count()`, `iter_rids()`, `limit(n)`,
+`iter_location_batches(size)`, `iter_record_batches(size)`; point resolution is
+`lookup_rids(source, post_id[, dataset])` / `resolve_one(source, post_id,
+[dataset])` (ambiguous matches raise `AmbiguousRecordError`). Bitmaps are cached
+in a byte-budget LRU (`cache_bytes` on `RuntimeSnapshot.open`, 256 MiB default)
+with hits/misses/evictions counters.
+
+Benchmark (`tools/bench_runtime.py`, synthetic corpus, deterministic seed):
+
+```console
+PYTHONPATH=src python tools/bench_runtime.py --workdir build/bench --scale 100k
+# scales: 100k (correctness + 300-spec reference differential), 1M, 5M
+# phases: gen, compile, query, diff — each phase is a child process, so peak RSS
+# is attributed per phase; results merge into build/bench/report.json
+```
+
+Host Python 3.14.5, Windows 11, one run: compile 100k 2.2 s / 1M 46 s / 5M 285 s
+with peak RSS 143 / 272 / 795 MiB (5M/1M growth 2.92×) and peak temp 35 / 361 /
+1838 MiB; published snapshot 15 / 156 / 794 MiB (≈165 B/sample: catalog 119,
+locations 37, bitmaps 2). Query process RSS stays 51–150 MiB at 5M (memmap +
+byte-LRU); warm typical-count p95 ≤ 0.52 ms, first-128-locations p95 ≤ 0.10 ms,
+10k-locations p95 ≤ 3.4 ms; a 2.5 M-rid result counts and returns its first 100
+rows in <1 ms. With a 1 MiB cache limit the LRU evicts (35 evictions), keeps
+resident ≤ limit, and plans stay <0.7 ms. The 100k corpus passes a 300-spec
+Python-set differential with 0 mismatches; the unit suite adds a 1000-spec
+differential on a mixed-state corpus, crash/resume at every stage boundary,
+READY reuse, and fresh-process reopen. All numbers are synthetic and
+diagnostic-only; no production performance inference is valid.
