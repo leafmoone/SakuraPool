@@ -1,0 +1,129 @@
+{
+  "schema": "sakurapool-p4-commands-v1",
+  "implementation_commit": "56f40c43d0a85943b633c38eab6a4175d53b434f",
+  "base_commit": "edc72fbaaddc4dc8f9865ddfa576b737c7b15f5a",
+  "repo_cwd": "D:/SakuraTool/SakuraPool",
+  "cert_root": "D:/SakuraTool/SakuraPool-P4-work/p4-cert-56f40c4",
+  "log_hashes_index": "reports/P4/evidence-manifest.json",
+  "jobs": [
+    {
+      "id": "real-bootstrap-v1",
+      "argv": ["D:/SakuraTool/SakuraPool-P4-work/.venv312/Scripts/python.exe", "-m", "sakurapool", "remote", "inspect", "--config", "D:/SakuraTool/SakuraPool-P4-work/discover-bootstrap-profile-v1.json", "--output", "D:/SakuraTool/SakuraPool-P4-work/discover-bootstrap-v1.json"],
+      "cwd": "D:/SakuraTool/SakuraPool", "exit_code": 2,
+      "started_utc": "2026-09-28T09:43:29.827223+00:00",
+      "result": "one accounted target attempt, zero raw entity-body and metadata bytes; failure category unknown; no plan",
+      "evidence": "D:/SakuraTool/SakuraPool-P4-work/discover-bootstrap-v1.evidence.json"
+    },
+    {
+      "id": "real-bootstrap-v2",
+      "argv_redacted": ["D:/SakuraTool/SakuraPool-P4-work/.venv312/Scripts/python.exe", "-m", "sakurapool", "remote", "inspect", "--config", "D:/SakuraTool/SakuraPool-P4-work/discover-bootstrap-profile-v2.json", "--output", "D:/SakuraTool/SakuraPool-P4-work/discover-bootstrap-v2.json"],
+      "cwd": "D:/SakuraTool/SakuraPool", "exit_code": 3221225477,
+      "started_utc": "2026-09-28T10:26:15.739017+00:00",
+      "result": "token wrapper child exited locally 0xC0000005; no additional target attempt; no CLI completion claim",
+      "evidence": "D:/SakuraTool/SakuraPool-P4-work/discover-bootstrap-v2.evidence.json"
+    },
+    {
+      "id": "real-bootstrap-v3",
+      "argv_redacted": ["D:/SakuraTool/SakuraPool-P4-work/.venv312/Scripts/python.exe", "-I", "D:/SakuraTool/SakuraPool/tools/p4_token_bootstrap.py", "--config", "D:/SakuraTool/SakuraPool-P4-work/discover-bootstrap-profile-v3.json", "--output", "D:/SakuraTool/SakuraPool-P4-work/discover-bootstrap-v3.json"],
+      "cwd": "D:/SakuraTool/SakuraPool", "exit_code": 2,
+      "started_utc": "2026-09-28T10:47:24.210199+00:00",
+      "result": "one additional target revisions attempt, known metadata_headers HTTP 404, zero raw entity-body and metadata bytes; cause unknown, no plan",
+      "evidence": "D:/SakuraTool/SakuraPool-P4-work/discover-bootstrap-v3.evidence.json"
+    },
+    {
+      "id": "source-full-312",
+      "argv": ["D:/SakuraTool/SakuraPool-P4-work/.venv312/Scripts/python.exe", "-m", "pytest", "tests", "-q", "--tb=short", "-ra", "-p", "no:cacheprovider"],
+      "env": {"PYTHONPATH": "src", "PYTHONDONTWRITEBYTECODE": "1"},
+      "cwd": "D:/SakuraTool/SakuraPool", "started_utc": "2026-09-28T12:52:59Z", "finished_utc": "2026-09-28T13:08:19Z", "exit_code": 0,
+      "result": "381 passed, 2 skipped in 920.49s; P3 2-million-record fixture included, no deselection"
+    },
+    {
+      "id": "archive-first-attempt",
+      "argv": ["git", "archive", "--format=tar", "-o", "D:/SakuraTool/SakuraPool-P4-work/p4-cert-56f40c4/source-56f40c4.tar", "56f40c43d0a85943b633c38eab6a4175d53b434f", "&&", "tar", "-xf", ".../source-56f40c4.tar", "-C", ".../archive"],
+      "cwd": "D:/SakuraTool/SakuraPool", "started_utc": "2026-09-28T13:09:32Z", "finished_utc": "2026-09-28T13:09:35Z", "exit_code": 128,
+      "result": "git archive tar created; GNU tar misread Windows drive colon as remote host; extraction failed, archive preserved"
+    },
+    {
+      "id": "archive-extract-retry",
+      "argv": ["tar", "--force-local", "-xf", "D:/SakuraTool/SakuraPool-P4-work/p4-cert-56f40c4/source-56f40c4.tar", "-C", "D:/SakuraTool/SakuraPool-P4-work/p4-cert-56f40c4/archive"],
+      "cwd": "D:/SakuraTool/SakuraPool", "started_utc": "2026-09-28T13:09:58Z", "finished_utc": "2026-09-28T13:09:58Z", "exit_code": 0
+    },
+    {
+      "id": "build-wheel",
+      "argv": ["uv", "build", "--wheel", "--python", "3.12", "--out-dir", "D:/SakuraTool/SakuraPool-P4-work/p4-cert-56f40c4/wheels", "D:/SakuraTool/SakuraPool-P4-work/p4-cert-56f40c4/archive"],
+      "env": {"UV_CACHE_DIR": ".../p4-cert-56f40c4/uv-cache", "UV_NO_PROGRESS": "1", "TMP/TEMP/TMPDIR": ".../p4-cert-56f40c4/tmp"},
+      "cwd": "D:/SakuraTool/SakuraPool", "started_utc": "2026-09-28T13:10:16Z", "finished_utc": "2026-09-28T13:10:24Z", "exit_code": 0,
+      "artifact": "D:/SakuraTool/SakuraPool-P4-work/p4-cert-56f40c4/wheels/sakurapool-0.1.0-py3-none-any.whl"
+    },
+    {
+      "id": "venv-create-310-312-313",
+      "argv_template": ["uv", "venv", "--python", "3.MINOR", "D:/SakuraTool/SakuraPool-P4-work/p4-cert-56f40c4/venv3MINOR"],
+      "versions": {"3.10.21": 0, "3.12.13": 0, "3.13.13": 0},
+      "cwd": "D:/SakuraTool/SakuraPool", "env": {"UV_CACHE_DIR": ".../p4-cert-56f40c4/uv-cache", "TMP/TEMP/TMPDIR": ".../p4-cert-56f40c4/tmp"}
+    },
+    {
+      "id": "wheel-install-310-312-313",
+      "argv_template": ["uv", "pip", "install", "--python", "D:/SakuraTool/SakuraPool-P4-work/p4-cert-56f40c4/venv3MINOR/Scripts/python.exe", "D:/SakuraTool/SakuraPool-P4-work/p4-cert-56f40c4/wheels/sakurapool-0.1.0-py3-none-any.whl[remote]", "pytest==8.3.4", "ruff==0.9.2"],
+      "versions": {"3.10.21": 0, "3.12.13": 0, "3.13.13": 0},
+      "cwd": "D:/SakuraTool/SakuraPool", "env": {"UV_CACHE_DIR": ".../p4-cert-56f40c4/uv-cache", "UV_NO_PROGRESS": "1", "UV_HTTP_TIMEOUT": "45", "TMP/TEMP/TMPDIR": ".../p4-cert-56f40c4/tmp"},
+      "result": "normal dependency resolution with [remote], pytest, ruff; no no-deps, transplanted dependency or global proxy modification"
+    },
+    {
+      "id": "dependency-check-310-312-313", "argv_template": ["uv", "pip", "check", "--python", "D:/SakuraTool/SakuraPool-P4-work/p4-cert-56f40c4/venv3MINOR/Scripts/python.exe"],
+      "versions": {"3.10.21": 0, "3.12.13": 0, "3.13.13": 0}, "cwd": "D:/SakuraTool/SakuraPool", "result": "compatible: 24 / 21 / 21 packages"
+    },
+    {
+      "id": "installed-origin-310-312-313", "argv_template": [".../venv3MINOR/Scripts/python.exe", "-c", "import installed package and compare 13 modules against Git blob, clean archive, wheel ZIP and site-packages"],
+      "versions": {"3.10.21": 0, "3.12.13": 0, "3.13.13": 0},
+      "cwd": "D:/SakuraTool/SakuraPool-P4-work/p4-cert-56f40c4", "env": {"PYTHONPATH": "absent", "MODELSCOPE_API_TOKEN": "absent"},
+      "result": "all 13 matched archive/wheel/installed exactly; Git blob matched after explicit CRLF-to-LF normalization of archive export"
+    },
+    {
+      "id": "installed-loopback-310-312-r2-313",
+      "argv_template": ["D:/SakuraTool/SakuraPool-P4-work/p4-cert-56f40c4/venv3MINOR/Scripts/python.exe", "D:/SakuraTool/SakuraPool-P4-work/p4-cert-56f40c4/installed-cli-http-cert.py"],
+      "final_runs": {"3.10.21": "installed-cli-http310", "3.12.13": "installed-cli-http312-r2", "3.13.13": "installed-cli-http313"},
+      "exit_code_per_final_run": 0,
+      "harness_file_bytes": 9594, "harness_file_sha256": "93931f7735c8bd5eebc5d00b49561a92862ad2fc2aa90da39abb34698faa02e6",
+      "cwd": "D:/SakuraTool/SakuraPool-P4-work/p4-cert-56f40c4", "env": {"PYTHONPATH": "absent", "MODELSCOPE_API_TOKEN": "absent", "PYTHONDONTWRITEBYTECODE": "1"},
+      "result": "each final installed-origin run: 1 synthetic TAR/2 records, 4 literal-loopback HTTP calls, P2/P3/package and installed subprocess CLI inspect/fetch; 12 calls over final 3 runs; synthetic ledger.record_condition_proof injection, not fresh 206/412 probe; 0 target calls"
+    },
+    {
+      "id": "installed-loopback-312-initial-historical",
+      "argv": ["D:/SakuraTool/SakuraPool-P4-work/p4-cert-56f40c4/venv312/Scripts/python.exe", "D:/SakuraTool/SakuraPool-P4-work/p4-cert-56f40c4/installed-cli-http-cert.py"],
+      "cwd": "D:/SakuraTool/SakuraPool-P4-work/p4-cert-56f40c4", "env": {"PYTHONPATH": "absent", "MODELSCOPE_API_TOKEN": "absent", "PYTHONDONTWRITEBYTECODE": "1"},
+      "started_utc": "2026-09-28T13:16:23Z", "finished_utc": "2026-09-28T13:16:35Z", "exit_code": 0,
+      "script_bytes_observed_before_overwrite": 9521,
+      "script_sha256_observed_before_overwrite": "6f948fdb801f7009323f631826d14d71da657398eac220dc1a9ca7392ac87b52",
+      "original_script_byte_snapshot_retained": false,
+      "result": "historical 4 loopback calls and stdout preserved; original script file overwritten in-place to generalize versions; cannot re-verify original bytes; final three runs plus this historical initial 312 = 16 harness calls only, not all offline tests"
+    },
+    {
+      "id": "installed-loopback-312-r2",
+      "argv": ["D:/SakuraTool/SakuraPool-P4-work/p4-cert-56f40c4/venv312/Scripts/python.exe", "D:/SakuraTool/SakuraPool-P4-work/p4-cert-56f40c4/installed-cli-http-cert.py"],
+      "cwd": "D:/SakuraTool/SakuraPool-P4-work/p4-cert-56f40c4", "env": {"PYTHONPATH": "absent", "MODELSCOPE_API_TOKEN": "absent", "PYTHONDONTWRITEBYTECODE": "1"},
+      "started_utc": "2026-09-28T13:34:17Z", "finished_utc": "2026-09-28T13:34:42Z", "exit_code": 0,
+      "harness_file_bytes_before_and_after": 9594,
+      "harness_file_sha256_before_and_after": "93931f7735c8bd5eebc5d00b49561a92862ad2fc2aa90da39abb34698faa02e6",
+      "installed_origin_json_sha256_before_and_after": "ef5a54caf959b3bfcf8a520b879a4d4ae4e953c4d56143fd736101f3ba71a3cc",
+      "fixture_http_calls": 4, "target_http_calls": 0,
+      "result": "new reproducible 312 installed-only run supplements, does not retrospectively replace, historical initial 312 output; synthetic proof injection not live positive 206 and negative 412 capability probe"
+    },
+    {
+      "id": "installed-parent-mixed-child-tests-312",
+      "argv": ["D:/SakuraTool/SakuraPool-P4-work/p4-cert-56f40c4/venv312/Scripts/python.exe", "-m", "pytest", "D:/SakuraTool/SakuraPool/tests/test_p4_transport.py::test_real_p2_p3_package_builder_and_audit_roundtrip_offline", "D:/SakuraTool/SakuraPool/tests/test_p4_transport.py::test_cli_bootstrap_revisions_then_select_candidate_offline", "D:/SakuraTool/SakuraPool/tests/test_p4_cli.py", "-q", "--tb=short", "-ra", "-p", "no:cacheprovider"],
+      "cwd": "D:/SakuraTool/SakuraPool-P4-work/p4-cert-56f40c4", "exit_code": 0,
+      "result": "22 passed in 99.23s; parent uses installed wheel from repo-outside cwd but child subprocess tests set checkout PYTHONPATH=src, so mixed-origin rather than pure installed coverage"
+    },
+    {
+      "id": "ruff-clean-archive-312",
+      "argv": ["D:/SakuraTool/SakuraPool-P4-work/p4-cert-56f40c4/venv312/Scripts/python.exe", "-m", "ruff", "check", "src", "tests", "tools/p4_token_bootstrap.py"],
+      "cwd": "D:/SakuraTool/SakuraPool-P4-work/p4-cert-56f40c4/archive", "exit_code": 0
+    },
+    {
+      "id": "base-to-implementation-diffcheck",
+      "argv": ["git", "diff", "--check", "edc72fbaaddc4dc8f9865ddfa576b737c7b15f5a..56f40c43d0a85943b633c38eab6a4175d53b434f"],
+      "cwd": "D:/SakuraTool/SakuraPool", "exit_code": 0
+    }
+  ],
+  "uncaptured_command_note": "First old 7f8 wheel normal dependency installation exited 2 after a dependency request timed out after three retries; no original install stdout/stderr file was retained. Do not represent it as installed certification. Initial old 7f8 full-source 362 pass/2 skip and initial A-D 184 pass/1 skip had tool output only, not raw log files; later 188 pass/1 skip and final 381 pass/2 skip have retained raw logs."
+}

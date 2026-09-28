@@ -1,0 +1,30 @@
+{
+  "schema": "sakurapool-p4-range-benchmark-v1",
+  "phase": "P4_PARTIAL",
+  "production_measurement": null,
+  "production_http_range_request_count": 0,
+  "production_range_entity_body_bytes_read": 0,
+  "production_sample_count": 0,
+  "production_concurrency_1": null,
+  "production_concurrency_4": null,
+  "production_concurrency_8": null,
+  "production_separate_vs_merged": null,
+  "production_p50_seconds": null,
+  "production_p95_seconds": null,
+  "production_p99_seconds": null,
+  "production_effective_payload_bytes_per_second": null,
+  "production_scan_seconds": null,
+  "reason": "Production target discovery stopped at the bounded revisions 404; no fixed target TAR, compiled target index, or permitted production fetch exists. No production performance or baseline/optimization gain was measured.",
+  "offline_synthetic_correctness_only": {
+    "python_versions": ["3.10.21", "3.12.13", "3.13.13"],
+    "final_reproducible_runs": ["310", "312-r2", "313"],
+    "fixture_http_calls_per_version": 4,
+    "fixture_requests_across_final_three_runs": 12,
+    "historical_initial_312_fixture_requests": 4,
+    "fixture_requests_across_final_three_and_historical_initial_312": 16,
+    "installed_harness_proof_was_synthetic": true,
+    "positive_206_plus_negative_412_probe_in_installed_harness": false,
+    "count_scope": "Only four isolated installed harness executions, not every source/offline test fixture.",
+    "not_a_production_latency_or_throughput_benchmark": true
+  }
+}
