@@ -1,8 +1,10 @@
 {
-  "code_commit": "92dc235048634f6e6404133645bbfa9a7172a5cc",
-  "authoritative_command_manifest": "reports/P3/final-r4/commands.json",
+  "code_commit": "c8a286892039acca283a0762df23ac56346f64f4",
+  "authoritative_command_manifest": "reports/P3/bench-repair/commands.json",
+  "worktree_benchmark": "reports/P3/bench-repair/benchmark.json",
+  "installed_benchmark": "reports/P3/bench-repair/benchmark-installed.json",
   "command_count": 31,
   "all_exit_zero": true,
-  "hash_scope": "Each final command log has argv, cwd, exit code, byte length and SHA256 in final-r4/commands.json; hashes.sha256 covers committed report artifacts. Source/wheel equality normalizes CRLF/LF only; wheel/installed equality is byte-exact.",
-  "legacy_note": "Other raw logs remain historical. The old-wheel failure log is preserved, not relabeled successful."
+  "hash_scope": "Each command log has argv, cwd, exit code, exact committed-blob byte count and SHA256 in bench-repair/commands.json. reports/P3/hashes.sha256 lists committed blobs. Git source vs wheel normalizes CRLF/LF only; wheel vs installed Python files is byte exact.",
+  "historical_note": "final-r4 and previous raw logs remain unchanged historical evidence; old-wheel failure byte-exact archive at reports/P3/final-r4/old-wheel-failure.json."
 }

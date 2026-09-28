@@ -1,0 +1,3 @@
+{"commit": "c8a286892039acca283a0762df23ac56346f64f4", "command": ["git", "diff", "--check", "6c45548e..HEAD"], "cwd": "D:\\SakuraTool\\SakuraPool", "PYTHONPATH": null}
+
+exit=0

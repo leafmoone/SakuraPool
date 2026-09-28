@@ -1,0 +1,502 @@
+{
+  "code_commit": "c8a286892039acca283a0762df23ac56346f64f4",
+  "commands": [
+    {
+      "label": "build",
+      "command": [
+        "uv",
+        "build",
+        "--wheel",
+        "--out-dir",
+        "D:\\SakuraTool\\SakuraPool\\build\\bench-repair-wheel"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/build.log",
+      "bytes": 5342,
+      "sha256": "a67cde23cfe190e53ef49ea368e09535ca108cc99f4b8810ee2812ae7af97d33"
+    },
+    {
+      "label": "venv",
+      "command": [
+        "uv",
+        "venv",
+        "D:\\SakuraTool\\SakuraPool\\.venv312benchrepair",
+        "--python",
+        "3.12"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/venv.log",
+      "bytes": 344,
+      "sha256": "18bd65a45a7b6edcdae07dd33a6e05a18c9236d963717d4d2d118642d22d57f7"
+    },
+    {
+      "label": "install",
+      "command": [
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        "D:\\SakuraTool\\SakuraPool\\.venv312benchrepair\\Scripts\\python.exe",
+        "D:\\SakuraTool\\SakuraPool\\build\\bench-repair-wheel\\sakurapool-0.1.0-py3-none-any.whl",
+        "pytest==8.3.4",
+        "pip"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/install.log",
+      "bytes": 1109,
+      "sha256": "bcf2a59bd9c9497493d44a3e7cf3d563d906b66120eceffea81394897732175f"
+    },
+    {
+      "label": "pip-check",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv312benchrepair\\Scripts\\python.exe",
+        "-m",
+        "pip",
+        "check"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/pip-check.log",
+      "bytes": 256,
+      "sha256": "b7b702a4419162c34872b3882e5b2652654a69bead4370177ed63cc03b9110c3"
+    },
+    {
+      "label": "installed-source-hashes",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv312benchrepair\\Scripts\\python.exe",
+        "-c",
+        "import pathlib,subprocess,zipfile,hashlib,sakurapool,json\nroot=pathlib.Path(sakurapool.__file__).parent\nassert 'site-packages' in str(root),root\nz=zipfile.ZipFile('D:\\\\SakuraTool\\\\SakuraPool\\\\build\\\\bench-repair-wheel\\\\sakurapool-0.1.0-py3-none-any.whl')\nrows=[]\nfor name in z.namelist():\n if not name.endswith('.py'): continue\n blob=subprocess.check_output(['git','show','c8a286892039acca283a0762df23ac56346f64f4'+':src/'+name])\n data=z.read(name)\n assert blob.replace(b'\\r\\n',b'\\n')==data.replace(b'\\r\\n',b'\\n'),name\n assert data==(root.parent/name).read_bytes(),name\n rows.append({'path':name,'installed_sha256':hashlib.sha256(data).hexdigest(),'git_blob_sha256':hashlib.sha256(blob).hexdigest()})\nprint(json.dumps({'module':str(root),'wheel_sha256':hashlib.sha256(pathlib.Path(z.filename).read_bytes()).hexdigest(),'files':rows},indent=2))\n"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/installed-source-hashes.log",
+      "bytes": 5390,
+      "sha256": "0b00fae9b92b6ea3916bb4d47919b6c53992152cec4e0797830b6952d4fc2e0a"
+    },
+    {
+      "label": "wheel-tests",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv312benchrepair\\Scripts\\python.exe",
+        "-m",
+        "pytest",
+        "tests",
+        "-q",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/wheel-tests.log",
+      "bytes": 533,
+      "sha256": "996206f14bbe78db74baaeb2629ee02bde309220ed0562f895ae2c787e087b41"
+    },
+    {
+      "label": "host-tests",
+      "command": [
+        "C:\\Users\\PC\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+        "-m",
+        "pytest",
+        "tests",
+        "-q",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/host-tests.log",
+      "bytes": 563,
+      "sha256": "8944b385198d8cbd56a19bf2dddc519867fc6452d1f58d985fdb7146a8c23290"
+    },
+    {
+      "label": "ruff",
+      "command": [
+        "C:\\Users\\PC\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+        "-m",
+        "ruff",
+        "check",
+        "."
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/ruff.log",
+      "bytes": 252,
+      "sha256": "9c5fc6a4245d77244d8caee1dbb64008bc8b3519fe8f92070b756d97f16a86a2"
+    },
+    {
+      "label": "diff-check",
+      "command": [
+        "git",
+        "diff",
+        "--check",
+        "6c45548e..HEAD"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/diff-check.log",
+      "bytes": 177,
+      "sha256": "dcaa4808f94c52fb5ef34d45da1f73547d9db81db25c7544c76977875a5140a0"
+    },
+    {
+      "label": "history",
+      "command": [
+        "git",
+        "log",
+        "--reverse",
+        "--format=%H %s",
+        "6c45548e..HEAD"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/history.log",
+      "bytes": 2570,
+      "sha256": "b4f3bdb1fa0a8031bb890c8d5c811a1def5f8d1dba4661e938699c4d961d1583"
+    },
+    {
+      "label": "diff-stat",
+      "command": [
+        "git",
+        "diff",
+        "--stat",
+        "6c45548e..HEAD"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/diff-stat.log",
+      "bytes": 4487,
+      "sha256": "a7d84498bcc535115fcdacec1f15efed81ff99fdda5110edca0410d9a38a2fca"
+    },
+    {
+      "label": "bench-worktree",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv312benchrepair\\Scripts\\python.exe",
+        "D:\\SakuraTool\\SakuraPool\\tools\\bench_runtime.py",
+        "--workdir",
+        "D:\\SakuraTool\\SakuraPool\\.bench-cache-bench-repair"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/bench-worktree.log",
+      "bytes": 53320,
+      "sha256": "f3b9adb1fd29215e11d4c2e53e39e014ded0ae5fb3067787948d5fe6b7fcf17b"
+    },
+    {
+      "label": "bench-installed",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv312benchrepair\\Scripts\\python.exe",
+        "D:\\SakuraTool\\SakuraPool\\tools\\bench_runtime.py",
+        "--workdir",
+        "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-bench-repair-7hgtlztj\\bench",
+        "--scale",
+        "100k"
+      ],
+      "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-bench-repair-7hgtlztj",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/bench-installed.log",
+      "bytes": 18311,
+      "sha256": "afe7536677d83bb090ba04aa555f12a2108e3d0a46456fa390e8684238a7defa"
+    },
+    {
+      "label": "cli-fixture",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv312benchrepair\\Scripts\\python.exe",
+        "-c",
+        "import sys\nfrom pathlib import Path\nsys.path.insert(0,'D:\\\\SakuraTool\\\\SakuraPool\\\\tests')\nfrom synthetic_p2 import ObjectSpec,SampleSpec,build_p2_directory\nbuild_p2_directory(Path('p2'),dataset='ds',source='src',objects=[ObjectSpec('a.tar',[SampleSpec('1.jpg','1',[('t',None)])])])\n"
+      ],
+      "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-bench-repair-7hgtlztj",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/cli-fixture.log",
+      "bytes": 544,
+      "sha256": "f1bc90a95dcec56e3360c47ac00b916cf4bb75b5488b2953423c7ec6012b56af"
+    },
+    {
+      "label": "cli-compile",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv312benchrepair\\Scripts\\python.exe",
+        "-m",
+        "sakurapool",
+        "runtime",
+        "compile",
+        "p2",
+        "rt"
+      ],
+      "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-bench-repair-7hgtlztj",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/cli-compile.log",
+      "bytes": 580,
+      "sha256": "9d96a674be496ef057456f8857cc3d6baae8ce158bf56a2f3c4e04cf470e4dc0"
+    },
+    {
+      "label": "cli-verify",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv312benchrepair\\Scripts\\python.exe",
+        "-m",
+        "sakurapool",
+        "runtime",
+        "verify",
+        "rt",
+        "--full"
+      ],
+      "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-bench-repair-7hgtlztj",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/cli-verify.log",
+      "bytes": 412,
+      "sha256": "1041c89b6787c00edf2910a65fbbe7720b7edffad91b68ab116ad28fe35fa520"
+    },
+    {
+      "label": "cli-query",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv312benchrepair\\Scripts\\python.exe",
+        "-m",
+        "sakurapool",
+        "runtime",
+        "query",
+        "rt",
+        "--namespace",
+        "tags",
+        "--all-tag",
+        "t",
+        "--full"
+      ],
+      "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-bench-repair-7hgtlztj",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/cli-query.log",
+      "bytes": 465,
+      "sha256": "6976e88e00d7de9d65f2c2352d87569f77f890015cb4868907a131abec4e3d1b"
+    },
+    {
+      "label": "cli-inspect",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv312benchrepair\\Scripts\\python.exe",
+        "-m",
+        "sakurapool",
+        "runtime",
+        "inspect",
+        "rt"
+      ],
+      "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-bench-repair-7hgtlztj",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/cli-inspect.log",
+      "bytes": 492,
+      "sha256": "7846065adeb16c5883ee765a9e5840febb3ee256b834893b49b3daf2c20e6388"
+    },
+    {
+      "label": "cli-lookup",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv312benchrepair\\Scripts\\python.exe",
+        "-m",
+        "sakurapool",
+        "runtime",
+        "lookup",
+        "rt",
+        "--source",
+        "src",
+        "--post-id",
+        "1"
+      ],
+      "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-bench-repair-7hgtlztj",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/cli-lookup.log",
+      "bytes": 560,
+      "sha256": "781b0de45deaf955fc2a354159439e1191304aacbb1bcf9004894b7866fd5a88"
+    },
+    {
+      "label": "install-3.10",
+      "command": [
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        "D:\\SakuraTool\\SakuraPool\\.venv310s\\Scripts\\python.exe",
+        "--reinstall",
+        "D:\\SakuraTool\\SakuraPool\\build\\bench-repair-wheel\\sakurapool-0.1.0-py3-none-any.whl"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/install-3.10.log",
+      "bytes": 1119,
+      "sha256": "97d09988b6b4b99adbd96710dd7461dbe2cc2ee65d256d2927120bc29d094016"
+    },
+    {
+      "label": "pip-check-3.10",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv310s\\Scripts\\python.exe",
+        "-m",
+        "pip",
+        "check"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/pip-check-3.10.log",
+      "bytes": 246,
+      "sha256": "afe9dafb54de06748777e67a6aa3b3430d0dd22df1543d2bb237c39d81a4fc5c"
+    },
+    {
+      "label": "module-3.10",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv310s\\Scripts\\python.exe",
+        "-c",
+        "import sakurapool; assert 'site-packages' in sakurapool.__file__; print(sakurapool.__file__)"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/module-3.10.log",
+      "bytes": 372,
+      "sha256": "050ab2b36aeff2e0482ac8774b7f14a9e8f5ea05379d5f5e190f056a34ea0204"
+    },
+    {
+      "label": "verify-3.10",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv310s\\Scripts\\python.exe",
+        "-m",
+        "sakurapool",
+        "runtime",
+        "verify",
+        "rt",
+        "--full"
+      ],
+      "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-bench-repair-7hgtlztj",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/verify-3.10.log",
+      "bytes": 402,
+      "sha256": "bc33353207c0570041de439d1cc55ce650797f33bc51dfd47811e8b6c9d42546"
+    },
+    {
+      "label": "compile-3.10",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv310s\\Scripts\\python.exe",
+        "-m",
+        "sakurapool",
+        "runtime",
+        "compile",
+        "p2",
+        "rt-3.10"
+      ],
+      "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-bench-repair-7hgtlztj",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/compile-3.10.log",
+      "bytes": 580,
+      "sha256": "f47302663216da818cf78f6574f0046a898ceef967dddc59ea17cbcdcf2f3ee7"
+    },
+    {
+      "label": "query-3.10",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv310s\\Scripts\\python.exe",
+        "-m",
+        "sakurapool",
+        "runtime",
+        "query",
+        "rt-3.10",
+        "--namespace",
+        "tags",
+        "--all-tag",
+        "t"
+      ],
+      "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-bench-repair-7hgtlztj",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/query-3.10.log",
+      "bytes": 450,
+      "sha256": "7d1d79fd0620b39acf259d6aa01c8cc1f7dde2f665911a748550a48b50af3e32"
+    },
+    {
+      "label": "install-3.13",
+      "command": [
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        "D:\\SakuraTool\\SakuraPool\\.venv313s\\Scripts\\python.exe",
+        "--reinstall",
+        "D:\\SakuraTool\\SakuraPool\\build\\bench-repair-wheel\\sakurapool-0.1.0-py3-none-any.whl"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/install-3.13.log",
+      "bytes": 1119,
+      "sha256": "7e783a998752bcacf0965b33a5d23f087dfc657f99bf2f0adb52743a68c3f7d9"
+    },
+    {
+      "label": "pip-check-3.13",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv313s\\Scripts\\python.exe",
+        "-m",
+        "pip",
+        "check"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/pip-check-3.13.log",
+      "bytes": 246,
+      "sha256": "4b9521f1317c4b876bfb9a58043ed389a7e7d88c3b3602dbc11eb397fb5566b6"
+    },
+    {
+      "label": "module-3.13",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv313s\\Scripts\\python.exe",
+        "-c",
+        "import sakurapool; assert 'site-packages' in sakurapool.__file__; print(sakurapool.__file__)"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/module-3.13.log",
+      "bytes": 372,
+      "sha256": "78b8c9a0b395b0d08ca5afe0c303cb5526a192638c40cfe88cce2491cf57c54b"
+    },
+    {
+      "label": "verify-3.13",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv313s\\Scripts\\python.exe",
+        "-m",
+        "sakurapool",
+        "runtime",
+        "verify",
+        "rt",
+        "--full"
+      ],
+      "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-bench-repair-7hgtlztj",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/verify-3.13.log",
+      "bytes": 402,
+      "sha256": "03271605681adf3a8c0e17fb2374a9895c400ebbd8f29a84e65108e479839584"
+    },
+    {
+      "label": "compile-3.13",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv313s\\Scripts\\python.exe",
+        "-m",
+        "sakurapool",
+        "runtime",
+        "compile",
+        "p2",
+        "rt-3.13"
+      ],
+      "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-bench-repair-7hgtlztj",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/compile-3.13.log",
+      "bytes": 580,
+      "sha256": "438b59dc8d212d7b5111b50861fda4bed46b3a876e38c5a8f182aed572de43f8"
+    },
+    {
+      "label": "query-3.13",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv313s\\Scripts\\python.exe",
+        "-m",
+        "sakurapool",
+        "runtime",
+        "query",
+        "rt-3.13",
+        "--namespace",
+        "tags",
+        "--all-tag",
+        "t"
+      ],
+      "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-bench-repair-7hgtlztj",
+      "exit": 0,
+      "log": "reports/P3/bench-repair/query-3.13.log",
+      "bytes": 450,
+      "sha256": "82c48cdbd26852c27d26f4f3e2e546775cda0682076842c7d4ebc74d618202d6"
+    }
+  ]
+}

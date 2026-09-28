@@ -1,0 +1,15 @@
+{"commit": "c8a286892039acca283a0762df23ac56346f64f4", "command": ["uv", "pip", "install", "--python", "D:\\SakuraTool\\SakuraPool\\.venv313s\\Scripts\\python.exe", "--reinstall", "D:\\SakuraTool\\SakuraPool\\build\\bench-repair-wheel\\sakurapool-0.1.0-py3-none-any.whl"], "cwd": "D:\\SakuraTool\\SakuraPool", "PYTHONPATH": null}
+Using Python 3.13.13 environment at: .venv313s
+Resolved 4 packages in 1.10s
+Prepared 4 packages in 1ms
+Uninstalled 4 packages in 105ms
+warning: Failed to hardlink files; falling back to full copy. This may lead to degraded performance.
+         If the cache and target directories are on different filesystems, hardlinking may not be supported.
+         If this is intentional, set `export UV_LINK_MODE=copy` or use `--link-mode=copy` to suppress this warning.
+Installed 4 packages in 907ms
+ ~ numpy==2.2.6
+ ~ pyarrow==18.1.0
+ ~ pyroaring==1.1.0
+ - sakurapool==0.1.0 (from file:///D:/SakuraTool/SakuraPool/build/final-r4-wheel/sakurapool-0.1.0-py3-none-any.whl)
+ + sakurapool==0.1.0 (from file:///D:/SakuraTool/SakuraPool/build/bench-repair-wheel/sakurapool-0.1.0-py3-none-any.whl)
+exit=0

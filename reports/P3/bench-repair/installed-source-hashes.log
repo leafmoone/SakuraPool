@@ -1,0 +1,93 @@
+{"commit": "c8a286892039acca283a0762df23ac56346f64f4", "command": ["D:\\SakuraTool\\SakuraPool\\.venv312benchrepair\\Scripts\\python.exe", "-c", "import pathlib,subprocess,zipfile,hashlib,sakurapool,json\nroot=pathlib.Path(sakurapool.__file__).parent\nassert 'site-packages' in str(root),root\nz=zipfile.ZipFile('D:\\\\SakuraTool\\\\SakuraPool\\\\build\\\\bench-repair-wheel\\\\sakurapool-0.1.0-py3-none-any.whl')\nrows=[]\nfor name in z.namelist():\n if not name.endswith('.py'): continue\n blob=subprocess.check_output(['git','show','c8a286892039acca283a0762df23ac56346f64f4'+':src/'+name])\n data=z.read(name)\n assert blob.replace(b'\\r\\n',b'\\n')==data.replace(b'\\r\\n',b'\\n'),name\n assert data==(root.parent/name).read_bytes(),name\n rows.append({'path':name,'installed_sha256':hashlib.sha256(data).hexdigest(),'git_blob_sha256':hashlib.sha256(blob).hexdigest()})\nprint(json.dumps({'module':str(root),'wheel_sha256':hashlib.sha256(pathlib.Path(z.filename).read_bytes()).hexdigest(),'files':rows},indent=2))\n"], "cwd": "D:\\SakuraTool\\SakuraPool", "PYTHONPATH": null}
+{
+  "module": "D:\\SakuraTool\\SakuraPool\\.venv312benchrepair\\Lib\\site-packages\\sakurapool",
+  "wheel_sha256": "aa812df01cec291a4d239c41c1a7ec15092e4abd602bdc3e05a9a234fba29306",
+  "files": [
+    {
+      "path": "sakurapool/__init__.py",
+      "installed_sha256": "f655ad8c91aa19989bb94fab65cf8aa35885b09eb15ac915dc98e012a93b4452",
+      "git_blob_sha256": "fc16db2911262b5312f8ba46576866b20501fbc1392007869a72fbcbb37c3cb1"
+    },
+    {
+      "path": "sakurapool/__main__.py",
+      "installed_sha256": "482b8693e2fe6dbd732e3d7961e03827d3efa187bad11d29da188be580ebbeea",
+      "git_blob_sha256": "935a1c1166b0c1ea35a82256345000bf2c73ded718d77773bc27a71ecce28f7d"
+    },
+    {
+      "path": "sakurapool/cli.py",
+      "installed_sha256": "a1fc9f3983964f7fcb3b4af1df91781cee712a02a1dd58457acc465f6581a3b1",
+      "git_blob_sha256": "35bee3df731bcb05377fa2c9f548db44c4ab7f544936db94e2521fae90f40cd6"
+    },
+    {
+      "path": "sakurapool/evaluator.py",
+      "installed_sha256": "4a8d74953fd448b26a3cad61427a03b2683cfd02647fae7acbd7a966151dfb38",
+      "git_blob_sha256": "89c35a6c6d952123b177756c4fc5be3fc70bf72852803252e418c3dba976f35a"
+    },
+    {
+      "path": "sakurapool/indexer.py",
+      "installed_sha256": "b75e843d0040d5b98ffd7625cdecdcc9063c8e58234bf06c67b4bac324d77f4c",
+      "git_blob_sha256": "2542e5e507e86692944cb42d9e7291fbf39f3d27f9759079055cfd3f6d66e311"
+    },
+    {
+      "path": "sakurapool/models.py",
+      "installed_sha256": "1e3a270c305c0b628f66c61401595bbce887a6c55fe16c502afeba54f6f62392",
+      "git_blob_sha256": "4e8059b99bd826a978440a6246830fad31b25d6a938c6d7cc77b4d2fd86a132f"
+    },
+    {
+      "path": "sakurapool/query.py",
+      "installed_sha256": "0efcbb0c0ed8e5695a105f9735c58d7186167d460ca1de86a851e46c70429a1b",
+      "git_blob_sha256": "bac895a3d411fbda0006891047b83776544723cf993c68413c24d33117725cbe"
+    },
+    {
+      "path": "sakurapool/records.py",
+      "installed_sha256": "a4ec0c8dc9ca191b75738d90a1df2736415f0c2f859c724ca5ba2c5793f7fe96",
+      "git_blob_sha256": "7fe76a2675b1439854c313ef69f0b161673fece3fc091c892bd9316477fffd09"
+    },
+    {
+      "path": "sakurapool/registry.py",
+      "installed_sha256": "b25272320d6fee40107101541c26ecbfddc450e6e56795d175c2bc2175d9f39f",
+      "git_blob_sha256": "7f139e8ec52956e4aeaf0a5a6830e01ee510653a0c151c751e93511a8a0da9c6"
+    },
+    {
+      "path": "sakurapool/schema.py",
+      "installed_sha256": "33c29ee7d66580b2179349049b05474abffea3528918240b37f8dcf8c1008aae",
+      "git_blob_sha256": "81bac2c92814045408f3e798da855eaa0d2f6bf2af122fc850099bf3e2808f9a"
+    },
+    {
+      "path": "sakurapool/runtime/__init__.py",
+      "installed_sha256": "71d273a22d589f62a39e57b76532274bb2ed7fa4ae59fb7d5d93f47b7b8ed330",
+      "git_blob_sha256": "e8b03adb99d606c697ce422e5f8dd7fc2446f599d5c40927a99d54fd1c046a69"
+    },
+    {
+      "path": "sakurapool/runtime/compiler.py",
+      "installed_sha256": "32a3ae296e31f96132532472d163aedc166d90e70848c4ee3677811ddc07428a",
+      "git_blob_sha256": "14c0be9f48c04e78736ade93bea90333c9b8daffa98389efa6b6dd13dd466f23"
+    },
+    {
+      "path": "sakurapool/runtime/errors.py",
+      "installed_sha256": "4bfd8192af12637fd5b3b31b03574402cd9a4a33d05344ff404913e54443e003",
+      "git_blob_sha256": "a31426823d68fb08f43970a6146aa2fd3236d2dc1bec8d2c2177915804883547"
+    },
+    {
+      "path": "sakurapool/runtime/identity.py",
+      "installed_sha256": "b8f0ed6f367ae6a3011d6d7d85c5ae0d49c091c941f60babb2a5875508dc09ff",
+      "git_blob_sha256": "6224cee76aed94682ba58ae581b3bb1b7f3c3237874101ac11395c062db96675"
+    },
+    {
+      "path": "sakurapool/runtime/inventory.py",
+      "installed_sha256": "0fc13d33aa4e95d44e8a4c7a54561533d8a389bad7cd210d667500b3c6e222d0",
+      "git_blob_sha256": "97848b79f6f15eba6faa87cbc48a6f4efc8f04cfe1b6a6d9f7ff930cf673ef03"
+    },
+    {
+      "path": "sakurapool/runtime/query.py",
+      "installed_sha256": "aac6bc21024d19e53056701f01783cdb493bc9137454ca2adfc4b465e437cd6b",
+      "git_blob_sha256": "c55573ec4166d6e8d406fc317787050f78a8d0612b031cf96236288f31e06601"
+    },
+    {
+      "path": "sakurapool/runtime/snapshot.py",
+      "installed_sha256": "a2572230b5626d1e7769456fc7b4efad98ecdb69918f3ff60c33496fe7ca4024",
+      "git_blob_sha256": "4cd075f893c6536c5373d12554fbae0efb6b61be76ab7ef1b721bdddad0debdb"
+    }
+  ]
+}
+exit=0

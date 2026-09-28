@@ -1,0 +1,3 @@
+{"commit": "c8a286892039acca283a0762df23ac56346f64f4", "command": ["D:\\SakuraTool\\SakuraPool\\.venv310s\\Scripts\\python.exe", "-m", "sakurapool", "runtime", "query", "rt-3.10", "--namespace", "tags", "--all-tag", "t"], "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-bench-repair-7hgtlztj", "PYTHONPATH": null}
+{"count": 1, "rids": [0], "snapshot_id": "cdb4401ae64ab4409b096d1fda3bc811b289c856714d6d3781e408c356402af0", "truncated": false}
+exit=0
