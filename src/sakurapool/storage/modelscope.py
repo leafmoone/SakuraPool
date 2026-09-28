@@ -16,7 +16,14 @@ from dataclasses import dataclass
 from urllib.parse import urlencode, urlsplit
 
 from ..records import canonical_object_id
-from .transport import GuardedTransport, RemoteIOError
+from .location_gate import (
+    _REVISION as _REV_SHAPE,
+)
+from .location_gate import (
+    TwoHopKeyError,
+    _is_canonical_path,
+)
+from .transport import GuardedTransport, RemoteIOError, TwoHopResult
 
 REPO_ID = "leafmoone/game_cg_5M"
 PAGE_SIZE = 200
@@ -31,6 +38,30 @@ class ListedFile:
     size: int
     provider_sha256: str | None
     lfs: bool
+    revision_candidate: str = ""
+
+
+@dataclass(frozen=True)
+class TwoHopProbe:
+    """Sanitized two-hop result bound to the tree object identity it probed.
+
+    The probe identity (repository, revision candidate, path, size) comes from
+    the tree listing entry, NOT from the caller: a later proof record may only
+    use this bound size/path/revision, never an arbitrary caller value.
+    Never carries a URL, signature, or credential.
+    """
+
+    repository: str
+    revision_candidate: str
+    path: str
+    size: int
+    result: TwoHopResult
+
+    def as_dict(self) -> dict:
+        return {"repository": self.repository,
+                "revision_candidate": self.revision_candidate,
+                "path": self.path, "size": self.size,
+                **self.result.as_dict()}
 
 
 class ModelScopeDataset:
@@ -106,6 +137,15 @@ class ModelScopeDataset:
                                 "PageNumber": page, "PageSize": PAGE_SIZE})
             data = self._data(self.base + "/repo/tree?" + params,
                               phase="provider_listing_shape")
+            # Design r5 section 5.5: the legacy tree payload reports the entry total
+            # under the field name TotalCount; the provider contract name is Total.
+            # Same wire value, single mapping rule; never mix the two names.
+            if isinstance(data, dict) and "Total" not in data and "TotalCount" in data:
+                data = {**data, "Total": data["TotalCount"]}
+            if (isinstance(data, dict) and "Total" in data
+                    and "TotalCount" in data
+                    and data["Total"] != data["TotalCount"]):
+                raise RemoteIOError("provider listing total fields disagree")
             entries = (data.get("Files", data.get("files"))
                        if isinstance(data, dict) else data)
             has_total = isinstance(data, dict) and "Total" in data
@@ -146,7 +186,8 @@ class ModelScopeDataset:
                 if digest is not None and (not isinstance(digest, str)
                                            or not re.fullmatch(r"[0-9a-f]{64}", digest)):
                     raise RemoteIOError("provider file SHA256 is malformed")
-                record = ListedFile(path, size, digest, bool(item.get("Lfs", False)))
+                record = ListedFile(path, size, digest, bool(item.get("Lfs", False)),
+                                    revision_candidate=revision)
                 found[path] = record
             if declared_total is not None:
                 if seen_entries > declared_total:
@@ -176,3 +217,56 @@ class ModelScopeDataset:
             raise ValueError("unsafe provider file path")
         params = urlencode({"Revision": revision, "FilePath": path})
         return f"{self.base}/repo?{params}"
+
+    def range_probe(self, entry: "ListedFile", *, start: int, length: int,
+                    batch: str = "") -> "TwoHopProbe":
+        """Guarded two-hop capability read of ONE tree-listed object range.
+
+        The object identity (revision candidate, path) and expected size all
+        come from the tree listing entry — the caller cannot supply an
+        arbitrary size/path/revision. hop1 is the fixed owner/name /repo URL
+        (Bearer + same-origin session cookie); a 302 Location is validated in
+        memory only and, when it passes the strict gate, hop2 is a fresh
+        credential-free request to the exact host observed in THAT hop-1
+        (one-shot, in memory, never cached across requests/objects). Returns
+        a sanitized TwoHopProbe bound to the tree identity; the raw
+        Location/signature never leaves the process.
+        """
+        if not isinstance(entry, ListedFile):
+            raise ValueError("range_probe requires a tree-listed entry")
+        if not _is_canonical_path(entry.path):
+            raise ValueError("tree entry path not canonical")
+        if not _REV_SHAPE.fullmatch(entry.revision_candidate):
+            raise ValueError("tree entry revision candidate is not commit-shaped")
+        if type(entry.size) is not int or not 0 < entry.size < 2**64:
+            raise ValueError("tree entry size must be a positive bounded integer")
+        url = self.download_url(entry.revision_candidate, entry.path)
+        result = self.transport.two_hop_range(
+            url, start=start, length=length, expected_size=entry.size,
+            batch=batch)
+        return TwoHopProbe(repository=REPO_ID,
+                           revision_candidate=entry.revision_candidate,
+                           path=entry.path, size=entry.size, result=result)
+
+    def record_probe_proof(self, probe: "TwoHopProbe", payload_sha: str,
+                           observed_batch: str = "") -> str:
+        """Store a v2 proof for an actual probe, using ONLY the bound identity.
+
+        size/path/revision come from the probe's tree binding; the caller
+        cannot substitute arbitrary values. No network is made.
+        """
+        if not isinstance(probe, TwoHopProbe):
+            raise ValueError("record_probe_proof requires a TwoHopProbe")
+        if probe.repository != REPO_ID:
+            raise TwoHopKeyError("unauthorized repository for two-hop proof")
+        return self.transport.record_two_hop_proof(
+            origin_endpoint=self.endpoint,
+            repository=probe.repository,
+            repository_type="modelscope_dataset_legacy",
+            revision=probe.revision_candidate,
+            path=probe.path,
+            size=probe.size,
+            etag=probe.result.etag,
+            cdn_host=probe.result.approved_host,
+            payload_sha=payload_sha,
+            observed_batch=observed_batch or probe.result.batch)

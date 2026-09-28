@@ -15,6 +15,7 @@ import random
 import re
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass as _dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Iterator
@@ -25,6 +26,17 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from .budget import MIB, BudgetLedger, Reservation
+from .location_gate import (
+    LocationRejected,
+    TwoHopKeyError,
+    check_location,
+    check_token_not_in_etag,
+    normalize_endpoint,
+    normalize_host,
+    two_hop_proof_key,
+    two_hop_record_key,
+    validate_two_hop_record,
+)
 
 MAX_MEMBER = 64 * MIB
 READ_CHUNK = MIB
@@ -37,7 +49,8 @@ _SAFE_CODES = frozenset({"remote_io", "network_ambiguous", "http_status",
                          "provider_shape", "retry_policy"})
 _SAFE_PHASES = frozenset({"transport", "metadata_send", "metadata_headers",
                           "metadata_body", "provider_revision_shape",
-                          "provider_listing_shape", "response_headers"})
+                          "provider_listing_shape", "response_headers",
+                          "two_hop_redirect"})
 
 
 class RemoteIOError(RuntimeError):
@@ -111,6 +124,29 @@ class BoundObject:
         raise TypeError("ephemeral signed object URLs cannot be serialized")
 
 
+@_dataclass(frozen=True)
+class TwoHopResult:
+    """Sanitized two-hop capability result; never carries URL or signature."""
+
+    hop1_status: int
+    hop2_status: int
+    approved_host: str
+    etag: str
+    bytes_read: int
+    payload: bytes
+    attempts: int
+    batch: str
+
+    def as_dict(self) -> dict:
+        return {
+            "hop1_status": self.hop1_status, "hop2_status": self.hop2_status,
+            "approved_host": self.approved_host, "etag": self.etag,
+            "bytes_read": self.bytes_read, "attempts": self.attempts,
+            "batch": self.batch,
+            "payload_sha256": hashlib.sha256(self.payload).hexdigest(),
+        }
+
+
 class RawObjectStream:
     """Nonseekable, bounded, uncompressed raw body for tarfile mode r|.
 
@@ -158,6 +194,13 @@ class RawObjectStream:
         return self._hash.hexdigest()
 
 
+def validate_same_origin_cookie(value: str | None) -> None:
+    """In-memory-only same-origin cookie value; never persisted or logged."""
+    if (not isinstance(value, str) or not value or len(value) > 512
+            or any(ord(c) < 0x20 or ord(c) == 0x7F for c in value)):
+        raise ValueError("same-origin cookie value is unsafe")
+
+
 def condition_binding_key(*, endpoint: str, repository: str, revision: str,
                           path: str, size: int, strong_etag: str) -> str:
     """Hash the public frozen identity, never a signed redirect URL or token."""
@@ -174,12 +217,14 @@ class GuardedTransport:
     def __init__(self, ledger: BudgetLedger, *, trusted_hosts: frozenset[str],
                  allow_loopback_http: bool = False, token: str | None = None,
                  credential_origin: str | None = None,
+                 same_origin_cookie: str | None = None,
                  max_retry_wait_s: float = 5.0):
         if not trusted_hosts or any(not h or h != h.lower() or ":" in h or "/" in h
                                     for h in trusted_hosts):
             raise ValueError("trusted hosts must be explicit canonical hostnames")
         if ledger.offline_mode:
-            if token is not None or credential_origin is not None:
+            if (token is not None or credential_origin is not None
+                        or same_origin_cookie is not None):
                 raise ValueError("offline HTTP cannot receive credentials")
             if not trusted_hosts.issubset({"127.0.0.1"}):
                 raise ValueError("offline transport requires literal IPv4 loopback only")
@@ -196,6 +241,15 @@ class GuardedTransport:
                 raise ValueError("credential origin must contain scheme and authority only")
             self._host(credential_origin)
         self.credential_origin = (credential_origin or "").rstrip("/")
+        # Design §1: one object identity (everything except the CDN host)
+        # binds to at most one exact CDN host, in-memory only, never
+        # persisted and never a static allowlist.
+        self._twohop_cdn_by_identity: dict[tuple, str] = {}
+        if same_origin_cookie is not None:
+            # In-memory only; sent exclusively against the exact credential
+            # origin (see _attach_origin_cookie). Never persisted or logged.
+            validate_same_origin_cookie(same_origin_cookie)
+        self.same_origin_cookie = same_origin_cookie
         if not math.isfinite(max_retry_wait_s) or max_retry_wait_s < 0:
             raise ValueError("retry wait must be a finite nonnegative number")
         self.max_retry_wait_s = max_retry_wait_s
@@ -217,6 +271,7 @@ class GuardedTransport:
         return GuardedTransport(self.ledger, trusted_hosts=self.trusted_hosts,
                                 allow_loopback_http=self.allow_loopback_http,
                                 token=self.token, credential_origin=self.credential_origin or None,
+                                same_origin_cookie=self.same_origin_cookie,
                                 max_retry_wait_s=self.max_retry_wait_s)
 
     def close(self) -> None:
@@ -285,6 +340,7 @@ class GuardedTransport:
         if self.token and urlsplit(url).scheme + "://" + urlsplit(url).netloc == \
                 self.credential_origin:
             request_headers["Authorization"] = f"Bearer {self.token}"
+            self._attach_origin_cookie(url, request_headers)
         try:
             response = self.session.get(url, headers=request_headers,
                                         stream=True, allow_redirects=False,
@@ -297,6 +353,220 @@ class GuardedTransport:
             raise _AmbiguousRead("network attempt failed; body reservation retained",
                                  phase="metadata_send" if metadata else "transport")
         return response, lease
+
+    def _attach_origin_cookie(self, url: str, headers: dict[str, str]) -> None:
+        """Exact-origin same-domain session cookie; never sent to any CDN."""
+        if not self.same_origin_cookie or "Cookie" in headers:
+            return
+        if urlsplit(url).scheme + "://" + urlsplit(url).netloc == self.credential_origin:
+            headers["Cookie"] = self.same_origin_cookie
+
+    def two_hop_range(self, url: str, *, start: int, length: int,
+                      expected_size: int, batch: str = "", max_bytes: int = 256):
+        """One-shot origin 302 -> per-object exact CDN hop2, no credentials.
+
+        Design r5: hop1 expects 302; the Location is validated in memory only
+        (strict component normalisation, bounded layered decode, per-layer
+        credential check, exact one-shot host approval) and is never persisted.
+        Hop2 is a fresh credential-free session. 206 + exact Content-Range and
+        Content-Length + identity + non-multipart + strong non-echo ETag are
+        required before any body byte; at most `length` bytes plus one overlong
+        probe byte are read.
+
+        Ledger: each hop is one attempt; body charges only bytes actually read;
+        header-level rejects settle at 0; unknown failures retain the full
+        pending reservation (no refund, mirroring _AmbiguousRead semantics).
+        """
+        if (type(start) is not int or start < 0 or type(length) is not int
+                or length < 1 or length > max_bytes or type(expected_size) is not int
+                or expected_size < start + length):
+            raise ValueError("two-hop range parameters out of bounds")
+        self._host(url)
+        # Deliberate single-shot attempt: the legacy _response auto-follows
+        # 3xx (retried), which the one-hop protocol must not reuse.
+        hop1, lease1 = self._once(
+            url, max_body=0, metadata=False, inflight=0,
+            headers={"Range": f"bytes={start}-{start + length - 1}"})
+        try:
+            if hop1.status_code != 302:
+                hop1.close()
+                self.ledger.settle(lease1)  # non-302 body not read: 0 known
+                raise RemoteIOError("two-hop expects 302 at origin",
+                                    code="redirect_policy",
+                                    phase="two_hop_redirect",
+                                    http_status=hop1.status_code)
+            raw_headers = getattr(getattr(hop1, "raw", None), "headers", None)
+            locations = (raw_headers.getlist("Location")
+                         if raw_headers is not None and hasattr(raw_headers, "getlist")
+                         else [hop1.headers["Location"]] if "Location" in hop1.headers
+                         else [])
+            if len(locations) != 1 or not locations[0]:
+                raise RemoteIOError("two-hop location missing or duplicated",
+                                    code="redirect_policy", phase="two_hop_redirect",
+                                    http_status=302)
+            raw_location = locations[0]
+        except RemoteIOError:
+            hop1.close()
+            self.ledger.settle(lease1)
+            raise
+        except Exception:
+            hop1.close()
+            raise _AmbiguousRead("two-hop hop1 handling failed; reservation retained",
+                                 phase="two_hop_redirect") from None
+        self.ledger.settle(lease1)  # 302 body 0, known
+        try:
+            # The one-shot approval is generated FROM this hop-1 observation:
+            # the gate validates structure/credential safety on the raw
+            # Location and every bounded decode layer, and returns the exact
+            # host observed HERE. It is a local variable, used only for this
+            # hop2 below; it is never cached, persisted, or reused across
+            # requests/objects, and no external/static allowlist is consulted.
+            approved_host = check_location(
+                raw_location, self.credential_origin, self.token,
+                offline=self.ledger.offline_mode)
+            # Preserve the signed Location exactly for hop2; validation above
+            # authorizes only its host/components and never reconstructs its query.
+            target = raw_location
+        except LocationRejected:
+            raise RemoteIOError("two-hop location rejected by gate",
+                                code="redirect_policy", phase="two_hop_redirect",
+                                http_status=302) from None
+        # Fresh credential-free session: no token, no cookies, no environment
+        # proxies, no retries, no redirect following.
+        session2 = requests.Session()
+        session2.trust_env = False
+        session2.mount("https://", HTTPAdapter(
+            max_retries=Retry(total=0, redirect=0)))
+        lease2 = self.ledger.reserve(Reservation(
+            body=length + 1, metadata=0, inflight=READ_CHUNK, attempt=True))
+        try:
+            try:
+                hop2 = session2.get(target, headers={
+                    "Range": f"bytes={start}-{start + length - 1}",
+                    "Accept-Encoding": "identity"},
+                    stream=True, allow_redirects=False, timeout=(10, 60))
+            except Exception:
+                raise _AmbiguousRead(
+                    "two-hop hop2 attempt failed; reservation retained",
+                    phase="two_hop_redirect") from None
+            status = hop2.status_code
+            if status == 206:
+                m = _CONTENT_RANGE.fullmatch(hop2.headers.get("Content-Range") or "")
+                if (m is None or int(m.group(1)) != start
+                        or int(m.group(2)) != start + length - 1
+                        or int(m.group(3)) != expected_size):
+                    hop2.close()
+                    self.ledger.settle(lease2)
+                    raise RemoteIOError("two-hop content-range mismatch",
+                                        code="http_status", phase="response_headers",
+                                        http_status=206)
+                if hop2.headers.get("Content-Length") != str(length):
+                    hop2.close()
+                    self.ledger.settle(lease2)
+                    raise RemoteIOError("two-hop content-length mismatch",
+                                        code="http_status", phase="response_headers",
+                                        http_status=206)
+                if (hop2.headers.get("Content-Encoding", "identity").lower()
+                        != "identity" or "multipart"
+                        in (hop2.headers.get("Content-Type") or "").lower()):
+                    hop2.close()
+                    self.ledger.settle(lease2)
+                    raise RemoteIOError("two-hop body framing rejected",
+                                        code="http_status", phase="response_headers",
+                                        http_status=206)
+                etag = hop2.headers.get("ETag") or ""
+                try:
+                    check_token_not_in_etag(etag, self.token)
+                except LocationRejected:
+                    hop2.close()
+                    self.ledger.settle(lease2)
+                    raise RemoteIOError("two-hop validator rejected",
+                                        code="http_status", phase="response_headers",
+                                        http_status=206) from None
+                try:
+                    data = bytearray()
+                    got = 0
+                    while got < length + 1:
+                        chunk = hop2.raw.read(min(READ_CHUNK, length + 1 - got),
+                                              decode_content=False)
+                        if not chunk:
+                            break
+                        got += len(chunk)
+                        self.ledger.consume_body(lease2, len(chunk))
+                        data.extend(chunk)
+                except Exception:
+                    raise _AmbiguousRead(
+                        "two-hop body read failed; reservation retained",
+                        phase="two_hop_redirect") from None
+                if got != length:
+                    # Overlong or short: every arrived byte is known and charged.
+                    self.ledger.settle(lease2)
+                    raise RemoteIOError("two-hop entity length rejected",
+                                        code="http_status", phase="response_headers",
+                                        http_status=206)
+                hop2.close()
+                self.ledger.settle(lease2)
+                return TwoHopResult(
+                    hop1_status=302, hop2_status=206, approved_host=approved_host,
+                    etag=etag, bytes_read=len(data), payload=bytes(data[:length]),
+                    attempts=2, batch=batch)
+            hop2.close()
+            self.ledger.settle(lease2)  # header-level reject: body 0, known
+            raise RemoteIOError("two-hop hop2 status rejected",
+                                code="http_status", phase="response_headers",
+                                http_status=status if type(status) is int
+                                and 100 <= status <= 599 else None)
+        except _AmbiguousRead:
+            raise  # full pending reservation retained; never refunded
+        except RemoteIOError:
+            raise  # validated rejection already settled its lease
+        except Exception:
+            raise _AmbiguousRead("two-hop unknown failure; reservation retained",
+                                 phase="two_hop_redirect") from None
+        finally:
+            session2.close()
+
+    def record_two_hop_proof(self, *, origin_endpoint: str, repository: str,
+                             repository_type: str, revision: str, path: str,
+                             size: int, etag: str, cdn_host: str,
+                             payload_sha: str, observed_batch: str = "") -> str:
+        """Store a v2 two-hop conditional probe digest; no network is made.
+
+        Key and record are cross-checked against each other; the v2 domain is
+        disjoint from the legacy single-hop condition_binding_key domain by
+        construction (the domain constant cannot appear in a v1 payload).
+        """
+        key = two_hop_proof_key(origin_endpoint=origin_endpoint,
+                                repository=repository,
+                                repository_type=repository_type,
+                                revision=revision, path=path, size=size,
+                                etag=etag, cdn_host=cdn_host)
+        if (not isinstance(payload_sha, str) or len(payload_sha) != 64
+                or not all(c in "0123456789abcdef" for c in payload_sha)):
+            raise TwoHopKeyError("invalid probe digest")
+        cdn_norm = normalize_host(cdn_host)
+        identity = (normalize_endpoint(origin_endpoint), repository,
+                    repository_type, revision, path, size, etag)
+        bound = self._twohop_cdn_by_identity.get(identity)
+        if bound is not None and bound != cdn_norm:
+            raise TwoHopKeyError("two-hop object identity is already bound "
+                                 "to another CDN host")
+        record = validate_two_hop_record(dict(
+            schema_version="transport_validator_v1", kind="cdn_strong_etag",
+            etag_value=etag, repository=repository,
+            repository_type=repository_type,
+            origin_endpoint=origin_endpoint,
+            origin_host=normalize_endpoint(origin_endpoint),
+            cdn_host=normalize_host(cdn_host), hop_count=2,
+            revision_candidate=revision, path=path, size=size,
+            policy_profile_descriptor=repository_type,
+            observed_batch=observed_batch or "unbound"))
+        if two_hop_record_key(record) != key:
+            raise RemoteIOError("two-hop proof key/record domain mismatch",
+                                code="redirect_policy", phase="two_hop_redirect")
+        self._twohop_cdn_by_identity[identity] = cdn_norm
+        self.ledger.record_condition_proof(key, payload_sha)
+        return key
 
     def _retry_delay(self, retry_after: str | None, attempt: int) -> float:
         if retry_after is None:
@@ -576,11 +846,18 @@ class GuardedTransport:
         package consumer checks that SHA against the v4 snapshot and hashes
         each Range member. Fresh ledgers probe; repeat reads of the same
         conditional binding reuse the guarded ledger, NOT a manifest boolean.
+
+        Legacy single-hop domain only: the hashed identity must never contain
+        the v2 two-hop domain constant (two-hop keys never resolve here).
         """
         if (not bound.immutable_revision or (expected_probe_sha256 is not None
                 and (not isinstance(expected_probe_sha256, str)
                      or not re.fullmatch(r"[0-9a-f]{64}", expected_probe_sha256)))):
             raise ValueError("conditional binding lacks frozen provider identity")
+        from .location_gate import TWOHOP_DOMAIN
+        assert TWOHOP_DOMAIN not in json.dumps(
+            [endpoint, repository, bound.immutable_revision, path, bound.size,
+             bound.strong_etag], separators=(",", ":")), "legacy key domain polluted"
         self._host(endpoint)
         self._host(bound.url)
         if repository != "leafmoone/game_cg_5M" or not path or ":" in path or ".." in path:
