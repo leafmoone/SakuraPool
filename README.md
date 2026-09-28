@@ -5,6 +5,23 @@ read-only runtime (compile committed P2 into a bitmap snapshot, query, resolve).
 No data service access, image decoding, production throughput claims, or model
 execution.
 
+## Project workflow and boundaries
+
+[Project rules](docs/PROJECT_RULES.md) are the canonical current workflow and
+boundary reference. The intended administrator flow is remote TAR indexing →
+durable index → runtime compile/verify → versioned index publication. The user
+flow is install/verify a published index → query → locate image/JSON → Range
+retrieval → a small local dataset. Remote scanning, publication and retrieval
+remain future-stage work, not implemented P3 features.
+
+Ordinary users do not need complete local TARs; LocalTarScanner is for local
+inputs, testing and validation. No ready-to-import index currently exists; do not
+search for old hfutils/CheeseChaser indexes as a prerequisite. Large-repository
+index construction requires separate authorization after development and acceptance.
+The later P4 integration target is `leafmoone/game_cg_5M`; naming it grants no
+access, full scan or write permission. See the rules for bounded canary planning,
+object-version binding, component boundaries and dev/main review requirements.
+
 ## Installation and CLI
 
 The declared supported runtime is Python 3.10–3.13 with pinned PyArrow 18.1.0.
@@ -161,7 +178,7 @@ and imports; total excludes fixture generation but includes whole-TAR validation
 No production performance inference is valid. See the revision report for actual
 command logs, compatible installation failures/successes, and remaining gates.
 
-## P3 runtime (dev)
+## P3 runtime
 
 The runtime compiles one or more committed P2 directories into an immutable
 snapshot and answers queries from bitmaps without touching original archives.
@@ -238,19 +255,13 @@ PYTHONPATH=src python tools/bench_runtime.py --workdir build/bench --scale 100k
 # is attributed per phase; results merge into build/bench/report.json
 ```
 
-Final-tree run (report `reports/P3/benchmark.json`, run-fingerprint bound; the
-bench re-runs any phase whose code or options fingerprint changed): compile
-100k 2.3 s / 1M 51 s / 5M 315 s, peak RSS 147 / 211 / 372 MiB (5M/1M growth
-1.76×) and peak temp 39 / 395 / 1991 MiB. Query-process peak RSS stays ≤152 MiB
-at 5M (memmap + byte-LRU, streaming hashes, no whole-file loads); warm
-typical-count p95 ≤ 1.09 ms, end-to-end query→first-128-locations p95 ≤ 0.62 ms
-(extract-only span reported separately), 10k-locations p95 ≤ 10.2 ms, and a
-100k-row location drain takes ~7 ms. The cold pass gives every query family its
-own snapshot handle and cache (no family inherits another's warm state). With a
-32 MiB budget the LRU performs real evictions (48× at 1 MiB blob size) and
-keeps resident ≤ limit; the 1 MiB demo does not substitute for it. The 100k
-corpus passes a 300-spec Python-set differential with 0 mismatches; the unit
-suite adds a 1000-spec differential on a mixed-state corpus, crash/resume at
-every stage boundary, validated READY reuse with fail-closed corruption,
-identity-trailer swap/tamper cases, and fresh-process reopen. All numbers are
-synthetic and diagnostic-only; no production performance inference is valid.
+The current P3 performance evidence is
+[`reports/P3/bench-repair/benchmark.json`](reports/P3/bench-repair/benchmark.json),
+with methodology and validation in [`reports/P3/report.md`](reports/P3/report.md)
+and separate [installed-package evidence](reports/P3/bench-repair/benchmark-installed.json).
+Earlier benchmark artifacts are retained as history, not current acceptance evidence.
+These results cover synthetic workloads only, not network performance, full-repository
+coverage or a guarantee for 21M records. Generator/options/code/environment fingerprints
+must match; use a fresh benchmark workdir after workload changes rather than assuming
+old phase files automatically invalidate. Do not rerun large benchmarks without the
+applicable stage authorization.
