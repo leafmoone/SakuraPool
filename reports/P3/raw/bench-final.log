@@ -1,18 +1,20 @@
+$ cmd: PYTHONPATH=src .venv312w/Scripts/python.exe tools/bench_runtime.py --workdir .bench-cache-r3 (tree cef41a5)
+cwd: D:/SakuraTool/SakuraPool
 [100k] gen: 100000 samples
 [100k] compile: starting (child process)
-[100k] compile: 5.15s rss=159MiB temp=39MiB
+[100k] compile: 5.195s rss=160MiB temp=39MiB
 [100k] query: starting (child process)
 [100k] query: done
 [100k] diff: 300 specs (child process)
 [100k] diff: mismatches=0
 [1M] gen: 1000000 samples
 [1M] compile: starting (child process)
-[1M] compile: 82.4s rss=252MiB temp=395MiB
+[1M] compile: 80.89s rss=255MiB temp=395MiB
 [1M] query: starting (child process)
 [1M] query: done
 [5M] gen: 5000000 samples
 [5M] compile: starting (child process)
-[5M] compile: 466.015s rss=449MiB temp=1991MiB
+[5M] compile: 460.299s rss=443MiB temp=1991MiB
 [5M] query: starting (child process)
 [5M] query: done
 {
@@ -23,10 +25,14 @@
   "pyroaring": "1.1.0",
   "python": "3.12.13"
  },
- "memory_growth_5m_over_1m": 1.79,
+ "memory_growth_5m_over_1m": 1.74,
+ "module": {
+  "mode": "worktree",
+  "module_path": "D:\\SakuraTool\\SakuraPool\\src\\sakurapool\\__init__.py"
+ },
  "platform": "Windows-11-10.0.26100-SP0",
  "python": "3.12.13",
- "run_fingerprint": "802601867b19e64804332ae4efc36cac7799ae286c2c0515653c1586f6da061c",
+ "run_fingerprint": "3961f9b9edf264065bae387c36c4c74ef6c8e18831d26438beec55ce04b9aab5",
  "scales": {
   "100k": {
    "compile": {
@@ -39,20 +45,28 @@
      "catalog.sqlite": 12058624,
      "locations.npy": 3900338
     },
-    "peak_rss_bytes": 166797312,
+    "module": {
+     "mode": "worktree",
+     "module_path": "D:\\SakuraTool\\SakuraPool\\src\\sakurapool\\__init__.py"
+    },
+    "peak_rss_bytes": 168734720,
     "peak_temp_bytes": 41026506,
     "rid_count": 100000,
-    "run_id": "802601867b19e64804332ae4efc36cac7799ae286c2c0515653c1586f6da061c",
+    "run_id": "3961f9b9edf264065bae387c36c4c74ef6c8e18831d26438beec55ce04b9aab5",
     "scale": "100k",
     "snapshot_id": "8c314235b90104d4683b591f743f743632cee2360e9ced6433e701a8d0d2b03f",
-    "wall_s": 5.15
+    "wall_s": 5.195
    },
    "diff": {
     "mismatches": 0,
+    "module": {
+     "mode": "worktree",
+     "module_path": "D:\\SakuraTool\\SakuraPool\\src\\sakurapool\\__init__.py"
+    },
     "n_specs": 300,
-    "peak_rss_bytes": 215584768,
+    "peak_rss_bytes": 217415680,
     "rid_count": 100000,
-    "run_id": "802601867b19e64804332ae4efc36cac7799ae286c2c0515653c1586f6da061c",
+    "run_id": "3961f9b9edf264065bae387c36c4c74ef6c8e18831d26438beec55ce04b9aab5",
     "scale": "100k"
    },
    "gates": {
@@ -69,39 +83,39 @@
     },
     "families": {
      "any_of_2": {
-      "cold_10k_ms": 0.025,
-      "cold_first128_ms": 0.134,
-      "cold_plan_ms": 0.634,
+      "cold_10k_ms": 0.024,
+      "cold_first128_ms": 0.126,
+      "cold_plan_ms": 0.358,
       "count": 136,
       "warm_10k": {
-       "max_ms": 0.018,
-       "n": 5,
-       "p50_ms": 0.015,
-       "p95_ms": 0.018
-      },
-      "warm_first128_e2e": {
-       "max_ms": 0.214,
-       "n": 5,
-       "p50_ms": 0.197,
-       "p95_ms": 0.214
-      },
-      "warm_first128_extract": {
-       "max_ms": 0.057,
+       "max_ms": 0.019,
        "n": 5,
        "p50_ms": 0.016,
-       "p95_ms": 0.057
+       "p95_ms": 0.019
+      },
+      "warm_first128_e2e": {
+       "max_ms": 0.219,
+       "n": 5,
+       "p50_ms": 0.203,
+       "p95_ms": 0.219
+      },
+      "warm_first128_extract": {
+       "max_ms": 0.062,
+       "n": 5,
+       "p50_ms": 0.018,
+       "p95_ms": 0.062
       },
       "warm_plan": {
-       "max_ms": 0.229,
+       "max_ms": 0.242,
        "n": 5,
-       "p50_ms": 0.181,
-       "p95_ms": 0.229
+       "p50_ms": 0.188,
+       "p95_ms": 0.242
       }
      },
      "hot": {
       "cold_10k_ms": 0.019,
-      "cold_first128_ms": 0.121,
-      "cold_plan_ms": 0.194,
+      "cold_first128_ms": 0.125,
+      "cold_plan_ms": 0.213,
       "count": 120,
       "warm_10k": {
        "max_ms": 0.015,
@@ -110,28 +124,28 @@
        "p95_ms": 0.015
       },
       "warm_first128_e2e": {
-       "max_ms": 0.105,
+       "max_ms": 0.129,
        "n": 5,
-       "p50_ms": 0.092,
-       "p95_ms": 0.105
+       "p50_ms": 0.088,
+       "p95_ms": 0.129
       },
       "warm_first128_extract": {
-       "max_ms": 0.083,
+       "max_ms": 0.098,
        "n": 5,
        "p50_ms": 0.015,
-       "p95_ms": 0.083
+       "p95_ms": 0.098
       },
       "warm_plan": {
-       "max_ms": 0.157,
+       "max_ms": 0.155,
        "n": 5,
        "p50_ms": 0.076,
-       "p95_ms": 0.157
+       "p95_ms": 0.155
       }
      },
      "hot_and_medium": {
       "cold_10k_ms": null,
       "cold_first128_ms": null,
-      "cold_plan_ms": 0.258,
+      "cold_plan_ms": 0.294,
       "count": 0,
       "warm_10k": {
        "n": 0
@@ -143,46 +157,46 @@
        "n": 0
       },
       "warm_plan": {
-       "max_ms": 0.179,
+       "max_ms": 0.178,
        "n": 5,
-       "p50_ms": 0.127,
-       "p95_ms": 0.179
+       "p50_ms": 0.126,
+       "p95_ms": 0.178
       }
      },
      "not": {
       "cold_10k_ms": 0.016,
       "cold_first128_ms": 0.103,
-      "cold_plan_ms": 0.321,
+      "cold_plan_ms": 0.318,
       "count": 101,
       "warm_10k": {
-       "max_ms": 0.021,
+       "max_ms": 0.024,
        "n": 5,
        "p50_ms": 0.013,
-       "p95_ms": 0.021
+       "p95_ms": 0.024
       },
       "warm_first128_e2e": {
-       "max_ms": 0.328,
+       "max_ms": 0.32,
        "n": 5,
-       "p50_ms": 0.153,
-       "p95_ms": 0.328
+       "p50_ms": 0.154,
+       "p95_ms": 0.32
       },
       "warm_first128_extract": {
-       "max_ms": 0.047,
+       "max_ms": 0.045,
        "n": 5,
-       "p50_ms": 0.019,
-       "p95_ms": 0.047
+       "p50_ms": 0.014,
+       "p95_ms": 0.045
       },
       "warm_plan": {
-       "max_ms": 0.235,
+       "max_ms": 0.323,
        "n": 5,
-       "p50_ms": 0.189,
-       "p95_ms": 0.235
+       "p50_ms": 0.14,
+       "p95_ms": 0.323
       }
      },
      "rare": {
       "cold_10k_ms": 0.009,
-      "cold_first128_ms": 0.025,
-      "cold_plan_ms": 0.194,
+      "cold_first128_ms": 0.024,
+      "cold_plan_ms": 0.168,
       "count": 1,
       "warm_10k": {
        "max_ms": 0.006,
@@ -191,10 +205,10 @@
        "p95_ms": 0.006
       },
       "warm_first128_e2e": {
-       "max_ms": 0.082,
+       "max_ms": 0.087,
        "n": 5,
-       "p50_ms": 0.078,
-       "p95_ms": 0.082
+       "p50_ms": 0.079,
+       "p95_ms": 0.087
       },
       "warm_first128_extract": {
        "max_ms": 0.009,
@@ -203,76 +217,76 @@
        "p95_ms": 0.009
       },
       "warm_plan": {
-       "max_ms": 0.105,
+       "max_ms": 0.103,
        "n": 5,
-       "p50_ms": 0.072,
-       "p95_ms": 0.105
+       "p50_ms": 0.071,
+       "p95_ms": 0.103
       }
      },
      "source_2tag": {
       "cold_10k_ms": 0.01,
-      "cold_first128_ms": 0.039,
-      "cold_plan_ms": 0.332,
+      "cold_first128_ms": 0.038,
+      "cold_plan_ms": 0.329,
       "count": 12,
       "warm_10k": {
-       "max_ms": 0.014,
+       "max_ms": 0.013,
        "n": 5,
-       "p50_ms": 0.007,
-       "p95_ms": 0.014
+       "p50_ms": 0.008,
+       "p95_ms": 0.013
       },
       "warm_first128_e2e": {
-       "max_ms": 0.262,
+       "max_ms": 0.259,
        "n": 5,
-       "p50_ms": 0.18,
-       "p95_ms": 0.262
+       "p50_ms": 0.211,
+       "p95_ms": 0.259
       },
       "warm_first128_extract": {
        "max_ms": 0.02,
        "n": 5,
-       "p50_ms": 0.008,
+       "p50_ms": 0.009,
        "p95_ms": 0.02
       },
       "warm_plan": {
-       "max_ms": 0.284,
+       "max_ms": 0.259,
        "n": 5,
-       "p50_ms": 0.179,
-       "p95_ms": 0.284
+       "p50_ms": 0.198,
+       "p95_ms": 0.259
       }
      },
      "source_only": {
-      "cold_10k_ms": 1.648,
-      "cold_first128_ms": 0.113,
-      "cold_plan_ms": 0.25,
+      "cold_10k_ms": 1.363,
+      "cold_first128_ms": 0.06,
+      "cold_plan_ms": 0.239,
       "count": 50000,
       "warm_10k": {
-       "max_ms": 1.303,
+       "max_ms": 1.244,
        "n": 5,
-       "p50_ms": 1.007,
-       "p95_ms": 1.303
+       "p50_ms": 1.141,
+       "p95_ms": 1.244
       },
       "warm_first128_e2e": {
-       "max_ms": 0.069,
+       "max_ms": 0.075,
        "n": 5,
        "p50_ms": 0.057,
-       "p95_ms": 0.069
+       "p95_ms": 0.075
       },
       "warm_first128_extract": {
-       "max_ms": 0.033,
+       "max_ms": 0.032,
        "n": 5,
-       "p50_ms": 0.02,
-       "p95_ms": 0.033
+       "p50_ms": 0.021,
+       "p95_ms": 0.032
       },
       "warm_plan": {
-       "max_ms": 0.129,
+       "max_ms": 0.128,
        "n": 5,
-       "p50_ms": 0.059,
-       "p95_ms": 0.129
+       "p50_ms": 0.065,
+       "p95_ms": 0.128
       }
      },
      "three_tag_and": {
       "cold_10k_ms": null,
       "cold_first128_ms": null,
-      "cold_plan_ms": 0.329,
+      "cold_plan_ms": 0.411,
       "count": 0,
       "warm_10k": {
        "n": 0
@@ -284,46 +298,46 @@
        "n": 0
       },
       "warm_plan": {
-       "max_ms": 0.249,
+       "max_ms": 0.239,
        "n": 5,
-       "p50_ms": 0.177,
-       "p95_ms": 0.249
+       "p50_ms": 0.176,
+       "p95_ms": 0.239
       }
      },
      "three_tag_or": {
-      "cold_10k_ms": 0.162,
-      "cold_first128_ms": 0.114,
-      "cold_plan_ms": 0.345,
+      "cold_10k_ms": 0.156,
+      "cold_first128_ms": 0.123,
+      "cold_plan_ms": 0.351,
       "count": 335,
       "warm_10k": {
-       "max_ms": 0.17,
+       "max_ms": 0.122,
        "n": 5,
-       "p50_ms": 0.034,
-       "p95_ms": 0.17
+       "p50_ms": 0.029,
+       "p95_ms": 0.122
       },
       "warm_first128_e2e": {
-       "max_ms": 0.207,
+       "max_ms": 0.195,
        "n": 5,
-       "p50_ms": 0.179,
-       "p95_ms": 0.207
+       "p50_ms": 0.164,
+       "p95_ms": 0.195
       },
       "warm_first128_extract": {
-       "max_ms": 0.066,
+       "max_ms": 0.069,
        "n": 5,
-       "p50_ms": 0.019,
-       "p95_ms": 0.066
+       "p50_ms": 0.018,
+       "p95_ms": 0.069
       },
       "warm_plan": {
-       "max_ms": 0.243,
+       "max_ms": 0.239,
        "n": 5,
-       "p50_ms": 0.163,
-       "p95_ms": 0.243
+       "p50_ms": 0.158,
+       "p95_ms": 0.239
       }
      },
      "two_source_2tag": {
       "cold_10k_ms": null,
       "cold_first128_ms": null,
-      "cold_plan_ms": 0.348,
+      "cold_plan_ms": 0.331,
       "count": 0,
       "warm_10k": {
        "n": 0
@@ -335,10 +349,10 @@
        "n": 0
       },
       "warm_plan": {
-       "max_ms": 0.283,
+       "max_ms": 0.32,
        "n": 5,
-       "p50_ms": 0.184,
-       "p95_ms": 0.283
+       "p50_ms": 0.207,
+       "p95_ms": 0.32
       }
      }
     },
@@ -351,10 +365,14 @@
      "rows": 50000,
      "s": 0.003
     },
+    "module": {
+     "mode": "worktree",
+     "module_path": "D:\\SakuraTool\\SakuraPool\\src\\sakurapool\\__init__.py"
+    },
     "open_s": 0.001,
-    "peak_rss_bytes": 56594432,
+    "peak_rss_bytes": 56225792,
     "rid_count": 100000,
-    "run_id": "802601867b19e64804332ae4efc36cac7799ae286c2c0515653c1586f6da061c",
+    "run_id": "3961f9b9edf264065bae387c36c4c74ef6c8e18831d26438beec55ce04b9aab5",
     "scale": "100k"
    }
   },
@@ -369,13 +387,17 @@
      "catalog.sqlite": 122331136,
      "locations.npy": 39000338
     },
-    "peak_rss_bytes": 264245248,
-    "peak_temp_bytes": 414408823,
+    "module": {
+     "mode": "worktree",
+     "module_path": "D:\\SakuraTool\\SakuraPool\\src\\sakurapool\\__init__.py"
+    },
+    "peak_rss_bytes": 267833344,
+    "peak_temp_bytes": 414408825,
     "rid_count": 1000000,
-    "run_id": "802601867b19e64804332ae4efc36cac7799ae286c2c0515653c1586f6da061c",
+    "run_id": "3961f9b9edf264065bae387c36c4c74ef6c8e18831d26438beec55ce04b9aab5",
     "scale": "1M",
     "snapshot_id": "587019d2f8c9d029a0019639e08239094574dde5f17e4a2de01e62cc30be5c09",
-    "wall_s": 82.4
+    "wall_s": 80.89
    },
    "gates": {
     "note": "gates apply at 5M scale only"
@@ -391,69 +413,69 @@
     },
     "families": {
      "any_of_2": {
-      "cold_10k_ms": 1.261,
-      "cold_first128_ms": 0.14,
-      "cold_plan_ms": 0.465,
+      "cold_10k_ms": 1.227,
+      "cold_first128_ms": 0.125,
+      "cold_plan_ms": 0.442,
       "count": 1696,
       "warm_10k": {
-       "max_ms": 0.819,
+       "max_ms": 0.867,
        "n": 5,
        "p50_ms": 0.133,
-       "p95_ms": 0.819
+       "p95_ms": 0.867
       },
       "warm_first128_e2e": {
-       "max_ms": 0.361,
+       "max_ms": 0.268,
        "n": 5,
-       "p50_ms": 0.226,
-       "p95_ms": 0.361
+       "p50_ms": 0.24,
+       "p95_ms": 0.268
       },
       "warm_first128_extract": {
-       "max_ms": 0.064,
+       "max_ms": 0.067,
        "n": 5,
        "p50_ms": 0.026,
-       "p95_ms": 0.064
+       "p95_ms": 0.067
       },
       "warm_plan": {
-       "max_ms": 0.383,
+       "max_ms": 0.263,
        "n": 5,
-       "p50_ms": 0.246,
-       "p95_ms": 0.383
+       "p50_ms": 0.223,
+       "p95_ms": 0.263
       }
      },
      "hot": {
-      "cold_10k_ms": 1.199,
-      "cold_first128_ms": 0.121,
-      "cold_plan_ms": 0.205,
+      "cold_10k_ms": 1.184,
+      "cold_first128_ms": 0.123,
+      "cold_plan_ms": 0.206,
       "count": 1559,
       "warm_10k": {
-       "max_ms": 1.165,
+       "max_ms": 1.132,
        "n": 5,
-       "p50_ms": 0.108,
-       "p95_ms": 1.165
+       "p50_ms": 0.125,
+       "p95_ms": 1.132
       },
       "warm_first128_e2e": {
-       "max_ms": 0.104,
+       "max_ms": 0.17,
        "n": 5,
-       "p50_ms": 0.093,
-       "p95_ms": 0.104
+       "p50_ms": 0.1,
+       "p95_ms": 0.17
       },
       "warm_first128_extract": {
-       "max_ms": 0.09,
+       "max_ms": 0.088,
        "n": 5,
-       "p50_ms": 0.017,
-       "p95_ms": 0.09
+       "p50_ms": 0.027,
+       "p95_ms": 0.088
       },
       "warm_plan": {
-       "max_ms": 0.159,
+       "max_ms": 0.17,
        "n": 5,
-       "p50_ms": 0.085,
-       "p95_ms": 0.159
+       "p50_ms": 0.094,
+       "p95_ms": 0.17
       }
      },
      "hot_and_medium": {
       "cold_10k_ms": null,
       "cold_first128_ms": null,
-      "cold_plan_ms": 0.299,
+      "cold_plan_ms": 0.304,
       "count": 0,
       "warm_10k": {
        "n": 0
@@ -465,46 +487,46 @@
        "n": 0
       },
       "warm_plan": {
-       "max_ms": 0.204,
+       "max_ms": 0.207,
        "n": 5,
-       "p50_ms": 0.133,
-       "p95_ms": 0.204
+       "p50_ms": 0.13,
+       "p95_ms": 0.207
       }
      },
      "not": {
-      "cold_10k_ms": 0.925,
-      "cold_first128_ms": 0.134,
-      "cold_plan_ms": 0.508,
+      "cold_10k_ms": 0.881,
+      "cold_first128_ms": 0.136,
+      "cold_plan_ms": 0.522,
       "count": 1227,
       "warm_10k": {
-       "max_ms": 0.529,
+       "max_ms": 1.232,
        "n": 5,
-       "p50_ms": 0.09,
-       "p95_ms": 0.529
+       "p50_ms": 0.097,
+       "p95_ms": 1.232
       },
       "warm_first128_e2e": {
-       "max_ms": 0.19,
+       "max_ms": 0.191,
        "n": 5,
-       "p50_ms": 0.16,
-       "p95_ms": 0.19
+       "p50_ms": 0.175,
+       "p95_ms": 0.191
       },
       "warm_first128_extract": {
-       "max_ms": 0.078,
+       "max_ms": 0.076,
        "n": 5,
-       "p50_ms": 0.018,
-       "p95_ms": 0.078
+       "p50_ms": 0.02,
+       "p95_ms": 0.076
       },
       "warm_plan": {
-       "max_ms": 0.376,
+       "max_ms": 0.407,
        "n": 5,
-       "p50_ms": 0.167,
-       "p95_ms": 0.376
+       "p50_ms": 0.185,
+       "p95_ms": 0.407
       }
      },
      "rare": {
       "cold_10k_ms": 0.01,
-      "cold_first128_ms": 0.049,
-      "cold_plan_ms": 0.193,
+      "cold_first128_ms": 0.053,
+      "cold_plan_ms": 0.185,
       "count": 16,
       "warm_10k": {
        "max_ms": 0.008,
@@ -513,88 +535,88 @@
        "p95_ms": 0.008
       },
       "warm_first128_e2e": {
-       "max_ms": 0.097,
+       "max_ms": 0.09,
        "n": 5,
        "p50_ms": 0.082,
-       "p95_ms": 0.097
+       "p95_ms": 0.09
       },
       "warm_first128_extract": {
-       "max_ms": 0.021,
+       "max_ms": 0.022,
        "n": 5,
-       "p50_ms": 0.007,
-       "p95_ms": 0.021
+       "p50_ms": 0.008,
+       "p95_ms": 0.022
       },
       "warm_plan": {
-       "max_ms": 0.114,
+       "max_ms": 0.12,
        "n": 5,
-       "p50_ms": 0.075,
-       "p95_ms": 0.114
+       "p50_ms": 0.083,
+       "p95_ms": 0.12
       }
      },
      "source_2tag": {
-      "cold_10k_ms": 0.049,
-      "cold_first128_ms": 0.146,
-      "cold_plan_ms": 0.421,
+      "cold_10k_ms": 0.046,
+      "cold_first128_ms": 0.139,
+      "cold_plan_ms": 0.45,
       "count": 161,
       "warm_10k": {
-       "max_ms": 0.032,
+       "max_ms": 0.031,
        "n": 5,
        "p50_ms": 0.017,
-       "p95_ms": 0.032
+       "p95_ms": 0.031
       },
       "warm_first128_e2e": {
-       "max_ms": 0.213,
+       "max_ms": 0.208,
        "n": 5,
        "p50_ms": 0.188,
-       "p95_ms": 0.213
+       "p95_ms": 0.208
       },
       "warm_first128_extract": {
-       "max_ms": 0.085,
+       "max_ms": 0.067,
        "n": 5,
-       "p50_ms": 0.021,
-       "p95_ms": 0.085
+       "p50_ms": 0.016,
+       "p95_ms": 0.067
       },
       "warm_plan": {
-       "max_ms": 0.344,
+       "max_ms": 0.331,
        "n": 5,
-       "p50_ms": 0.173,
-       "p95_ms": 0.344
+       "p50_ms": 0.177,
+       "p95_ms": 0.331
       }
      },
      "source_only": {
-      "cold_10k_ms": 1.374,
-      "cold_first128_ms": 0.068,
-      "cold_plan_ms": 0.351,
+      "cold_10k_ms": 1.34,
+      "cold_first128_ms": 0.072,
+      "cold_plan_ms": 0.32,
       "count": 500000,
       "warm_10k": {
-       "max_ms": 1.262,
+       "max_ms": 1.193,
        "n": 5,
-       "p50_ms": 0.999,
-       "p95_ms": 1.262
+       "p50_ms": 1.034,
+       "p95_ms": 1.193
       },
       "warm_first128_e2e": {
-       "max_ms": 0.079,
+       "max_ms": 0.077,
        "n": 5,
-       "p50_ms": 0.068,
-       "p95_ms": 0.079
+       "p50_ms": 0.064,
+       "p95_ms": 0.077
       },
       "warm_first128_extract": {
-       "max_ms": 0.036,
+       "max_ms": 0.035,
        "n": 5,
-       "p50_ms": 0.018,
-       "p95_ms": 0.036
+       "p50_ms": 0.022,
+       "p95_ms": 0.035
       },
       "warm_plan": {
-       "max_ms": 0.185,
+       "max_ms": 0.198,
        "n": 5,
-       "p50_ms": 0.068,
-       "p95_ms": 0.185
+       "p50_ms": 0.078,
+       "p95_ms": 0.198
       }
      },
      "three_tag_and": {
       "cold_10k_ms": null,
       "cold_first128_ms": null,
-      "cold_plan_ms": 0.354,
+      "cold_plan_ms": 0.355,
       "count": 0,
       "warm_10k": {
        "n": 0
@@ -606,46 +628,46 @@
        "n": 0
       },
       "warm_plan": {
-       "max_ms": 0.324,
+       "max_ms": 0.256,
        "n": 5,
-       "p50_ms": 0.236,
-       "p95_ms": 0.324
+       "p50_ms": 0.188,
+       "p95_ms": 0.256
       }
      },
      "three_tag_or": {
-      "cold_10k_ms": 2.684,
-      "cold_first128_ms": 0.129,
-      "cold_plan_ms": 0.385,
+      "cold_10k_ms": 2.634,
+      "cold_first128_ms": 0.11,
+      "cold_plan_ms": 0.409,
       "count": 4134,
       "warm_10k": {
-       "max_ms": 2.292,
+       "max_ms": 2.21,
        "n": 5,
-       "p50_ms": 0.276,
-       "p95_ms": 2.292
+       "p50_ms": 0.28,
+       "p95_ms": 2.21
       },
       "warm_first128_e2e": {
-       "max_ms": 0.206,
+       "max_ms": 0.208,
        "n": 5,
-       "p50_ms": 0.197,
-       "p95_ms": 0.206
+       "p50_ms": 0.188,
+       "p95_ms": 0.208
       },
       "warm_first128_extract": {
-       "max_ms": 0.06,
+       "max_ms": 0.058,
        "n": 5,
-       "p50_ms": 0.022,
-       "p95_ms": 0.06
+       "p50_ms": 0.021,
+       "p95_ms": 0.058
       },
       "warm_plan": {
-       "max_ms": 0.287,
+       "max_ms": 0.291,
        "n": 5,
-       "p50_ms": 0.194,
-       "p95_ms": 0.287
+       "p50_ms": 0.195,
+       "p95_ms": 0.291
       }
      },
      "two_source_2tag": {
       "cold_10k_ms": null,
       "cold_first128_ms": null,
-      "cold_plan_ms": 0.383,
+      "cold_plan_ms": 0.37,
       "count": 0,
       "warm_10k": {
        "n": 0
@@ -657,10 +679,10 @@
        "n": 0
       },
       "warm_plan": {
-       "max_ms": 0.281,
+       "max_ms": 0.477,
        "n": 5,
-       "p50_ms": 0.187,
-       "p95_ms": 0.281
+       "p50_ms": 0.253,
+       "p95_ms": 0.477
       }
      }
     },
@@ -673,10 +695,14 @@
      "rows": 100000,
      "s": 0.007
     },
+    "module": {
+     "mode": "worktree",
+     "module_path": "D:\\SakuraTool\\SakuraPool\\src\\sakurapool\\__init__.py"
+    },
     "open_s": 0.001,
-    "peak_rss_bytes": 77434880,
+    "peak_rss_bytes": 77795328,
     "rid_count": 1000000,
-    "run_id": "802601867b19e64804332ae4efc36cac7799ae286c2c0515653c1586f6da061c",
+    "run_id": "3961f9b9edf264065bae387c36c4c74ef6c8e18831d26438beec55ce04b9aab5",
     "scale": "1M"
    }
   },
@@ -691,13 +717,17 @@
      "catalog.sqlite": 624791552,
      "locations.npy": 195000338
     },
-    "peak_rss_bytes": 471683072,
+    "module": {
+     "mode": "worktree",
+     "module_path": "D:\\SakuraTool\\SakuraPool\\src\\sakurapool\\__init__.py"
+    },
+    "peak_rss_bytes": 464736256,
     "peak_temp_bytes": 2088730643,
     "rid_count": 5000000,
-    "run_id": "802601867b19e64804332ae4efc36cac7799ae286c2c0515653c1586f6da061c",
+    "run_id": "3961f9b9edf264065bae387c36c4c74ef6c8e18831d26438beec55ce04b9aab5",
     "scale": "5M",
     "snapshot_id": "417ea6fb03ba268da0513fc8693e658b3284036af1c57bb64e96357dc1c830b3",
-    "wall_s": 466.015
+    "wall_s": 460.299
    },
    "gates": {
     "cache_resident_bounded": true,
@@ -717,21 +747,21 @@
     },
     "families": {
      "any_of_2": {
-      "cold_10k_ms": 6.885,
-      "cold_first128_ms": 0.147,
-      "cold_plan_ms": 0.747,
+      "cold_10k_ms": 8.029,
+      "cold_first128_ms": 0.137,
+      "cold_plan_ms": 0.765,
       "count": 8287,
       "warm_10k": {
-       "max_ms": 3.925,
+       "max_ms": 5.029,
        "n": 5,
-       "p50_ms": 0.842,
-       "p95_ms": 3.925
+       "p50_ms": 0.723,
+       "p95_ms": 5.029
       },
       "warm_first128_e2e": {
-       "max_ms": 0.284,
+       "max_ms": 0.279,
        "n": 5,
-       "p50_ms": 0.267,
-       "p95_ms": 0.284
+       "p50_ms": 0.259,
+       "p95_ms": 0.279
       },
       "warm_first128_extract": {
        "max_ms": 0.074,
@@ -740,46 +770,46 @@
        "p95_ms": 0.074
       },
       "warm_plan": {
-       "max_ms": 0.339,
+       "max_ms": 0.363,
        "n": 5,
-       "p50_ms": 0.282,
-       "p95_ms": 0.339
+       "p50_ms": 0.28,
+       "p95_ms": 0.363
       }
      },
      "hot": {
-      "cold_10k_ms": 6.253,
-      "cold_first128_ms": 0.131,
-      "cold_plan_ms": 0.239,
+      "cold_10k_ms": 6.952,
+      "cold_first128_ms": 0.142,
+      "cold_plan_ms": 0.234,
       "count": 7384,
       "warm_10k": {
-       "max_ms": 6.111,
+       "max_ms": 8.094,
        "n": 5,
-       "p50_ms": 0.655,
-       "p95_ms": 6.111
+       "p50_ms": 0.639,
+       "p95_ms": 8.094
       },
       "warm_first128_e2e": {
-       "max_ms": 0.131,
+       "max_ms": 0.494,
        "n": 5,
-       "p50_ms": 0.113,
-       "p95_ms": 0.131
+       "p50_ms": 0.142,
+       "p95_ms": 0.494
       },
       "warm_first128_extract": {
-       "max_ms": 0.094,
+       "max_ms": 0.3,
        "n": 5,
-       "p50_ms": 0.026,
-       "p95_ms": 0.094
+       "p50_ms": 0.049,
+       "p95_ms": 0.3
       },
       "warm_plan": {
-       "max_ms": 0.25,
+       "max_ms": 0.448,
        "n": 5,
-       "p50_ms": 0.115,
-       "p95_ms": 0.25
+       "p50_ms": 0.182,
+       "p95_ms": 0.448
       }
      },
      "hot_and_medium": {
       "cold_10k_ms": null,
       "cold_first128_ms": null,
-      "cold_plan_ms": 0.336,
+      "cold_plan_ms": 0.577,
       "count": 0,
       "warm_10k": {
        "n": 0
@@ -791,136 +821,136 @@
        "n": 0
       },
       "warm_plan": {
-       "max_ms": 0.27,
+       "max_ms": 0.35,
        "n": 5,
-       "p50_ms": 0.152,
-       "p95_ms": 0.27
+       "p50_ms": 0.258,
+       "p95_ms": 0.35
       }
      },
      "not": {
-      "cold_10k_ms": 5.604,
-      "cold_first128_ms": 0.135,
-      "cold_plan_ms": 1.43,
+      "cold_10k_ms": 6.421,
+      "cold_first128_ms": 0.146,
+      "cold_plan_ms": 1.238,
       "count": 6208,
       "warm_10k": {
-       "max_ms": 3.219,
+       "max_ms": 4.249,
        "n": 5,
-       "p50_ms": 0.642,
-       "p95_ms": 3.219
+       "p50_ms": 0.977,
+       "p95_ms": 4.249
       },
       "warm_first128_e2e": {
-       "max_ms": 0.925,
+       "max_ms": 0.627,
        "n": 5,
-       "p50_ms": 0.27,
-       "p95_ms": 0.925
+       "p50_ms": 0.558,
+       "p95_ms": 0.627
       },
       "warm_first128_extract": {
-       "max_ms": 0.071,
+       "max_ms": 0.075,
        "n": 5,
-       "p50_ms": 0.029,
-       "p95_ms": 0.071
+       "p50_ms": 0.048,
+       "p95_ms": 0.075
       },
       "warm_plan": {
-       "max_ms": 1.185,
+       "max_ms": 1.217,
        "n": 5,
-       "p50_ms": 0.483,
-       "p95_ms": 1.185
+       "p50_ms": 0.642,
+       "p95_ms": 1.217
       }
      },
      "rare": {
-      "cold_10k_ms": 0.015,
-      "cold_first128_ms": 0.151,
-      "cold_plan_ms": 0.238,
+      "cold_10k_ms": 0.016,
+      "cold_first128_ms": 0.186,
+      "cold_plan_ms": 0.258,
       "count": 86,
       "warm_10k": {
-       "max_ms": 0.013,
+       "max_ms": 0.014,
        "n": 5,
        "p50_ms": 0.012,
-       "p95_ms": 0.013
+       "p95_ms": 0.014
       },
       "warm_first128_e2e": {
-       "max_ms": 0.101,
+       "max_ms": 0.103,
        "n": 5,
        "p50_ms": 0.09,
-       "p95_ms": 0.101
+       "p95_ms": 0.103
       },
       "warm_first128_extract": {
-       "max_ms": 0.092,
+       "max_ms": 0.104,
        "n": 5,
        "p50_ms": 0.013,
-       "p95_ms": 0.092
+       "p95_ms": 0.104
       },
       "warm_plan": {
        "max_ms": 0.163,
        "n": 5,
-       "p50_ms": 0.086,
+       "p50_ms": 0.08,
        "p95_ms": 0.163
       }
      },
      "source_2tag": {
-      "cold_10k_ms": 0.519,
-      "cold_first128_ms": 0.174,
-      "cold_plan_ms": 0.868,
+      "cold_10k_ms": 0.574,
+      "cold_first128_ms": 0.169,
+      "cold_plan_ms": 0.853,
       "count": 638,
       "warm_10k": {
-       "max_ms": 0.306,
+       "max_ms": 0.387,
        "n": 5,
-       "p50_ms": 0.059,
-       "p95_ms": 0.306
+       "p50_ms": 0.099,
+       "p95_ms": 0.387
       },
       "warm_first128_e2e": {
-       "max_ms": 0.256,
+       "max_ms": 0.436,
        "n": 5,
-       "p50_ms": 0.229,
-       "p95_ms": 0.256
+       "p50_ms": 0.272,
+       "p95_ms": 0.436
       },
       "warm_first128_extract": {
-       "max_ms": 0.081,
+       "max_ms": 0.275,
        "n": 5,
-       "p50_ms": 0.021,
-       "p95_ms": 0.081
+       "p50_ms": 0.02,
+       "p95_ms": 0.275
       },
       "warm_plan": {
-       "max_ms": 0.589,
+       "max_ms": 1.046,
        "n": 5,
-       "p50_ms": 0.224,
-       "p95_ms": 0.589
+       "p50_ms": 0.253,
+       "p95_ms": 1.046
       }
      },
      "source_only": {
-      "cold_10k_ms": 1.338,
+      "cold_10k_ms": 1.396,
       "cold_first128_ms": 0.072,
-      "cold_plan_ms": 0.714,
+      "cold_plan_ms": 0.715,
       "count": 2500000,
       "warm_10k": {
-       "max_ms": 1.246,
+       "max_ms": 1.268,
        "n": 5,
-       "p50_ms": 1.187,
-       "p95_ms": 1.246
+       "p50_ms": 1.056,
+       "p95_ms": 1.268
       },
       "warm_first128_e2e": {
-       "max_ms": 0.161,
-       "n": 5,
-       "p50_ms": 0.078,
-       "p95_ms": 0.161
-      },
-      "warm_first128_extract": {
-       "max_ms": 0.039,
-       "n": 5,
-       "p50_ms": 0.02,
-       "p95_ms": 0.039
-      },
-      "warm_plan": {
-       "max_ms": 0.478,
+       "max_ms": 0.183,
        "n": 5,
        "p50_ms": 0.079,
-       "p95_ms": 0.478
+       "p95_ms": 0.183
+      },
+      "warm_first128_extract": {
+       "max_ms": 0.048,
+       "n": 5,
+       "p50_ms": 0.019,
+       "p95_ms": 0.048
+      },
+      "warm_plan": {
+       "max_ms": 0.55,
+       "n": 5,
+       "p50_ms": 0.093,
+       "p95_ms": 0.55
       }
      },
      "three_tag_and": {
       "cold_10k_ms": null,
       "cold_first128_ms": null,
-      "cold_plan_ms": 0.386,
+      "cold_plan_ms": 0.389,
       "count": 0,
       "warm_10k": {
        "n": 0
@@ -932,46 +962,46 @@
        "n": 0
       },
       "warm_plan": {
-       "max_ms": 0.284,
+       "max_ms": 0.493,
        "n": 5,
-       "p50_ms": 0.201,
-       "p95_ms": 0.284
+       "p50_ms": 0.274,
+       "p95_ms": 0.493
       }
      },
      "three_tag_or": {
-      "cold_10k_ms": 11.682,
-      "cold_first128_ms": 0.117,
-      "cold_plan_ms": 0.514,
+      "cold_10k_ms": 13.888,
+      "cold_first128_ms": 0.137,
+      "cold_plan_ms": 0.505,
       "count": 20822,
       "warm_10k": {
-       "max_ms": 9.745,
+       "max_ms": 10.609,
        "n": 5,
-       "p50_ms": 1.35,
-       "p95_ms": 9.745
+       "p50_ms": 1.956,
+       "p95_ms": 10.609
       },
       "warm_first128_e2e": {
-       "max_ms": 0.299,
+       "max_ms": 0.337,
        "n": 5,
-       "p50_ms": 0.281,
-       "p95_ms": 0.299
+       "p50_ms": 0.291,
+       "p95_ms": 0.337
       },
       "warm_first128_extract": {
-       "max_ms": 0.06,
+       "max_ms": 0.08,
        "n": 5,
-       "p50_ms": 0.028,
-       "p95_ms": 0.06
+       "p50_ms": 0.034,
+       "p95_ms": 0.08
       },
       "warm_plan": {
-       "max_ms": 0.411,
+       "max_ms": 0.439,
        "n": 5,
-       "p50_ms": 0.313,
-       "p95_ms": 0.411
+       "p50_ms": 0.344,
+       "p95_ms": 0.439
       }
      },
      "two_source_2tag": {
       "cold_10k_ms": null,
       "cold_first128_ms": null,
-      "cold_plan_ms": 0.447,
+      "cold_plan_ms": 0.428,
       "count": 0,
       "warm_10k": {
        "n": 0
@@ -983,10 +1013,10 @@
        "n": 0
       },
       "warm_plan": {
-       "max_ms": 0.351,
+       "max_ms": 0.461,
        "n": 5,
-       "p50_ms": 0.215,
-       "p95_ms": 0.351
+       "p50_ms": 0.321,
+       "p95_ms": 0.461
       }
      }
     },
@@ -997,15 +1027,19 @@
     },
     "locations100k": {
      "rows": 100000,
-     "s": 0.008
+     "s": 0.007
+    },
+    "module": {
+     "mode": "worktree",
+     "module_path": "D:\\SakuraTool\\SakuraPool\\src\\sakurapool\\__init__.py"
     },
     "open_s": 0.001,
-    "peak_rss_bytes": 160522240,
+    "peak_rss_bytes": 160100352,
     "rid_count": 5000000,
-    "run_id": "802601867b19e64804332ae4efc36cac7799ae286c2c0515653c1586f6da061c",
+    "run_id": "3961f9b9edf264065bae387c36c4c74ef6c8e18831d26438beec55ce04b9aab5",
     "scale": "5M"
    }
   }
  }
 }
-EXIT=0
+exit=0

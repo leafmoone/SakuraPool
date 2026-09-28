@@ -1,90 +1,45 @@
-### pip check
-$ D:/SakuraTool/SakuraPool/.venv312w/Scripts/python.exe -m pip check
+# venv312w3 CLI verification — real entry points (python -m sakurapool / console script)
+# wheel from tree cef41a5; clean venv; repo OUTSIDE cwd; PYTHONPATH cleared; CRLF normalized to LF
 cwd: C:/Users/PC/AppData/Local/Temp/sp3-wheel-verify
-exit: 0
-stdout:
-No broken requirements found.
-stderr:
 
+$ cmd: env -u PYTHONPATH <py> -m sakurapool --version
+sakurapool 0.1.0
+exit=0
 
-### import path assertion (must be site-packages, never repo src)
-$ D:/SakuraTool/SakuraPool/.venv312w/Scripts/python.exe C:\Users\PC\AppData\Local\Temp\tmp1fr9z7zp.py
-cwd: C:/Users/PC/AppData/Local/Temp/sp3-wheel-verify
-exit: 0
-stdout:
-module file: D:\SakuraTool\SakuraPool\.venv312w\Lib\site-packages\sakurapool\__init__.py
-WHEEL_ASSERT_OK
-stderr:
+$ cmd: env -u PYTHONPATH <py> -c 'module path assert (site-packages, no repo src)'
+module: D:\SakuraTool\SakuraPool\.venv312w3\Lib\site-packages\sakurapool\__init__.py
+exit=0
 
+$ cmd: fixture build (synthetic_p2 from repo tests/) + python -m sakurapool runtime compile cli-p2 cli-rt
+fixture built
+exit=0
+{"dataset_count": 1, "object_count": 2, "path": "cli-rt\\snapshots\\f8e091a3ad7b87ac48979cfa522566f2d7f7ae8e192406eb722898ac10a3ad01", "rid_count": 2, "snapshot_id": "f8e091a3ad7b87ac48979cfa522566f2d7f7ae8e192406eb722898ac10a3ad01", "source_count": 1, "tag_count": 2, "tag_memberships": 3}
+exit=0
 
-### build small synthetic P2 fixture
-$ D:/SakuraTool/SakuraPool/.venv312w/Scripts/python.exe C:\Users\PC\AppData\Local\Temp\tmpn_odvluy.py
-cwd: C:/Users/PC/AppData/Local/Temp/sp3-wheel-verify
-exit: 0
-stdout:
-fixture ok
-stderr:
+$ cmd: python -m sakurapool runtime query cli-rt --namespace tags --all-tag hot --full
+{"count": 2, "rids": [0, 1], "snapshot_id": "f8e091a3ad7b87ac48979cfa522566f2d7f7ae8e192406eb722898ac10a3ad01", "truncated": false}
+exit=0
 
+$ cmd: python -m sakurapool runtime query cli-rt --snapshot cli-rt/snapshots/<id> --namespace tags --any-tag hot --any-tag cold
+{"count": 2, "rids": [0, 1], "snapshot_id": "f8e091a3ad7b87ac48979cfa522566f2d7f7ae8e192406eb722898ac10a3ad01", "truncated": false}
+exit=0
 
-### CLI compile
-$ D:/SakuraTool/SakuraPool/.venv312w/Scripts/python.exe -m sakurapool runtime compile C:/Users/PC/AppData/Local/Temp/sp3-wheel-verify/p2 --output C:/Users/PC/AppData/Local/Temp/sp3-wheel-verify/rt
-cwd: C:/Users/PC/AppData/Local/Temp/sp3-wheel-verify
-exit: 0
-stdout:
-{"dataset_count": 1, "object_count": 2, "path": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp3-wheel-verify\\rt\\snapshots\\0609801dd19310ecb5f529e4cd56a1d2f317ff5ae5577ab7274755c40ee8bc3c", "rid_count": 4, "snapshot_id": "0609801dd19310ecb5f529e4cd56a1d2f317ff5ae5577ab7274755c40ee8bc3c", "source_count": 1, "tag_count": 3, "tag_memberships": 5}
-stderr:
+$ cmd: python -m sakurapool runtime query cli-rt --limit 100 --spec <any_of JSON>
+{"count": 1, "rids": [0], "snapshot_id": "f8e091a3ad7b87ac48979cfa522566f2d7f7ae8e192406eb722898ac10a3ad01", "truncated": false}
+exit=0
 
+$ cmd: python -m sakurapool runtime verify cli-rt --full
+{"full": true, "snapshot_id": "f8e091a3ad7b87ac48979cfa522566f2d7f7ae8e192406eb722898ac10a3ad01", "verified": true}
+exit=0
 
-### CLI query --all-tag --full
-$ D:/SakuraTool/SakuraPool/.venv312w/Scripts/python.exe -m sakurapool runtime query C:/Users/PC/AppData/Local/Temp/sp3-wheel-verify/rt --namespace tags --all-tag alpha --full
-cwd: C:/Users/PC/AppData/Local/Temp/sp3-wheel-verify
-exit: 0
-stdout:
-{"count": 2, "rids": [0, 2], "snapshot_id": "0609801dd19310ecb5f529e4cd56a1d2f317ff5ae5577ab7274755c40ee8bc3c", "truncated": false}
-stderr:
+$ cmd: python -m sakurapool runtime inspect cli-rt
+{"path": "cli-rt\\snapshots\\f8e091a3ad7b87ac48979cfa522566f2d7f7ae8e192406eb722898ac10a3ad01", "rid_count": 2, "root": "cli-rt", "snapshot_id": "f8e091a3ad7b87ac48979cfa522566f2d7f7ae8e192406eb722898ac10a3ad01"}
+exit=0
 
+$ cmd: python -m sakurapool runtime lookup cli-rt --source src --post-id 1
+{"dataset_id": 0, "flags": 1, "format_id": 1, "image_offset": 0, "image_size": 32, "metadata_offset": 1000, "metadata_size": 64, "object_idx": 0, "post_id": "1", "record_id": "bc48132bfb5949faa46c44625b5825e0", "rid": 0, "source_id": 0}
+exit=0
 
-### CLI query --snapshot --any-tag
-$ D:/SakuraTool/SakuraPool/.venv312w/Scripts/python.exe -m sakurapool runtime query --snapshot C:/Users/PC/AppData/Local/Temp/sp3-wheel-verify/rt --namespace tags --any-tag alpha --any-tag gamma
-cwd: C:/Users/PC/AppData/Local/Temp/sp3-wheel-verify
-exit: 0
-stdout:
-{"count": 3, "rids": [0, 2, 3], "snapshot_id": "0609801dd19310ecb5f529e4cd56a1d2f317ff5ae5577ab7274755c40ee8bc3c", "truncated": false}
-stderr:
-
-
-### CLI query --spec (any_of JSON)
-$ D:/SakuraTool/SakuraPool/.venv312w/Scripts/python.exe -m sakurapool runtime query C:/Users/PC/AppData/Local/Temp/sp3-wheel-verify/rt --spec C:/Users/PC/AppData/Local/Temp/sp3-wheel-verify/spec.json
-cwd: C:/Users/PC/AppData/Local/Temp/sp3-wheel-verify
-exit: 0
-stdout:
-{"count": 3, "rids": [0, 2, 3], "snapshot_id": "0609801dd19310ecb5f529e4cd56a1d2f317ff5ae5577ab7274755c40ee8bc3c", "truncated": false}
-stderr:
-
-
-### CLI verify --full
-$ D:/SakuraTool/SakuraPool/.venv312w/Scripts/python.exe -m sakurapool runtime verify C:/Users/PC/AppData/Local/Temp/sp3-wheel-verify/rt --full
-cwd: C:/Users/PC/AppData/Local/Temp/sp3-wheel-verify
-exit: 0
-stdout:
-{"full": true, "snapshot_id": "0609801dd19310ecb5f529e4cd56a1d2f317ff5ae5577ab7274755c40ee8bc3c", "verified": true}
-stderr:
-
-
-### CLI inspect
-$ D:/SakuraTool/SakuraPool/.venv312w/Scripts/python.exe -m sakurapool runtime inspect C:/Users/PC/AppData/Local/Temp/sp3-wheel-verify/rt
-cwd: C:/Users/PC/AppData/Local/Temp/sp3-wheel-verify
-exit: 0
-stdout:
-{"path": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp3-wheel-verify\\rt\\snapshots\\0609801dd19310ecb5f529e4cd56a1d2f317ff5ae5577ab7274755c40ee8bc3c", "rid_count": 4, "root": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp3-wheel-verify\\rt", "snapshot_id": "0609801dd19310ecb5f529e4cd56a1d2f317ff5ae5577ab7274755c40ee8bc3c"}
-stderr:
-
-
-### CLI lookup
-$ D:/SakuraTool/SakuraPool/.venv312w/Scripts/python.exe -m sakurapool runtime lookup C:/Users/PC/AppData/Local/Temp/sp3-wheel-verify/rt --source src --post-id 2
-cwd: C:/Users/PC/AppData/Local/Temp/sp3-wheel-verify
-exit: 0
-stdout:
-{"dataset_id": 0, "flags": 1, "format_id": 1, "image_offset": 0, "image_size": 32, "metadata_offset": 1000, "metadata_size": 64, "object_idx": 0, "post_id": "2", "record_id": "687c7160ade0dd216ec7d2c9346062e0", "rid": 1, "source_id": 0}
-stderr:
-
+$ cmd: console script sakurapool.exe runtime inspect cli-rt
+{"path": "cli-rt\\snapshots\\f8e091a3ad7b87ac48979cfa522566f2d7f7ae8e192406eb722898ac10a3ad01", "rid_count": 2, "root": "cli-rt", "snapshot_id": "f8e091a3ad7b87ac48979cfa522566f2d7f7ae8e192406eb722898ac10a3ad01"}
+exit=0

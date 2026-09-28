@@ -1,0 +1,49 @@
+$ cmd: git log --oneline 6c45548e..HEAD
+cef41a5 fix(runtime): load_p2_inventory must not iterate a bare str as characters
+912d7fb chore: untrack pre-existing root working files committed in error
+d15adcb fix(runtime): type/link audit, immutable publish, explicit bench import modes
+24a00da docs(p3): rebuild P3 report for reviewer round 2 (ownership protocol, wheel auth, env-bound benchmarks)
+7c2f220 feat(p3): record full env and run fingerprint in the benchmark artifact
+27799c5 fix(p3): ownership protocol for staging/publish, planner cardinality for source/dataset, real-Roaring eviction, env-bound bench fingerprint
+addaa7c docs(p3): commit P3 remediation report and evidence (A-J acceptance, pinned 3.12, final-tree benchmarks)
+9e62fd6 fix(p3): correct open_s/locations100k measurement, refresh P3 docs to final tree
+9d05e02 fix(p3): benchmark measurement integrity (item I) + 32 MiB eviction evidence (item D)
+27939cb fix(p3): reviewer A-H remediation (identity binding, fail-closed reuse, streaming hash, query API, P2-contract fixtures)
+ea65bf2 feat(runtime): add P3 benchmark tool and document the runtime
+6ee1841 test(runtime): add EXPLAIN index proof and random differential
+d1852ea test(runtime): add synthetic P2 generator and determinism/crash coverage
+8aaa299 feat(runtime): add P3 compiler, snapshot, query and CLI
+9d85c4b feat(runtime): add P3 v1 base and strict P2 inventory
+exit=0
+
+$ cmd: git diff --stat 6c45548e..HEAD
+ .gitignore                            |    3 +
+ README.md                             |  100 ++-
+ pyproject.toml                        |    2 +-
+ reports/P3/benchmark.json             |    1 +
+ reports/P3/evidence-manifest.json     |   59 ++
+ reports/P3/evidence.json              |  120 ++++
+ reports/P3/hashes.sha256              |   11 +
+ reports/P3/query-benchmark.json       |  928 +++++++++++++++++++++++++++
+ reports/P3/raw/bench-final.log        | 1011 ++++++++++++++++++++++++++++++
+ reports/P3/raw/pinned-env.txt         |    7 +
+ reports/P3/raw/ruff.log               |    2 +
+ reports/P3/raw/venv312-cli-verify.log |   90 +++
+ reports/P3/report.md                  |  148 +++++
+ reports/P3/tests-host-3.14.log        |    5 +
+ reports/P3/tests-wheel-3.12.log       |    5 +
+ src/sakurapool/cli.py                 |  202 +++++-
+ src/sakurapool/runtime/__init__.py    |   54 ++
+ src/sakurapool/runtime/compiler.py    | 1104 +++++++++++++++++++++++++++++++++
+ src/sakurapool/runtime/errors.py      |   29 +
+ src/sakurapool/runtime/identity.py    |   40 ++
+ src/sakurapool/runtime/inventory.py   |  258 ++++++++
+ src/sakurapool/runtime/query.py       |  280 +++++++++
+ src/sakurapool/runtime/snapshot.py    |  357 +++++++++++
+ tests/synthetic_p2.py                 |  240 +++++++
+ tests/test_runtime.py                 |  774 +++++++++++++++++++++++
+ tests/test_runtime_differential.py    |  233 +++++++
+ tests/test_runtime_remediation.py     | 1042 +++++++++++++++++++++++++++++++
+ tools/bench_runtime.py                |  789 +++++++++++++++++++++++
+ 28 files changed, 7889 insertions(+), 5 deletions(-)
+exit=0

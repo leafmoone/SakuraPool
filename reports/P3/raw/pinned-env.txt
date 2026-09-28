@@ -1,7 +1,27 @@
+pinned env (host + venvs) at tree cef41a5
+--- host
+Python 3.14.5
+numpy                  2.4.6
+pyarrow                25.0.1
+pyroaring              1.1.0
+pytest                 9.0.3
+pytest-asyncio         1.4.0
+ruff                   0.16.1
+setuptools             75.6.0
+--- .venv312w (worktree bench)
 Python 3.12.13
-No broken requirements found.
-numpy==2.2.6
-pip==26.2.1
-pyarrow==18.1.0
-pyroaring==1.1.0
-sakurapool==0.1.0
+numpy      2.2.6
+pyarrow    18.1.0
+pyroaring  1.1.0
+pytest     9.1.1
+--- .venv312w3 (wheel)
+Python 3.12.13
+numpy      2.2.6
+pyarrow    18.1.0
+pyroaring  1.1.0
+pytest     9.1.1
+sakurapool 0.1.0
+--- .venv310s / .venv313s
+Python 3.10.21
+Python 3.13.13
+exit=0
