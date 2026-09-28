@@ -756,3 +756,19 @@ def test_assign_rids_checks_capacity_before_sorting():
 
     with pytest.raises(ValueError, match="uint32"):
         assign_rids(SmallRows())
+
+
+def test_load_p2_inventory_accepts_str_and_mixed_paths(tmp_path):
+    """A bare str must be treated as ONE path, never iterated per
+    character (regression: list(roots) on a str produced ['c','l','i'...])."""
+    tars_a = {"a.tar": {"1.jpg": b"a", "1.json": meta(["t"])}}
+    tars_b = {"b.tar": {"2.jpg": b"b", "2.json": meta(["t"])}}
+    index_a = build_p2_index(tmp_path, "strinv-a", tars_a)
+    index_b = build_p2_index(tmp_path, "strinv-b", tars_b)
+    inv_str = load_p2_inventory(str(index_a))
+    inv_path = load_p2_inventory(index_a)
+    assert inv_str.source_fingerprint == inv_path.source_fingerprint
+    inv_mixed = load_p2_inventory([str(index_a), index_b])
+    inv_paths = load_p2_inventory([index_a, index_b])
+    assert inv_mixed.source_fingerprint == inv_paths.source_fingerprint
+    assert len(inv_mixed.objects) == len(inv_paths.objects) == 2

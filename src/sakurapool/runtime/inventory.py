@@ -227,9 +227,15 @@ def _load_directory(root: Path, dataset: str) -> tuple[dict[str, Any], list[P2Ob
     return contract, objects
 
 
-def load_p2_inventory(roots: Path | list[Path] | tuple[Path, ...]) -> P2Inventory:
+def load_p2_inventory(
+        roots: Path | str | list[Path | str]
+        | tuple[Path | str, ...]) -> P2Inventory:
     """Validate one or more P2 directories without glob-trusting Parquet files."""
-    roots = [roots] if isinstance(roots, Path) else list(roots)
+    # str and Path are both accepted; a bare str must NOT be iterated
+    # character by character (the old list(roots) did exactly that)
+    if isinstance(roots, (str, Path)):
+        roots = [roots]
+    roots = [Path(r) for r in roots]
     if not roots:
         _fail("at least one P2 index directory is required")
     all_objects: list[P2Object] = []

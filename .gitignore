@@ -6,3 +6,5 @@ dist/
 build/
 .venv/
 /MEMORY.md
+.bench-cache*/
+.bench-inst/
