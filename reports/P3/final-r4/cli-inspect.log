@@ -1,0 +1,3 @@
+{"commit": "92dc235048634f6e6404133645bbfa9a7172a5cc", "command": ["D:\\SakuraTool\\SakuraPool\\.venv312finalr4\\Scripts\\python.exe", "-m", "sakurapool", "runtime", "inspect", "rt"], "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-final-r4-epfdqqc6", "PYTHONPATH": null}
+{"path": "rt\\snapshots\\cdb4401ae64ab4409b096d1fda3bc811b289c856714d6d3781e408c356402af0", "rid_count": 1, "root": "rt", "snapshot_id": "cdb4401ae64ab4409b096d1fda3bc811b289c856714d6d3781e408c356402af0"}
+exit=0

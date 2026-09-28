@@ -1,0 +1,502 @@
+{
+  "code_commit": "92dc235048634f6e6404133645bbfa9a7172a5cc",
+  "commands": [
+    {
+      "label": "build",
+      "command": [
+        "uv",
+        "build",
+        "--wheel",
+        "--out-dir",
+        "D:\\SakuraTool\\SakuraPool\\build\\final-r4-wheel"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/final-r4/build.log",
+      "bytes": 5330,
+      "sha256": "3c407e445794906b7370671429c0e050b413964a07b5539cc592603606564112"
+    },
+    {
+      "label": "venv",
+      "command": [
+        "uv",
+        "venv",
+        "D:\\SakuraTool\\SakuraPool\\.venv312finalr4",
+        "--python",
+        "3.12"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/final-r4/venv.log",
+      "bytes": 332,
+      "sha256": "d18d876e3017a59cb7c7fbd09e21069d7b7f4d097bfd9ba7036ad347b8536283"
+    },
+    {
+      "label": "install",
+      "command": [
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        "D:\\SakuraTool\\SakuraPool\\.venv312finalr4\\Scripts\\python.exe",
+        "D:\\SakuraTool\\SakuraPool\\build\\final-r4-wheel\\sakurapool-0.1.0-py3-none-any.whl",
+        "pytest==8.3.4",
+        "pip"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/final-r4/install.log",
+      "bytes": 1093,
+      "sha256": "259db45759d8985450e59d6546c04eca87e8da0b1d917bf6f733663c8356a38b"
+    },
+    {
+      "label": "pip-check",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv312finalr4\\Scripts\\python.exe",
+        "-m",
+        "pip",
+        "check"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/final-r4/pip-check.log",
+      "bytes": 252,
+      "sha256": "a9fb7fd172a659f63d61a5170a45b30c3b4487dfef9a34935d941d09d545530e"
+    },
+    {
+      "label": "installed-source-hashes",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv312finalr4\\Scripts\\python.exe",
+        "-c",
+        "import pathlib,subprocess,zipfile,hashlib,sakurapool,json\nroot=pathlib.Path(sakurapool.__file__).parent\nassert 'site-packages' in str(root),root\nz=zipfile.ZipFile('D:\\\\SakuraTool\\\\SakuraPool\\\\build\\\\final-r4-wheel\\\\sakurapool-0.1.0-py3-none-any.whl')\nrows=[]\nfor name in z.namelist():\n if not name.endswith('.py'): continue\n blob=subprocess.check_output(['git','show','92dc235048634f6e6404133645bbfa9a7172a5cc'+':src/'+name])\n data=z.read(name)\n assert blob.replace(b'\\r\\n',b'\\n')==data.replace(b'\\r\\n',b'\\n'),name\n assert data==(root.parent/name).read_bytes(),name\n rows.append({'path':name,'installed_sha256':hashlib.sha256(data).hexdigest(),'git_blob_sha256':hashlib.sha256(blob).hexdigest()})\nprint(json.dumps({'module':str(root),'wheel_sha256':hashlib.sha256(pathlib.Path(z.filename).read_bytes()).hexdigest(),'files':rows},indent=2))\n"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/final-r4/installed-source-hashes.log",
+      "bytes": 5378,
+      "sha256": "47008a97999903c24c8ada891ca29599a225d4b87571b999212c32c21d784663"
+    },
+    {
+      "label": "wheel-tests",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv312finalr4\\Scripts\\python.exe",
+        "-m",
+        "pytest",
+        "tests",
+        "-q",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/final-r4/wheel-tests.log",
+      "bytes": 540,
+      "sha256": "60386773d9b408a352ddebf632dcc9d86a16f17e3490ed84c85e58ec7dbee5ac"
+    },
+    {
+      "label": "host-tests",
+      "command": [
+        "C:\\Users\\PC\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+        "-m",
+        "pytest",
+        "tests",
+        "-q",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/final-r4/host-tests.log",
+      "bytes": 563,
+      "sha256": "4d39f46a082596f4c52006849ab96a3ffe7320c8318d277e7cbf3846f7abe0d5"
+    },
+    {
+      "label": "ruff",
+      "command": [
+        "C:\\Users\\PC\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+        "-m",
+        "ruff",
+        "check",
+        "."
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/final-r4/ruff.log",
+      "bytes": 252,
+      "sha256": "df42abb3bdefe492df6c595bbfe751464f156a3d8f13b57b5f123f85dd4b498c"
+    },
+    {
+      "label": "diff-check",
+      "command": [
+        "git",
+        "diff",
+        "--check",
+        "6c45548e..HEAD"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/final-r4/diff-check.log",
+      "bytes": 177,
+      "sha256": "acdb2ae7c9225f914482438fbfdecb5a62c51753ec1455225fec5843df62d203"
+    },
+    {
+      "label": "history",
+      "command": [
+        "git",
+        "log",
+        "--reverse",
+        "--format=%H %s",
+        "6c45548e..HEAD"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/final-r4/history.log",
+      "bytes": 2375,
+      "sha256": "45b7e2951947d33a4436efdf21d5345c21672eec3c275885cfff144fdee0d15e"
+    },
+    {
+      "label": "diff-stat",
+      "command": [
+        "git",
+        "diff",
+        "--stat",
+        "6c45548e..HEAD"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/final-r4/diff-stat.log",
+      "bytes": 2157,
+      "sha256": "4d8407a0672820a68a308a922b30d0f7712d663875274b8e027cd0ac79179db4"
+    },
+    {
+      "label": "bench-worktree",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv312finalr4\\Scripts\\python.exe",
+        "D:\\SakuraTool\\SakuraPool\\tools\\bench_runtime.py",
+        "--workdir",
+        "D:\\SakuraTool\\SakuraPool\\.bench-cache-final-r4"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/final-r4/bench-worktree.log",
+      "bytes": 22749,
+      "sha256": "1717fdd5b2e60fa54ab52c08aa282f05cbc2c16dea01a18a43e8edb7cbfe7acb"
+    },
+    {
+      "label": "bench-installed",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv312finalr4\\Scripts\\python.exe",
+        "D:\\SakuraTool\\SakuraPool\\tools\\bench_runtime.py",
+        "--workdir",
+        "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-final-r4-epfdqqc6\\bench",
+        "--scale",
+        "100k"
+      ],
+      "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-final-r4-epfdqqc6",
+      "exit": 0,
+      "log": "reports/P3/final-r4/bench-installed.log",
+      "bytes": 8488,
+      "sha256": "b5b4fa273316b3003b74e401495be2ffac3a5f77e80da8cb98ff64f8980d32a1"
+    },
+    {
+      "label": "cli-fixture",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv312finalr4\\Scripts\\python.exe",
+        "-c",
+        "import sys\nfrom pathlib import Path\nsys.path.insert(0,'D:\\\\SakuraTool\\\\SakuraPool\\\\tests')\nfrom synthetic_p2 import ObjectSpec,SampleSpec,build_p2_directory\nbuild_p2_directory(Path('p2'),dataset='ds',source='src',objects=[ObjectSpec('a.tar',[SampleSpec('1.jpg','1',[('t',None)])])])\n"
+      ],
+      "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-final-r4-epfdqqc6",
+      "exit": 0,
+      "log": "reports/P3/final-r4/cli-fixture.log",
+      "bytes": 536,
+      "sha256": "f564d3c695018d1b5fb9aed5a57d7eaa0bf510fad5c85cf12f831f7ad7839095"
+    },
+    {
+      "label": "cli-compile",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv312finalr4\\Scripts\\python.exe",
+        "-m",
+        "sakurapool",
+        "runtime",
+        "compile",
+        "p2",
+        "rt"
+      ],
+      "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-final-r4-epfdqqc6",
+      "exit": 0,
+      "log": "reports/P3/final-r4/cli-compile.log",
+      "bytes": 572,
+      "sha256": "6b79c0f3c6d10551fe689096b95c075841c95cfa775730e933c1019a4ae6122f"
+    },
+    {
+      "label": "cli-verify",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv312finalr4\\Scripts\\python.exe",
+        "-m",
+        "sakurapool",
+        "runtime",
+        "verify",
+        "rt",
+        "--full"
+      ],
+      "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-final-r4-epfdqqc6",
+      "exit": 0,
+      "log": "reports/P3/final-r4/cli-verify.log",
+      "bytes": 404,
+      "sha256": "df3d080943bafb65a61012d19c9e93706782091532cbd47c81c6a21362840721"
+    },
+    {
+      "label": "cli-query",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv312finalr4\\Scripts\\python.exe",
+        "-m",
+        "sakurapool",
+        "runtime",
+        "query",
+        "rt",
+        "--namespace",
+        "tags",
+        "--all-tag",
+        "t",
+        "--full"
+      ],
+      "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-final-r4-epfdqqc6",
+      "exit": 0,
+      "log": "reports/P3/final-r4/cli-query.log",
+      "bytes": 457,
+      "sha256": "6ff7e99e8069933ea9d5521597861fca0b5536b197b95405797c8424704e38df"
+    },
+    {
+      "label": "cli-inspect",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv312finalr4\\Scripts\\python.exe",
+        "-m",
+        "sakurapool",
+        "runtime",
+        "inspect",
+        "rt"
+      ],
+      "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-final-r4-epfdqqc6",
+      "exit": 0,
+      "log": "reports/P3/final-r4/cli-inspect.log",
+      "bytes": 484,
+      "sha256": "2a157b458df1e29714bdabb1270fa8e32abb854659eb12ea866f55bfa7123e8c"
+    },
+    {
+      "label": "cli-lookup",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv312finalr4\\Scripts\\python.exe",
+        "-m",
+        "sakurapool",
+        "runtime",
+        "lookup",
+        "rt",
+        "--source",
+        "src",
+        "--post-id",
+        "1"
+      ],
+      "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-final-r4-epfdqqc6",
+      "exit": 0,
+      "log": "reports/P3/final-r4/cli-lookup.log",
+      "bytes": 552,
+      "sha256": "01a67cce7ead19f33b16914229af6c02bd69dae3838262e8a5ab14a007492594"
+    },
+    {
+      "label": "install-3.10",
+      "command": [
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        "D:\\SakuraTool\\SakuraPool\\.venv310s\\Scripts\\python.exe",
+        "--reinstall",
+        "D:\\SakuraTool\\SakuraPool\\build\\final-r4-wheel\\sakurapool-0.1.0-py3-none-any.whl"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/final-r4/install-3.10.log",
+      "bytes": 1095,
+      "sha256": "d39288b9b9e339b98b95b013708ebbee38fba23ea2e29f484ec2313bb262e9c9"
+    },
+    {
+      "label": "pip-check-3.10",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv310s\\Scripts\\python.exe",
+        "-m",
+        "pip",
+        "check"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/final-r4/pip-check-3.10.log",
+      "bytes": 246,
+      "sha256": "844af6ef7bcfc089b9e52bc470877fdfa891d91e4e25d9f8a59aba77061028e9"
+    },
+    {
+      "label": "module-3.10",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv310s\\Scripts\\python.exe",
+        "-c",
+        "import sakurapool; assert 'site-packages' in sakurapool.__file__; print(sakurapool.__file__)"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/final-r4/module-3.10.log",
+      "bytes": 372,
+      "sha256": "ed98441579147e59d47f88fad651daaf53493b2984a8a7dd6fbb6abfeaa83ae4"
+    },
+    {
+      "label": "verify-3.10",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv310s\\Scripts\\python.exe",
+        "-m",
+        "sakurapool",
+        "runtime",
+        "verify",
+        "rt",
+        "--full"
+      ],
+      "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-final-r4-epfdqqc6",
+      "exit": 0,
+      "log": "reports/P3/final-r4/verify-3.10.log",
+      "bytes": 398,
+      "sha256": "082031395a2495979e980f455892027b9f0b58468b4932e20963eb0e45dc862b"
+    },
+    {
+      "label": "compile-3.10",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv310s\\Scripts\\python.exe",
+        "-m",
+        "sakurapool",
+        "runtime",
+        "compile",
+        "p2",
+        "rt-3.10"
+      ],
+      "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-final-r4-epfdqqc6",
+      "exit": 0,
+      "log": "reports/P3/final-r4/compile-3.10.log",
+      "bytes": 576,
+      "sha256": "86c0e81bbb1b85373b717d864e1ee6d19a6cdc7fa5b3fb0d7c3ab0fa51e40a57"
+    },
+    {
+      "label": "query-3.10",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv310s\\Scripts\\python.exe",
+        "-m",
+        "sakurapool",
+        "runtime",
+        "query",
+        "rt-3.10",
+        "--namespace",
+        "tags",
+        "--all-tag",
+        "t"
+      ],
+      "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-final-r4-epfdqqc6",
+      "exit": 0,
+      "log": "reports/P3/final-r4/query-3.10.log",
+      "bytes": 446,
+      "sha256": "faa4c9a1969b907519344730d94a134bb6d5c47078789a2c85f0340abc81cb2d"
+    },
+    {
+      "label": "install-3.13",
+      "command": [
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        "D:\\SakuraTool\\SakuraPool\\.venv313s\\Scripts\\python.exe",
+        "--reinstall",
+        "D:\\SakuraTool\\SakuraPool\\build\\final-r4-wheel\\sakurapool-0.1.0-py3-none-any.whl"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/final-r4/install-3.13.log",
+      "bytes": 1095,
+      "sha256": "27b264cf3af6e31194e827a1b229f35f356f0176620b86c039132789179db4d8"
+    },
+    {
+      "label": "pip-check-3.13",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv313s\\Scripts\\python.exe",
+        "-m",
+        "pip",
+        "check"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/final-r4/pip-check-3.13.log",
+      "bytes": 246,
+      "sha256": "728190062cce2c02ad7fd656073ba19515241beb11f4a6464bcbcc43f0cb8465"
+    },
+    {
+      "label": "module-3.13",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv313s\\Scripts\\python.exe",
+        "-c",
+        "import sakurapool; assert 'site-packages' in sakurapool.__file__; print(sakurapool.__file__)"
+      ],
+      "cwd": "D:\\SakuraTool\\SakuraPool",
+      "exit": 0,
+      "log": "reports/P3/final-r4/module-3.13.log",
+      "bytes": 372,
+      "sha256": "51d074c39e83aba52adba27a8b1e042af7f08f046bd3d6e47c826eeb942fda17"
+    },
+    {
+      "label": "verify-3.13",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv313s\\Scripts\\python.exe",
+        "-m",
+        "sakurapool",
+        "runtime",
+        "verify",
+        "rt",
+        "--full"
+      ],
+      "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-final-r4-epfdqqc6",
+      "exit": 0,
+      "log": "reports/P3/final-r4/verify-3.13.log",
+      "bytes": 398,
+      "sha256": "046a60013216e9637e8a34fcd8aea8cd5246475cf6ef8ae3c2609887ae350111"
+    },
+    {
+      "label": "compile-3.13",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv313s\\Scripts\\python.exe",
+        "-m",
+        "sakurapool",
+        "runtime",
+        "compile",
+        "p2",
+        "rt-3.13"
+      ],
+      "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-final-r4-epfdqqc6",
+      "exit": 0,
+      "log": "reports/P3/final-r4/compile-3.13.log",
+      "bytes": 576,
+      "sha256": "967852b2a19f9131c1e332ddbf1a73388a6f1cb67f610c35e566122c1246f5df"
+    },
+    {
+      "label": "query-3.13",
+      "command": [
+        "D:\\SakuraTool\\SakuraPool\\.venv313s\\Scripts\\python.exe",
+        "-m",
+        "sakurapool",
+        "runtime",
+        "query",
+        "rt-3.13",
+        "--namespace",
+        "tags",
+        "--all-tag",
+        "t"
+      ],
+      "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-final-r4-epfdqqc6",
+      "exit": 0,
+      "log": "reports/P3/final-r4/query-3.13.log",
+      "bytes": 446,
+      "sha256": "64a3a215d746008e8cf01d9d12c9d5c07ffadca5ab3be50d826935edcae4f58a"
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+{"commit": "92dc235048634f6e6404133645bbfa9a7172a5cc", "command": ["git", "diff", "--stat", "6c45548e..HEAD"], "cwd": "D:\\SakuraTool\\SakuraPool", "PYTHONPATH": null}
+ .gitignore                              |    3 +
+ README.md                               |  100 ++-
+ pyproject.toml                          |    2 +-
+ reports/P3/benchmark.json               | 1025 +++++++++++++++++++++++++
+ reports/P3/evidence-manifest.json       |  104 +++
+ reports/P3/evidence.json                |  167 +++++
+ reports/P3/hashes.sha256                |   16 +
+ reports/P3/query-benchmark.json         |  911 ++++++++++++++++++++++
+ reports/P3/raw/base-diff.log            |   49 ++
+ reports/P3/raw/bench-final.log          | 1045 ++++++++++++++++++++++++++
+ reports/P3/raw/bench-installed-100k.log |  371 +++++++++
+ reports/P3/raw/pinned-env.txt           |   27 +
+ reports/P3/raw/py-smoke-310-313.log     |   27 +
+ reports/P3/raw/ruff.log                 |    3 +
+ reports/P3/raw/venv312-cli-verify.log   |   45 ++
+ reports/P3/raw/wheel-build.log          |   91 +++
+ reports/P3/raw/wheel-install.log        |   28 +
+ reports/P3/report.md                    |  101 +++
+ reports/P3/tests-host-3.14.log          |    6 +
+ reports/P3/tests-wheel-3.12.log         |    6 +
+ src/sakurapool/cli.py                   |  202 ++++-
+ src/sakurapool/runtime/__init__.py      |   54 ++
+ src/sakurapool/runtime/compiler.py      | 1220 ++++++++++++++++++++++++++++++
+ src/sakurapool/runtime/errors.py        |   29 +
+ src/sakurapool/runtime/identity.py      |   40 +
+ src/sakurapool/runtime/inventory.py     |  258 +++++++
+ src/sakurapool/runtime/query.py         |  280 +++++++
+ src/sakurapool/runtime/snapshot.py      |  385 ++++++++++
+ tests/synthetic_p2.py                   |  240 ++++++
+ tests/test_publish_resume_safety.py     |  110 +++
+ tests/test_runtime.py                   |  827 ++++++++++++++++++++
+ tests/test_runtime_differential.py      |  233 ++++++
+ tests/test_runtime_remediation.py       | 1247 +++++++++++++++++++++++++++++++
+ tools/bench_runtime.py                  |  789 +++++++++++++++++++
+ 34 files changed, 10036 insertions(+), 5 deletions(-)
+exit=0
