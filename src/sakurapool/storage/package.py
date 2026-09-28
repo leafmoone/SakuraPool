@@ -16,6 +16,13 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+from .. import __version__ as _CODE_VERSION
+from .. import indexer
+from ..runtime.compiler import HAS_METADATA
+from ..runtime.inventory import load_p2_inventory
 from ..runtime.snapshot import RuntimeSnapshot
 from .budget import DEFAULT_WORK_ROOT, BudgetExceeded, BudgetLedger, Reservation
 from .retrieval import AuditedSample, Extent, fetch_bound_sample
@@ -25,6 +32,10 @@ _SHA = re.compile(r"[0-9a-f]{64}\Z")
 _RECORD = re.compile(r"[0-9a-f]{32}\Z")
 _REPO = "leafmoone/game_cg_5M"
 _MAX_MANIFEST = 64 * (1 << 20)
+_MAX_CANARY_JSON = 1 << 20
+_BINDING_MODE = "strong_etag_if_match"
+_SCAN_CONFIG = "audit/scan-config.json"
+_SCAN_EVIDENCE = "audit/members.json"
 
 
 class PackageCorrupt(ValueError):
@@ -49,6 +60,44 @@ def _file(root: Path, relative: str) -> Path:
     if not stat.S_ISREG(path.stat(follow_symlinks=False).st_mode):
         raise PackageCorrupt("package entry must be a regular file")
     return path
+
+
+def _bounded_json(path: Path, limit: int) -> object:
+    """Bound JSON allocations on package inputs without changing P2/P3 readers."""
+    with path.open("rb") as stream:
+        before = stream.seek(0, 2)
+        if before > limit:
+            raise PackageCorrupt("package JSON exceeds canary verification limit")
+        stream.seek(0)
+        raw = stream.read(limit + 1)
+        after = stream.seek(0, 2)
+    if len(raw) != before or before != after or len(raw) > limit:
+        raise PackageCorrupt("package JSON changed or exceeds canary limit")
+    try:
+        return json.loads(raw)
+    except (ValueError, UnicodeError):
+        raise PackageCorrupt("invalid package JSON") from None
+
+
+def _preflight_durable_json(root: Path) -> None:
+    """Limit all P2 JSON reads on a trusted, static canary package.
+
+    P2's existing loader reads both INPUT and extensionless COMMIT markers
+    wholly; it has no size option. Run this check immediately before *each*
+    package-owned loader call. This is not a concurrent-writer guarantee.
+    """
+    directory = root / "durable"
+    if (not directory.is_dir() or directory.is_symlink()
+            or (hasattr(directory, "is_junction") and directory.is_junction())):
+        raise PackageCorrupt("missing or unsafe durable directory")
+    input_file = _file(root, "durable/INPUT.json")
+    if input_file.stat().st_size > _MAX_CANARY_JSON:
+        raise PackageCorrupt("durable INPUT exceeds bounded canary JSON size")
+    for entry in directory.iterdir():
+        if entry.name.endswith(".COMMIT"):
+            marker = _file(root, "durable/" + entry.name)
+            if marker.stat().st_size > _MAX_CANARY_JSON:
+                raise PackageCorrupt("durable COMMIT exceeds bounded canary JSON size")
 
 
 def _hash(path: Path) -> str:
@@ -81,6 +130,7 @@ class PackageManifest:
     data_revision: str
     endpoint: str
     runtime: str
+    durable: str
     bindings: dict[tuple[str, str, str], Binding]
     audit: dict[str, dict]
 
@@ -115,8 +165,14 @@ class PackageManifest:
         if not isinstance(audit, dict) or audit.get("identity") != list(identity):
             raise PackageCorrupt("missing or mismatched scan audit record")
         try:
+            if (set(audit) != {"identity", "image_path", "json_path",
+                               "image", "json", "suffix"}
+                    or not isinstance(audit["image_path"], str)
+                    or not audit["image_path"]
+                    or (audit["json_path"] is None) != (audit["json"] is None)):
+                raise ValueError("member path/presence mismatch")
             image = Extent(**audit["image"])
-            meta = Extent(**audit["json"]) if audit.get("json") is not None else None
+            meta = Extent(**audit["json"]) if audit["json"] is not None else None
             sample = AuditedSample(record_id, image, meta, audit["suffix"])
             sample.validate(binding.size)
         except (KeyError, TypeError, ValueError):
@@ -124,12 +180,162 @@ class PackageManifest:
         if (image.offset, image.size) != (location["image_offset"],
                                           location["image_size"]):
             raise PackageCorrupt("image extent differs from runtime snapshot")
+        present = bool(location["flags"] & HAS_METADATA)
+        if present != (meta is not None):
+            raise PackageCorrupt("runtime metadata presence differs from member audit")
         if meta is not None and (meta.offset, meta.size) != (
                 location["metadata_offset"], location["metadata_size"]):
             raise PackageCorrupt("metadata extent differs from runtime snapshot")
-        if meta is None and location["metadata_size"] != 0:
-            raise PackageCorrupt("runtime metadata lacks an audit hash")
         return binding, sample
+
+
+def _index_config(contract: dict, endpoint: str, revision: str) -> dict:
+    """Canonical evidence of the *actual P2 index INPUT*, not provider proof."""
+    return {"kind": "p4-index-input-config-v1",
+            "producer": "sakurapool-p4-remote-stream",
+            "adapter": contract["adapter"], "hash_images": contract["hash_images"],
+            "inputs": contract["inputs"], "endpoint": endpoint,
+            "data_revision": revision, "binding_mode": _BINDING_MODE}
+
+
+def _validate_package_chain(root: Path, manifest: dict, names: set[str],
+                            bindings: dict[tuple[str, str, str], Binding],
+                            audit: dict) -> None:
+    """Recheck durable-v4, runtime source and each bounded canary audit row.
+
+    Parquet row batches are consumed one by one, never a whole sample table.
+    This is an O(package files + sample rows) package open, not O(1).
+    """
+    try:
+        _preflight_durable_json(root)
+        inventory = load_p2_inventory(root / manifest["durable"])
+        objects = {(obj.dataset_id, obj.object_id): obj for obj in inventory.objects}
+        expected = {(key[0], key[2]) for key in bindings}
+        if len(objects) != len(bindings) or set(objects) != expected:
+            raise PackageCorrupt("durable objects differ from exact package bindings")
+        config_path = _file(root, manifest["scan_config"])
+        if (_hash(config_path) != manifest["scan_config_sha256"]
+                or config_path.stat().st_size > _MAX_MANIFEST):
+            raise PackageCorrupt("index input configuration fingerprint mismatch")
+        if _bounded_json(config_path, _MAX_CANARY_JSON) != _index_config(
+                inventory.contract, manifest["endpoint"], manifest["data_revision"]):
+            raise PackageCorrupt("index input configuration differs from durable INPUT")
+        if (inventory.contract["hash_images"] is not True
+                or inventory.contract["adapter"].get("storage_id")
+                != next(iter(bindings.values())).storage_id):
+            raise PackageCorrupt("durable adapter is not the remote staged source")
+        declared = {"durable/INPUT.json"}
+        for (dataset, object_id), obj in objects.items():
+            binding = next(value for (ds, _store, oid), value in bindings.items()
+                           if (ds, oid) == (dataset, object_id))
+            validator = obj.input
+            if (validator.get("sha256"), validator.get("size"),
+                    validator.get("mtime_ns")) != (
+                    binding.content_sha256, binding.size, 0):
+                raise PackageCorrupt("durable object does not match content binding")
+            for fragment in obj.fragments:
+                declared.add("durable/" + fragment.path.name)
+            shard = hashlib.sha256(indexer._json([dataset, binding.path])).hexdigest()
+            declared.add("durable/" + shard + ".COMMIT")
+        if {name for name in names if name.startswith("durable/")} != declared:
+            raise PackageCorrupt("durable inventory differs from committed v4 files")
+        with RuntimeSnapshot.open(root / manifest["runtime"], full_verify=True) as snapshot:
+            if (snapshot.snapshot_id != manifest["snapshot_id"]
+                    or snapshot.manifest.get("source_fingerprint")
+                    != inventory.source_fingerprint
+                    or snapshot.manifest.get("object_count") != len(objects)):
+                raise PackageCorrupt("runtime snapshot does not match durable inputs")
+            runtime_objects = set()
+            index_keys: dict[int, tuple[str, str, str]] = {}
+            catalog_objects = snapshot._catalog.execute(
+                "SELECT object_idx, dataset_id FROM objects ORDER BY object_idx").fetchall()
+            if len(catalog_objects) != len(objects):
+                raise PackageCorrupt("runtime object count differs from durable")
+            for idx, dataset_name in catalog_objects:
+                ref = snapshot.object_ref(idx)
+                key = (dataset_name, ref["storage_id"], ref["object_id"])
+                binding = bindings.get(key)
+                if (binding is None or ref["object_path"] != binding.path
+                        or ref["object_size"] != binding.size
+                        or ref["object_version"] != binding.content_sha256
+                        or ref["validator"] != binding.content_sha256
+                        or ref["backend"] != "modelscope"
+                        or ref["repo_type"] != "dataset"):
+                    raise PackageCorrupt("runtime object differs from durable binding")
+                runtime_objects.add(key)
+                if idx in index_keys:
+                    raise PackageCorrupt("duplicate runtime object index")
+                index_keys[idx] = key
+            if runtime_objects != set(bindings):
+                raise PackageCorrupt("runtime has missing or duplicate bound objects")
+            observed: set[str] = set()
+            for obj in inventory.objects:
+                sample_fragment = next(f for f in obj.fragments if f.name == "samples")
+                parquet = pq.ParquetFile(sample_fragment.path)
+                for batch in parquet.iter_batches(batch_size=256, columns=(
+                        "record_id", "dataset_id", "object_id", "image_path",
+                        "json_path", "offset_data", "size", "json_offset_data",
+                        "json_size", "image_format", "hash_source", "sha256",
+                        "hash_kind")):
+                    for row in batch.to_pylist():
+                        rid = row["record_id"]
+                        item = audit.get(rid)
+                        if (rid in observed or not isinstance(item, dict)
+                                or set(item) != {"identity", "image_path", "json_path",
+                                                  "image", "json", "suffix"}):
+                            raise PackageCorrupt("missing or duplicate audited P2 sample")
+                        key = (row["dataset_id"], row["object_id"])
+                        binding = bindings.get((key[0],
+                                                inventory.contract["adapter"]["storage_id"],
+                                                key[1]))
+                        if (binding is None or item["identity"] != list((key[0],
+                                binding.storage_id, key[1]))
+                                or item["image_path"] != row["image_path"]
+                                or item["json_path"] != row["json_path"]
+                                or item["suffix"] != "." + row["image_format"]
+                                or item["image"].get("offset") != row["offset_data"]
+                                or item["image"].get("size") != row["size"]
+                                or row["hash_source"] != "computed:sha256"
+                                or row["hash_kind"] != "sha256"
+                                or not isinstance(row["sha256"], str)
+                                or not _SHA.fullmatch(row["sha256"])
+                                or item["image"].get("sha256") != row["sha256"]
+                                or (item["json"] is None) != (row["json_path"] is None)):
+                            raise PackageCorrupt("member audit differs from durable P2 sample")
+                        if item["json"] is not None and (
+                                item["json"].get("offset") != row["json_offset_data"]
+                                or item["json"].get("size") != row["json_size"]):
+                            raise PackageCorrupt("metadata audit differs from durable P2 sample")
+                        Extent(**item["image"]).validate(binding.size)
+                        if item["json"] is not None:
+                            Extent(**item["json"]).validate(binding.size, allow_empty=True)
+                        record = snapshot._catalog.execute(
+                            "SELECT r.rid, d.name FROM records r JOIN datasets d "
+                            "ON r.dataset_id=d.dataset_id WHERE r.record_id=?",
+                            (bytes.fromhex(rid),)).fetchone()
+                        if record is None:
+                            raise PackageCorrupt("audited record absent from runtime snapshot")
+                        loc = snapshot.location(record[0])
+                        if (record[1] != key[0]
+                                or index_keys.get(loc["object_idx"]) != (
+                                    key[0], binding.storage_id, key[1])):
+                            raise PackageCorrupt("runtime record points to another P2 object")
+                        if (bool(loc["flags"] & HAS_METADATA)
+                                != (item["json"] is not None)
+                                or (loc["image_offset"], loc["image_size"]) != (
+                                    row["offset_data"], row["size"])
+                                or (item["json"] is not None and (
+                                    loc["metadata_offset"], loc["metadata_size"]) != (
+                                    row["json_offset_data"], row["json_size"]))):
+                            raise PackageCorrupt("member extent/presence differs from runtime")
+                        observed.add(rid)
+            if observed != set(audit):
+                raise PackageCorrupt("audit record set differs from durable samples")
+    except PackageCorrupt:
+        raise
+    except (OSError, ValueError, TypeError, KeyError, StopIteration, AttributeError,
+            IndexError, pa.ArrowException):
+        raise PackageCorrupt("unrecognized durable/runtime/audit chain") from None
 
 
 def load_package(root: Path, *, allow_offline_loopback: bool = False) -> PackageManifest:
@@ -146,17 +352,22 @@ def load_package(root: Path, *, allow_offline_loopback: bool = False) -> Package
     index = _file(root, "index-package.json")
     if index.stat().st_size > _MAX_MANIFEST:
         raise PackageCorrupt("package manifest exceeds bounded size")
-    try:
-        metadata = json.loads(index.read_bytes())
-    except (ValueError, UnicodeError):
-        metadata = None
-    required = {"package_format_version", "producer", "repo_id", "repo_type",
-                "endpoint", "data_revision", "snapshot_id", "runtime", "audit",
-                "files", "bindings", "coverage", "publication_status"}
+    metadata = _bounded_json(index, _MAX_MANIFEST)
+    required = {"package_format_version", "producer", "producer_code_version",
+                "repo_id", "repo_type", "endpoint", "data_revision", "snapshot_id",
+                "runtime", "durable", "audit", "scan_config", "scan_config_sha256",
+                "scan_evidence", "binding_mode", "mtime_provenance", "files",
+                "bindings", "coverage", "publication_status"}
     if (not isinstance(metadata, dict) or set(metadata) != required
             or metadata.get("package_format_version") != 1
             or metadata.get("producer") != "sakurapool-p4-remote-stream"
-            or metadata.get("coverage") != "canary"
+            or metadata.get("producer_code_version") != _CODE_VERSION
+            or metadata.get("binding_mode") != _BINDING_MODE
+            or metadata.get("mtime_provenance") != "unavailable; P2 mtime_ns=0"
+            or metadata.get("coverage") != {
+                "mode": "canary", "object_count": len(metadata.get("bindings", []))
+                if isinstance(metadata.get("bindings"), list) else -1,
+                "full_repository": False}
             or metadata.get("publication_status") != "local_only"):
         raise PackageCorrupt("unrecognized or incorrectly scoped package manifest")
     if metadata.get("repo_id") != _REPO or metadata.get("repo_type") != "dataset":
@@ -195,13 +406,26 @@ def load_package(root: Path, *, allow_offline_loopback: bool = False) -> Package
         if type(size) is not int or size < 0 or not isinstance(digest, str) \
                 or not _SHA.fullmatch(digest):
             raise PackageCorrupt("invalid inventory file size or SHA")
+        json_cap = _MAX_MANIFEST if name == _SCAN_EVIDENCE else _MAX_CANARY_JSON
+        bounded_json = (name.lower().endswith(".json")
+                        or (name.startswith("durable/") and name.endswith(".COMMIT")))
+        if bounded_json and size > json_cap:
+            raise PackageCorrupt("canary package JSON input exceeds bounded size")
         path = _file(root, name)
-        if path.stat().st_size != size or _hash(path) != digest:
+        actual_size = path.stat().st_size
+        if bounded_json and actual_size > json_cap:
+            raise PackageCorrupt("canary JSON changed beyond bounded size")
+        if actual_size != size or _hash(path) != digest:
             raise PackageCorrupt("package dependent-file mismatch")
     runtime = _relative(metadata.get("runtime"))
+    durable = _relative(metadata.get("durable"))
     audit_file = _relative(metadata.get("audit"))
-    if runtime != "runtime" or audit_file != "audit/members.json":
-        raise PackageCorrupt("package has unexpected runtime/audit layout")
+    config_file = _relative(metadata.get("scan_config"))
+    evidence_file = _relative(metadata.get("scan_evidence"))
+    if (runtime != "runtime" or durable != "durable"
+            or audit_file != _SCAN_EVIDENCE or evidence_file != audit_file
+            or config_file != _SCAN_CONFIG):
+        raise PackageCorrupt("package has unexpected durable/runtime/audit layout")
     actual = set()
     for path in root.rglob("*"):
         relative = _relative(path.relative_to(root).as_posix())
@@ -213,8 +437,10 @@ def load_package(root: Path, *, allow_offline_loopback: bool = False) -> Package
             raise PackageCorrupt("unrecognized package filesystem entry")
     if actual != names | {"index-package.json"}:
         raise PackageCorrupt("package contains unlisted or missing file")
-    if audit_file not in names or not any(x.startswith(runtime + "/") for x in names):
-        raise PackageCorrupt("package runtime or audit not inventoried")
+    if (audit_file not in names or config_file not in names
+            or durable + "/INPUT.json" not in names
+            or not any(x.startswith(runtime + "/") for x in names)):
+        raise PackageCorrupt("package durable, runtime, config or audit not inventoried")
     bindings = metadata.get("bindings")
     if not isinstance(bindings, list) or not 1 <= len(bindings) <= 3:
         raise PackageCorrupt("canary binding count invalid")
@@ -249,14 +475,12 @@ def load_package(root: Path, *, allow_offline_loopback: bool = False) -> Package
     audit_path = _file(root, audit_file)
     if audit_path.stat().st_size > _MAX_MANIFEST:
         raise PackageCorrupt("audit exceeds bounded size")
-    try:
-        audit = json.loads(audit_path.read_bytes())
-    except (UnicodeError, ValueError):
-        audit = None
+    audit = _bounded_json(audit_path, _MAX_MANIFEST)
     if not isinstance(audit, dict) or len(audit) > 100_000:
         raise PackageCorrupt("invalid sample audit")
+    _validate_package_chain(root, metadata, names, indexed, audit)
     return PackageManifest(root, snapshot_id, _REPO, revision, endpoint,
-                           runtime, indexed, audit)
+                           runtime, durable, indexed, audit)
 
 
 def publish_local_package(root: Path, ledger: BudgetLedger, *, endpoint: str,
@@ -276,6 +500,20 @@ def publish_local_package(root: Path, ledger: BudgetLedger, *, endpoint: str,
         raise FileExistsError("index-package.json already exists")
     if not 1 <= len(bindings) <= 3:
         raise PackageCorrupt("canary bindings missing or too many")
+    try:
+        parts = urlsplit(endpoint)
+        port = parts.port
+    except (TypeError, ValueError):
+        raise PackageCorrupt("invalid package origin") from None
+    if (not isinstance(data_revision, str)
+            or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", data_revision)
+            or not parts.hostname or parts.path not in ("", "/")
+            or parts.query or parts.fragment or parts.username or parts.password
+            or not ((parts.scheme == "https" and parts.hostname == "modelscope.cn"
+                     and port in (None, 443))
+                    or (parts.scheme == "http" and parts.hostname == "127.0.0.1"
+                        and port is not None))):
+        raise PackageCorrupt("package revision or origin is unsafe")
     for binding in bindings:
         key = condition_binding_key(endpoint=endpoint, repository=_REPO,
                                     revision=data_revision, path=binding.path,
@@ -283,6 +521,31 @@ def publish_local_package(root: Path, ledger: BudgetLedger, *, endpoint: str,
         if (not binding.conditional_verified
                 or ledger.condition_proof(key) != binding.condition_probe_sha256):
             raise PackageCorrupt("missing app-owned exact conditional proof")
+    # This is verified local-index configuration evidence, not a provider
+    # discovery/immutability certificate. Derive it from the actual committed
+    # P2 INPUT (adapter, hash_images and object validators), not a caller's
+    # editable string or a floating remote profile.
+    _preflight_durable_json(root)
+    inventory = load_p2_inventory(root / "durable")
+    config = _index_config(inventory.contract, endpoint, data_revision)
+    config_raw = json.dumps(config, sort_keys=True, ensure_ascii=False,
+                            separators=(",", ":")).encode("utf-8")
+    if len(config_raw) > _MAX_CANARY_JSON:
+        raise PackageCorrupt("index input configuration exceeds bounded canary size")
+    if (root / _SCAN_CONFIG).exists() or (root / _SCAN_CONFIG).is_symlink():
+        raise FileExistsError("scan config already exists; never overwrite")
+    # Additional package-side bytes use only the offline allowance. Production
+    # publication/fetch remains BLOCKED until complete physical bounds exist.
+    config_lease = ledger.reserve(Reservation(disk=_MAX_CANARY_JSON + 4096))
+    try:
+        with (root / _SCAN_CONFIG).open("xb") as stream:
+            stream.write(config_raw)
+            stream.flush()
+            import os
+            os.fsync(stream.fileno())
+        ledger.settle(config_lease)
+    except BaseException:
+        raise
     paths = []
     for directory in ("durable", "runtime", "audit"):
         folder = root / directory
@@ -303,10 +566,18 @@ def publish_local_package(root: Path, ledger: BudgetLedger, *, endpoint: str,
               "sha256": _hash(_file(root, name))} for name in sorted(paths)]
     from dataclasses import asdict
     manifest = {"package_format_version": 1, "producer": "sakurapool-p4-remote-stream",
+                "producer_code_version": _CODE_VERSION,
                 "repo_id": _REPO, "repo_type": "dataset", "endpoint": endpoint,
                 "data_revision": data_revision, "snapshot_id": snap_id,
-                "runtime": "runtime", "audit": "audit/members.json", "files": files,
-                "bindings": [asdict(item) for item in bindings], "coverage": "canary",
+                "runtime": "runtime", "durable": "durable", "audit": _SCAN_EVIDENCE,
+                "scan_config": _SCAN_CONFIG,
+                "scan_config_sha256": hashlib.sha256(config_raw).hexdigest(),
+                "scan_evidence": _SCAN_EVIDENCE,
+                "binding_mode": _BINDING_MODE,
+                "mtime_provenance": "unavailable; P2 mtime_ns=0", "files": files,
+                "bindings": [asdict(item) for item in bindings],
+                "coverage": {"mode": "canary", "object_count": len(bindings),
+                             "full_repository": False},
                 "publication_status": "local_only"}
     payload = json.dumps(manifest, sort_keys=True, ensure_ascii=False,
                          separators=(",", ":")).encode("utf-8")
@@ -338,6 +609,9 @@ def fetch_from_package(root: Path, record_id: str, output: Path,
     """
     from .modelscope import ModelScopeDataset
 
+    if (not isinstance(transport.ledger, BudgetLedger)
+            or not transport.ledger.offline_mode):
+        raise BudgetExceeded("P4 production fetch BLOCKED: unproven sample disk cap")
     if not Path(root).absolute().is_relative_to(transport.ledger.root):
         raise PackageCorrupt("package and transport budget roots differ")
     package = load_package(root, allow_offline_loopback=transport.ledger.offline_mode)

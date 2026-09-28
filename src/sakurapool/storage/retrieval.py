@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from .budget import BudgetLedger, Reservation
+from .budget import BudgetExceeded, BudgetLedger, Reservation
 from .transport import MAX_MEMBER, BoundObject, GuardedTransport, RemoteIOError
 
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
@@ -34,9 +34,10 @@ class Extent:
     size: int
     sha256: str
 
-    def validate(self, object_size: int) -> None:
+    def validate(self, object_size: int, *, allow_empty: bool = False) -> None:
         if (type(self.offset) is not int or type(self.size) is not int
-                or self.offset < 0 or not 0 < self.size <= MAX_MEMBER
+                or self.offset < 0 or not 0 <= self.size <= MAX_MEMBER
+                or (self.size == 0 and not allow_empty)
                 or self.offset + self.size > object_size
                 or not isinstance(self.sha256, str) or not HEX64.fullmatch(self.sha256)):
             raise ValueError("invalid audited member extent or SHA")
@@ -56,7 +57,7 @@ class AuditedSample:
             raise ValueError("invalid audited image suffix")
         self.image.validate(size)
         if self.json_member is not None:
-            self.json_member.validate(size)
+            self.json_member.validate(size, allow_empty=True)
 
 
 def _checked(payload: bytes, expected: Extent) -> bytes:
@@ -108,6 +109,8 @@ def fetch_bounded_samples(transport: GuardedTransport, ledger: BudgetLedger,
     """
     if transport.ledger is not ledger:
         raise ValueError("retrieval transport and disk budget must be identical")
+    if not isinstance(ledger, BudgetLedger) or not ledger.offline_mode:
+        raise BudgetExceeded("P4 production fetch BLOCKED: unproven sample disk cap")
     if type(workers) is not int or not 1 <= workers <= 8:
         raise ValueError("worker count must be between 1 and 8")
     root = _real_output_root(output_root, ledger)
@@ -144,6 +147,8 @@ def fetch_bound_sample(transport: GuardedTransport, ledger: BudgetLedger,
     """
     if transport.ledger is not ledger:
         raise ValueError("retrieval transport and disk budget must be identical")
+    if not isinstance(ledger, BudgetLedger) or not ledger.offline_mode:
+        raise BudgetExceeded("P4 production fetch BLOCKED: unproven sample disk cap")
     sample.validate(bound.size)
     output_root = _real_output_root(output_root, ledger)
     final = output_root / sample.record_id
@@ -153,7 +158,8 @@ def fetch_bound_sample(transport: GuardedTransport, ledger: BudgetLedger,
     selected = [image] + ([meta] if meta else [])
     start = min(item.offset for item in selected)
     end = max(item.offset + item.size for item in selected)
-    merge_possible = (merged and meta is not None and end - start <= MAX_MERGE
+    merge_possible = (merged and meta is not None and meta.size > 0
+                      and end - start <= MAX_MERGE
                       and end - start - image.size - meta.size <= MAX_GAP
                       and (image.offset + image.size <= meta.offset
                            or meta.offset + meta.size <= image.offset))
@@ -185,6 +191,16 @@ def fetch_bound_sample(transport: GuardedTransport, ledger: BudgetLedger,
             for name, item in (("image" + sample.image_suffix, image),
                                ("metadata.json", meta)):
                 if item is None:
+                    continue
+                # Presence is independent of size. A real empty metadata
+                # member is published, but incurs no Range or HTTP attempt.
+                if item.size == 0:
+                    payload = _checked(b"", item)
+                    with (stage / name).open("xb") as handle:
+                        created.add(name)
+                        handle.write(payload)
+                        handle.flush()
+                        os.fsync(handle.fileno())
                     continue
                 with transport.read_range_owned(bound, item.offset, item.size) as payload:
                     _checked(payload, item)

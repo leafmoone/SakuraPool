@@ -249,6 +249,8 @@ def write_staged_v4(ledger: BudgetLedger,
                                 entry = {
                                     "identity": [adapter.dataset, adapter.storage_id,
                                                  f"{rel}@sha256-{stage.content_sha256}"],
+                                    "image_path": sample["image_path"],
+                                    "json_path": sample["json_path"],
                                     "image": {"offset": sample["offset_data"],
                                               "size": sample["size"], "sha256": img[0]},
                                     "json": ({"offset": sample["json_offset_data"],

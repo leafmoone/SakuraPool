@@ -15,7 +15,7 @@ import stat
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .budget import DEFAULT_WORK_ROOT, BudgetLedger, Reservation, _cluster_bytes
+from .budget import DEFAULT_WORK_ROOT, BudgetExceeded, BudgetLedger, Reservation, _cluster_bytes
 from .modelscope import REPO_ID, ModelScopeDataset
 from .package import fetch_from_package, load_package
 from .transport import GuardedTransport
@@ -187,7 +187,9 @@ def inspect(config_path: Path, output: Path, *, offline_fixture: bool = False) -
 def fetch(package_root: Path, config_path: Path, record_id: str, output: Path,
           *, offline_fixture: bool = False) -> dict:
     """Never indexes: require an existing verified package and matching profile."""
-    config, ledger = _profile(config_path, offline_fixture=offline_fixture,
+    if not offline_fixture:
+        raise BudgetExceeded("P4 production fetch BLOCKED: unproven sample disk cap")
+    config, ledger = _profile(config_path, offline_fixture=True,
                               require_revision=True)
     package = load_package(package_root, allow_offline_loopback=ledger.offline_mode)
     if (package.endpoint != config["endpoint"] or package.repo_id != config["repo_id"]
