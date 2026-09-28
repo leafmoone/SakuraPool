@@ -1213,6 +1213,26 @@ def test_real_32mib_runtime_roaring_eviction(big32_corpus):
                 assert obj["object_path"] == (
                     f"o{g // _SAMPLES_PER_OBJECT:04d}.tar"), (tag, rid)
                 assert loc["image_size"] == 32
+                assert loc["image_offset"] == 0
+                assert loc["metadata_offset"] == 1000
+                assert loc["metadata_size"] == 64
+                assert loc["format_id"] == 1
+                assert loc["flags"] == 1
+        import numpy as np
+        q = rt.query(namespace="tags", all_tags=["b000"])
+        batched = []
+        for batch in q.iter_location_batches(batch_size=4096):
+            assert batch.snapshot_id == rt.snapshot_id
+            batched.extend(batch.rid.tolist())
+            for field, expected in (("image_offset", 0), ("image_size", 32),
+                                    ("metadata_offset", 1000), ("metadata_size", 64),
+                                    ("format_id", 1), ("flags", 1)):
+                assert np.all(getattr(batch, field) == expected)
+            for rid, object_idx in zip(batch.rid, batch.object_idx, strict=True):
+                g = int(g_of[int(rid)])
+                assert rt.object_ref(int(object_idx))["object_path"] == (
+                    f"o{g // _SAMPLES_PER_OBJECT:04d}.tar")
+        assert tuple(batched) == keep["b000"]
 
 
 # The fixture contract: rid_of[g] == rid, g_of[rid] == g.

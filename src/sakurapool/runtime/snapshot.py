@@ -101,8 +101,16 @@ class RuntimeSnapshot:
     # -- lifecycle ---------------------------------------------------------
     @classmethod
     def open(cls, path: Path | str, *, full_verify: bool = False,
-             cache_bytes: int = DEFAULT_CACHE_BYTES,
-             snapshot_id: str | None = None) -> "RuntimeSnapshot":
+             cache_bytes: int = DEFAULT_CACHE_BYTES) -> "RuntimeSnapshot":
+        return cls._open_snapshot(path, full_verify=full_verify,
+                                  cache_bytes=cache_bytes)
+
+    @classmethod
+    def _open_snapshot(cls, path: Path | str, *, full_verify: bool = False,
+                       cache_bytes: int = DEFAULT_CACHE_BYTES,
+                       staging_id: str | None = None,
+                       require_ready: bool = True) -> "RuntimeSnapshot":
+        snapshot_id = None
         base = Path(path)
         if not base.is_dir():
             raise SnapshotCorruptError(f"snapshot path is not a directory: {base}")
@@ -121,11 +129,11 @@ class RuntimeSnapshot:
             # (or the caller-provided id for a staging directory verified
             # before its publish rename), and it must agree with both
             # READY and the SNAPSHOT.json manifest.
-            snapshot_id = snapshot_id or base.name
+            snapshot_id = staging_id if staging_id is not None else base.name
         else:
             raise SnapshotCorruptError(
                 f"not a runtime root or snapshot: {base}")
-        if not (snap_dir / "READY").exists():
+        if require_ready and not (snap_dir / "READY").exists():
             raise SnapshotCorruptError(
                 f"snapshot not ready (READY missing): {snap_dir}")
         manifest = json.loads(
@@ -136,6 +144,8 @@ class RuntimeSnapshot:
             raise SnapshotCorruptError(
                 f"unsupported runtime_format_version: "
                 f"{manifest['runtime_format_version']}")
+        from .compiler import _manifest_data_files
+        _manifest_data_files(manifest)
         for name in _DATA_FILES:
             entry = manifest["files"].get(name)
             if entry is None:
@@ -163,6 +173,21 @@ class RuntimeSnapshot:
         bitmaps = sqlite3.connect(
             f"file:{(snap_dir / 'bitmaps.sqlite').as_posix()}?mode=ro", uri=True)
         try:
+            for sql in (
+                "SELECT source_id, name FROM sources LIMIT 0",
+                "SELECT dataset_id, name, source_id FROM datasets LIMIT 0",
+                "SELECT namespace_id, namespace FROM namespaces LIMIT 0",
+                "SELECT tag_id, namespace_id, value, category, cardinality FROM tags LIMIT 0",
+                "SELECT rid, record_id, source_id, dataset_id, post_id FROM records LIMIT 0",
+                "SELECT format_id, format FROM formats LIMIT 0",
+                "SELECT object_idx, storage_id, object_id, object_path, object_size, "
+                "object_version, validator, backend, repo_type, archive_format, "
+                "validator_kind, validator_strength, dataset_id FROM objects LIMIT 0",
+            ):
+                catalog.execute(sql).close()
+            bitmaps.execute(
+                "SELECT kind, id, blob, blob_sha256, cardinality FROM bitmaps LIMIT 0"
+            ).close()
             meta = catalog.execute(
                 "SELECT snapshot_id, runtime_format_version, compiler, "
                 "source_fingerprint, rid_count FROM meta").fetchone()

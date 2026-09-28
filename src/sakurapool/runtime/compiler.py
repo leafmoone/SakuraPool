@@ -799,13 +799,25 @@ def _write_owner_marker(path: Path, snap_id: str, role: str) -> None:
                   .encode())
 
 
+def _manifest_data_files(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Reject noncanonical paths before any manifested I/O."""
+    names = {"catalog.sqlite", "bitmaps.sqlite", "locations.npy"}
+    files = manifest.get("files")
+    if not isinstance(files, dict) or set(files) != names:
+        raise SnapshotCorruptError("invalid manifest file set")
+    if any(not isinstance(e, dict) or e.get("path") != n
+           for n, e in files.items()):
+        raise SnapshotCorruptError("noncanonical manifest path")
+    return files
+
+
 def _verify_manifest_files(final: Path, snap_id: str) -> dict[str, Any]:
     """Stream-hash every manifested file against the SNAPSHOT.json
     manifest (bounded RSS). READY and identity are NOT checked here."""
     manifest = json.loads((final / "SNAPSHOT.json").read_text(encoding="utf-8"))
     if manifest.get("snapshot_id") != snap_id:
         raise SnapshotMixError("SNAPSHOT.json snapshot_id mismatch")
-    for entry in manifest["files"].values():
+    for entry in _manifest_data_files(manifest).values():
         path = final / entry["path"]
         if not path.is_file():
             raise SnapshotCorruptError(f"missing published file: {entry['path']}")
@@ -824,13 +836,15 @@ def _verify_ready(final: Path, snap_id: str) -> dict[str, Any]:
     never reopened. The streaming hash keeps RSS bounded.
     """
     from .snapshot import RuntimeSnapshot
+    if _is_link(final) or not _staging_type_audit(final):
+        raise SnapshotCorruptError("unsafe snapshot entries")
     ready = final / "READY"
     if not ready.exists():
         raise SnapshotCorruptError("published snapshot has no READY")
     if ready.read_text(encoding="utf-8").strip() != snap_id:
         raise SnapshotCorruptError("READY content does not match snapshot_id")
     manifest = _verify_manifest_files(final, snap_id)
-    opened = RuntimeSnapshot.open(final, snapshot_id=snap_id)
+    opened = RuntimeSnapshot._open_snapshot(final, staging_id=snap_id)
     opened.close()
     return manifest
 
@@ -856,20 +870,27 @@ def _resume_interrupted_publish(staging: Path, final: Path,
             f"cannot resume publish: staging {staging.name} and final "
             f"{final.name} both exist; refusing to touch either (remove "
             "one manually after inspection)")
+    if _is_link(staging) or not _staging_type_audit(staging):
+        raise SnapshotCorruptError("unowned staging: unsafe entry")
     ready = staging / "READY"
-    if not (ready.is_file()
-            and ready.read_text(encoding="utf-8").strip() == snap_id):
+    missing_ready = not ready.exists()
+    if missing_ready:
         if _Stage(staging).current != len(_STAGES) - 1:
             raise SnapshotCorruptError(
                 f"staging {staging.name} carries a published owner marker "
                 "but is not a completed build (no valid READY): refusing "
                 "to touch it (remove it manually after inspection)")
-        # Deterministic completion of the interrupted READY write: the
-        # content is exactly the snapshot id, nothing else is written.
-        ready.write_text(snap_id, encoding="utf-8")
-    manifest = _verify_ready(staging, snap_id)
+        manifest = _verify_manifest_files(staging, snap_id)
+        from .snapshot import RuntimeSnapshot
+        with RuntimeSnapshot._open_snapshot(
+                staging, staging_id=snap_id, require_ready=False):
+            pass
+    else:
+        manifest = _verify_ready(staging, snap_id)
     expected = ({entry["path"] for entry in manifest["files"].values()}
-                | {"OWNER.json", "STAGE.txt", "READY", "SNAPSHOT.json"})
+                | {"OWNER.json", "STAGE.txt", "SNAPSHOT.json"})
+    if not missing_ready:
+        expected.add("READY")
     entries = set()
     for entry in staging.iterdir():
         if _is_link(entry) or not entry.is_file():
@@ -883,6 +904,9 @@ def _resume_interrupted_publish(staging: Path, final: Path,
             f"staging {staging.name} does not match the published file "
             "set; refusing to touch it (remove it manually after inspection)")
     final.parent.mkdir(parents=True, exist_ok=True)
+    if missing_ready:
+        with ready.open("x", encoding="utf-8") as handle:
+            handle.write(snap_id)
     os.rename(staging, final)
 
 
@@ -999,7 +1023,7 @@ def _verify_snapshot(staging: Path, snap_id: str) -> bool:
         return (manifest.get("snapshot_id") == snap_id
                 and manifest.get("rid_count") == _staging_rid_count(staging)
                 and all((staging / entry["path"]).exists()
-                        for entry in manifest["files"].values()))
+                        for entry in _manifest_data_files(manifest).values()))
     except (OSError, json.JSONDecodeError, KeyError):
         return False
 
@@ -1017,6 +1041,13 @@ def compile_runtime(
     snap_id = snapshot_id(inventory.source_fingerprint, options,
                           RUNTIME_COMPILER, RUNTIME_FORMAT_VERSION)
     output_root = Path(output_root)
+    for path in (output_root, *output_root.parents,
+                 output_root / "snapshots", output_root / "snapshots" / snap_id):
+        if _is_link(path):
+            raise SnapshotCorruptError(f"runtime path must not be a symlink or junction: {path}")
+    for path in (output_root / "current.json", output_root / "current.json.tmp"):
+        if _is_link(path) or (path.exists() and not path.is_file()):
+            raise SnapshotCorruptError(f"unsafe runtime pointer: {path}")
     output_root.mkdir(parents=True, exist_ok=True)
     final = output_root / "snapshots" / snap_id
     if (final / "READY").exists():
@@ -1044,6 +1075,8 @@ def compile_runtime(
     staging = output_root / f".staging-{snap_id}"
     if staging.exists():
         _refuse_link_escape(output_root, staging)
+        if _is_link(staging) or not _staging_type_audit(staging):
+            raise SnapshotCorruptError("unowned staging: unsafe entry")
         if _marker_valid(staging, snap_id, "published"):
             # Interrupted publish after the role flip (§48F): fully verify
             # and promote, or fail closed - this branch never deletes. The
