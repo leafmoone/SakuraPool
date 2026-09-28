@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import tarfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -143,6 +144,15 @@ def _runtime_command(args: argparse.Namespace) -> int:
         return 0
 
 
+def _scan_remote_blocked() -> int:
+    """Only scan/compile is unconditionally blocked by unproven disk bounds."""
+    print(json.dumps({"status": "BLOCKED", "command": "index scan-remote",
+                      "reason": "P4_PARTIAL: physical 4 GiB disk bound unproven"},
+                     sort_keys=True))
+    print("remote scan/compile blocked before HTTP or artifact creation", file=sys.stderr)
+    return 3
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="sakura")
     parser.add_argument("--version", action="version", version="sakurapool 0.1.0")
@@ -199,6 +209,20 @@ def main(argv: list[str] | None = None) -> int:
     rq.add_argument("--limit", type=int)
     rq.add_argument("--full-verify", action="store_true")
     rq.add_argument("--full", dest="full_verify", action="store_true")
+    remote = subparsers.add_parser("remote", help="P4 remote operations (gated)")
+    remote_sub = remote.add_subparsers(dest="remote_command", required=True)
+    inspect = remote_sub.add_parser("inspect", help="guarded metadata inspection")
+    inspect.add_argument("--config", type=Path, required=True)
+    inspect.add_argument("--output", type=Path, required=True)
+    inspect.add_argument("--offline-fixture", action="store_true",
+                         help="literal 127.0.0.1 fixture only; no credentials")
+    fetch = remote_sub.add_parser("fetch", help="fetch a packaged remote record")
+    fetch.add_argument("--package", type=Path, required=True)
+    fetch.add_argument("--config", type=Path, required=True)
+    fetch.add_argument("--record-id", required=True)
+    fetch.add_argument("--output", type=Path, required=True)
+    fetch.add_argument("--offline-fixture", action="store_true",
+                       help="literal 127.0.0.1 fixture only; no credentials")
     index = subparsers.add_parser("index", help="build a local index")
     index_subparsers = index.add_subparsers(dest="index_command", required=True)
     scan_command = index_subparsers.add_parser("scan", help="scan uncompressed TAR archives")
@@ -209,11 +233,43 @@ def main(argv: list[str] | None = None) -> int:
     scan_command.add_argument("--config", type=Path)
     scan_command.add_argument("--dataset", default="local")
     scan_command.add_argument("--hash-images", action="store_true")
+    scan_remote = index_subparsers.add_parser("scan-remote", help="gated P4 scan")
+    scan_remote.add_argument("--config", type=Path, required=True)
+    scan_remote.add_argument("--plan", type=Path, required=True)
+    scan_remote.add_argument("--output-package", type=Path, required=True)
     args = parser.parse_args(argv)
     if (args.command == "runtime" and args.runtime_command == "compile"
             and not args.index_dirs and not args.paths):
         parser.error("runtime compile requires --index or P2_DIR arguments")
     try:
+        if args.command == "remote":
+            from .storage.cli_ops import fetch, inspect
+            try:
+                if args.remote_command == "fetch":
+                    if not args.package.is_dir() or not (
+                            args.package / "index-package.json").is_file():
+                        raise ValueError("local package unavailable; fetch never scans")
+                    result = fetch(args.package, args.config, args.record_id, args.output,
+                                   offline_fixture=args.offline_fixture)
+                else:
+                    result = inspect(args.config, args.output,
+                                     offline_fixture=args.offline_fixture)
+            except Exception as exc:
+                # Only vetted static codes cross the public boundary. Raw
+                # exception strings/context, URLs, response bodies and tokens
+                # must never enter either stream (including unexpected errors).
+                from .storage.transport import RemoteIOError
+                public = ({"error": "remote operation failed", "status": "ERROR"}
+                          | (exc.public_diagnostic() if isinstance(exc, RemoteIOError)
+                             else {"code": "local_or_unclassified", "phase": "local"}))
+                print(json.dumps(public, sort_keys=True))
+                print("remote operation failed; no implicit scan or fallback",
+                      file=sys.stderr)
+                return 2
+            print(json.dumps(result, sort_keys=True))
+            return 0
+        if args.command == "index" and args.index_command == "scan-remote":
+            return _scan_remote_blocked()
         if args.command == "runtime":
             if args.runtime_command == "compile":
                 if args.index_dirs and args.paths[:-1]:

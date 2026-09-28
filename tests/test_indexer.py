@@ -313,6 +313,33 @@ def test_tar_member_cache_is_bounded(tmp_path, monkeypatch):
     assert max(observed) <= 1
 
 
+def test_optional_spool_directory_keeps_default_and_cleans_on_failure(tmp_path, monkeypatch):
+    original_temp = indexer.tempfile.NamedTemporaryFile
+    seen = []
+    def capture(*args, **kwargs):
+        seen.append(kwargs.get("dir"))
+        return original_temp(*args, **kwargs)
+    monkeypatch.setattr(indexer.tempfile, "NamedTemporaryFile", capture)
+    for cls in (indexer._MemberSpool, indexer._SpoolRows):
+        default = cls()
+        assert default.path.exists()
+        default.close()
+        scoped = cls(directory=tmp_path)
+        path = scoped.path
+        assert path.parent == tmp_path
+        scoped.close()
+        assert not path.exists()
+    assert seen == [None, tmp_path, None, tmp_path]
+    original_connect = indexer.sqlite3.connect
+    def fail(*args, **kwargs):
+        raise RuntimeError("connect failed")
+    monkeypatch.setattr(indexer.sqlite3, "connect", fail)
+    with pytest.raises(RuntimeError, match="connect failed"):
+        indexer._SpoolRows(directory=tmp_path)
+    assert not list(tmp_path.glob("sakurapool-*.sqlite*"))
+    monkeypatch.setattr(indexer.sqlite3, "connect", original_connect)
+
+
 def test_member_lookup_uses_indexed_plan():
     spool = indexer._MemberSpool()
     rows = indexer._SpoolRows()

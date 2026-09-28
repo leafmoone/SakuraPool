@@ -1,0 +1,633 @@
+"""The single P4 HTTP reader; no SDK/internal retries or implicit full-TAR fallback.
+
+All GETs, including discovery, must use this transport. Its requests session
+handles *no* automatic redirects/retries. The caller freezes trusted hostnames
+from reviewed provider configuration; Location never expands that set.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import ipaddress
+import json
+import math
+import random
+import re
+import time
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from typing import Iterator
+from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
+
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+from .budget import MIB, BudgetLedger, Reservation
+
+MAX_MEMBER = 64 * MIB
+READ_CHUNK = MIB
+MAX_ATTEMPTS = 3  # redirects + retries + expired-URL resolution share this ceiling
+_CONTENT_RANGE = re.compile(r"bytes ([0-9]+)-([0-9]+)/([0-9]+)\Z")
+
+
+_SAFE_CODES = frozenset({"remote_io", "network_ambiguous", "http_status",
+                         "metadata_encoding", "redirect_policy", "invalid_json",
+                         "provider_shape", "retry_policy"})
+_SAFE_PHASES = frozenset({"transport", "metadata_send", "metadata_headers",
+                          "metadata_body", "provider_revision_shape",
+                          "provider_listing_shape", "response_headers"})
+
+
+class RemoteIOError(RuntimeError):
+    """Only static diagnostics, never provider body, URL, token or exception text."""
+
+    def __init__(self, message: str, *, code: str = "remote_io",
+                 phase: str = "transport", http_status: int | None = None):
+        if code not in _SAFE_CODES or phase not in _SAFE_PHASES:
+            raise ValueError("unrecognized safe remote diagnostic")
+        if http_status is not None and (type(http_status) is not int
+                                        or not 100 <= http_status <= 599):
+            raise ValueError("invalid safe HTTP status")
+        super().__init__(message)
+        self.code = code
+        self.phase = phase
+        self.http_status = http_status
+
+    def public_diagnostic(self) -> dict[str, str | int]:
+        result: dict[str, str | int] = {"code": self.code, "phase": self.phase}
+        if self.http_status is not None:
+            result["http_status"] = self.http_status
+        return result
+
+
+class _AmbiguousRead(RemoteIOError):
+    """Connection broke while reading: keep full body reservation pending."""
+
+    def __init__(self, message: str, *, phase: str = "transport"):
+        super().__init__(message, code="network_ambiguous", phase=phase)
+
+
+class BoundObject:
+    """Ephemeral object identity. Not a dataclass: asdict must not leak a URL."""
+
+    __slots__ = ("url", "size", "immutable_revision", "strong_etag", "_sealed")
+
+    def __init__(self, url: str, size: int, immutable_revision: str | None = None,
+                 strong_etag: str | None = None):
+        if type(size) is not int or not 0 <= size < 2**64:
+            raise ValueError("object size must be uint64")
+        if strong_etag and (strong_etag.startswith("W/") or not re.fullmatch(
+                r'"[\x21\x23-\x7e]+"', strong_etag)):
+            raise ValueError("weak or malformed ETag is not a reliable validator")
+        if immutable_revision:
+            if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", immutable_revision):
+                raise ValueError("floating revision is not an immutable object binding")
+            try:
+                revisions = parse_qs(urlsplit(url).query).get("Revision")
+            except ValueError:
+                revisions = None
+            if revisions != [immutable_revision]:
+                raise ValueError("download URL is not bound to the immutable revision")
+        # A 40-hex URL parameter alone is not evidence of an immutable object:
+        # a trusted provider can redirect it to mutable CDN latest. Until
+        # provider semantics are evidenced, require observed strong ETag.
+        if not strong_etag:
+            raise ValueError("strong validator required until immutable revision is verified")
+        object.__setattr__(self, "url", url)
+        object.__setattr__(self, "size", size)
+        object.__setattr__(self, "immutable_revision", immutable_revision)
+        object.__setattr__(self, "strong_etag", strong_etag)
+        object.__setattr__(self, "_sealed", True)
+
+    def __setattr__(self, _name: str, _value: object) -> None:
+        raise AttributeError("bound object is immutable")
+
+    def __repr__(self) -> str:
+        return f"BoundObject(size={self.size}, authenticated_binding=True)"
+
+    def __reduce_ex__(self, _protocol: int):
+        raise TypeError("ephemeral signed object URLs cannot be serialized")
+
+
+class RawObjectStream:
+    """Nonseekable, bounded, uncompressed raw body for tarfile mode r|.
+
+    Every byte is hashed and charged exactly once on application read. Socket
+    and TLS prefetch before the application's read is outside this counter.
+    """
+
+    def __init__(self, response: requests.Response, lease: str, ledger: BudgetLedger,
+                 expected_size: int):
+        self.response = response
+        self.lease = lease
+        self.ledger = ledger
+        self.expected_size = expected_size
+        self.count = 0
+        self._hash = hashlib.sha256()
+
+    def read(self, size: int = -1) -> bytes:
+        if size == 0:
+            return b""
+        remaining = self.expected_size + 1 - self.count
+        if remaining <= 0:
+            raise RemoteIOError("remote stream exceeded declared size")
+        wanted = min(READ_CHUNK if size < 0 else size, remaining, READ_CHUNK)
+        if wanted < 0:
+            raise ValueError("negative stream read")
+        try:
+            chunk = self.response.raw.read(wanted, decode_content=False)
+        except Exception:
+            chunk = None
+        if chunk is None:
+            raise _AmbiguousRead("raw stream read failed; reservation retained")
+        self.ledger.consume_body(self.lease, len(chunk))
+        self.count += len(chunk)
+        self._hash.update(chunk)
+        if self.count > self.expected_size:
+            raise RemoteIOError("remote stream exceeded declared size")
+        return chunk
+
+    def drain_and_verify(self) -> str:
+        """After tarfile stops at EOF headers, include trailing padding/data."""
+        while self.read(READ_CHUNK):
+            pass
+        if self.count != self.expected_size:
+            raise RemoteIOError("short remote stream")
+        return self._hash.hexdigest()
+
+
+def condition_binding_key(*, endpoint: str, repository: str, revision: str,
+                          path: str, size: int, strong_etag: str) -> str:
+    """Hash the public frozen identity, never a signed redirect URL or token."""
+    if (not isinstance(endpoint, str) or not isinstance(repository, str)
+            or not isinstance(revision, str) or not isinstance(path, str)
+            or not isinstance(strong_etag, str) or type(size) is not int):
+        raise ValueError("incomplete condition identity")
+    return hashlib.sha256(json.dumps(
+        [endpoint, repository, revision, path, size, strong_etag],
+        separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+class GuardedTransport:
+    def __init__(self, ledger: BudgetLedger, *, trusted_hosts: frozenset[str],
+                 allow_loopback_http: bool = False, token: str | None = None,
+                 credential_origin: str | None = None,
+                 max_retry_wait_s: float = 5.0):
+        if not trusted_hosts or any(not h or h != h.lower() or ":" in h or "/" in h
+                                    for h in trusted_hosts):
+            raise ValueError("trusted hosts must be explicit canonical hostnames")
+        if ledger.offline_mode:
+            if token is not None or credential_origin is not None:
+                raise ValueError("offline HTTP cannot receive credentials")
+            if not trusted_hosts.issubset({"127.0.0.1"}):
+                raise ValueError("offline transport requires literal IPv4 loopback only")
+        self.ledger = ledger
+        self._trusted_hosts = frozenset(trusted_hosts)
+        self.allow_loopback_http = allow_loopback_http
+        self.token = token  # never persisted, never included in exception
+        if token and credential_origin is None:
+            raise ValueError("credential origin must be fixed in the storage profile")
+        if credential_origin is not None:
+            parts = urlsplit(credential_origin)
+            if (parts.path not in ("", "/") or parts.query or parts.fragment
+                    or parts.username or parts.password):
+                raise ValueError("credential origin must contain scheme and authority only")
+            self._host(credential_origin)
+        self.credential_origin = (credential_origin or "").rstrip("/")
+        if not math.isfinite(max_retry_wait_s) or max_retry_wait_s < 0:
+            raise ValueError("retry wait must be a finite nonnegative number")
+        self.max_retry_wait_s = max_retry_wait_s
+        self.session = requests.Session()
+        # No netrc credential injection or environment-driven proxy switch.
+        # A required proxy must be reviewed/configured explicitly, not guessed.
+        self.session.trust_env = False
+        no_retry = HTTPAdapter(max_retries=Retry(total=0, redirect=0))
+        self.session.mount("https://", no_retry)
+        self.session.mount("http://", no_retry)
+
+    @property
+    def trusted_hosts(self) -> frozenset[str]:
+        """Only configured before network use; cannot grow via Location."""
+        return self._trusted_hosts
+
+    def clone(self) -> GuardedTransport:
+        """Independent Session for a bounded worker, same persistent ledger."""
+        return GuardedTransport(self.ledger, trusted_hosts=self.trusted_hosts,
+                                allow_loopback_http=self.allow_loopback_http,
+                                token=self.token, credential_origin=self.credential_origin or None,
+                                max_retry_wait_s=self.max_retry_wait_s)
+
+    def close(self) -> None:
+        self.session.close()
+
+    def __enter__(self) -> GuardedTransport:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def _host(self, url: str) -> str:
+        try:
+            parts = urlsplit(url)
+            hostname = parts.hostname
+        except ValueError:
+            parts = None
+            hostname = None
+        if parts is None:
+            raise RemoteIOError("invalid target URL")
+        if (parts.username or parts.password or parts.fragment or not hostname
+                or hostname.lower() not in self.trusted_hosts):
+            raise RemoteIOError("untrusted target or redirect")
+        if self.ledger.offline_mode:
+            # No localhost DNS rebinding, alternate numeric notation, external
+            # HTTPS host, proxy or credential-bearing offline request.
+            try:
+                parsed_ip = ipaddress.ip_address(hostname)
+            except ValueError:
+                parsed_ip = None
+            if parsed_ip != ipaddress.ip_address("127.0.0.1"):
+                raise RemoteIOError("offline transport requires literal 127.0.0.1")
+            if parts.scheme != "http" or not self.allow_loopback_http:
+                raise RemoteIOError("offline transport requires explicit loopback HTTP")
+        loopback = (self.allow_loopback_http and parts.scheme == "http"
+                    and hostname == "127.0.0.1")
+        if parts.scheme != "https" and not loopback:
+            raise RemoteIOError("non-HTTPS remote request refused")
+        try:
+            port = parts.port
+        except ValueError:
+            port = -1
+        if port == -1:
+            raise RemoteIOError("invalid remote port")
+        if not loopback and port not in (None, 443):
+            raise RemoteIOError("nonstandard remote port refused")
+        return hostname.lower()
+
+    def _once(self, url: str, *, max_body: int, metadata: bool, inflight: int,
+              headers: dict[str, str]):
+        self._host(url)
+        if self.ledger.offline_mode and (
+                self.token is not None or self.credential_origin or
+                self.session.trust_env or self.session.proxies or self.session.auth
+                or self.session.cookies or any(
+                    key.lower() in {"authorization", "proxy-authorization", "cookie"}
+                    for key in (*self.session.headers, *headers))):
+            raise RemoteIOError("offline transport configuration cannot use credentials/proxy")
+        lease = self.ledger.reserve(Reservation(
+            body=max_body, metadata=max_body if metadata else 0,
+            inflight=inflight, attempt=True))
+        self.session.cookies.clear()  # do not preserve server-set cookies across requests
+        request_headers = {**headers, "Accept-Encoding": "identity"}
+        # Identity comes from the configured profile, NOT this call's URL.
+        # A directly supplied trusted CDN URL never receives API credentials.
+        if self.token and urlsplit(url).scheme + "://" + urlsplit(url).netloc == \
+                self.credential_origin:
+            request_headers["Authorization"] = f"Bearer {self.token}"
+        try:
+            response = self.session.get(url, headers=request_headers,
+                                        stream=True, allow_redirects=False,
+                                        timeout=(10, 60))
+        except Exception:
+            response = None
+        if response is None:
+            # Raise OUTSIDE the handler: even `from None` retains __context__.
+            # Unknown bytes retain their full pending reservation.
+            raise _AmbiguousRead("network attempt failed; body reservation retained",
+                                 phase="metadata_send" if metadata else "transport")
+        return response, lease
+
+    def _retry_delay(self, retry_after: str | None, attempt: int) -> float:
+        if retry_after is None:
+            return random.uniform(0, 0.1 * 2**attempt)
+        try:
+            seconds = float(retry_after)
+        except ValueError:
+            seconds = None
+        if seconds is None:
+            try:
+                moment = parsedate_to_datetime(retry_after)
+            except (ValueError, TypeError, IndexError):
+                moment = None
+            if moment is None:
+                raise RemoteIOError("invalid Retry-After; stop", code="retry_policy")
+            if moment.tzinfo is None:
+                raise RemoteIOError("Retry-After missing timezone; stop")
+            seconds = (moment - datetime.now(timezone.utc)).total_seconds()
+        if not math.isfinite(seconds) or seconds > self.max_retry_wait_s:
+            raise RemoteIOError("Retry-After exceeds configured wait; stop",
+                                code="retry_policy")
+        return max(0.0, seconds)
+
+    @staticmethod
+    def _pinned_refresh_origin(bound: BoundObject) -> str | None:
+        """Check an exact provider GET for a frozen revision, without retrying.
+
+        This validator does NOT authorize a refresh on 403; expiry recovery is
+        unavailable until provider semantics are independently established.
+        """
+        if not bound.immutable_revision or not bound.strong_etag:
+            return None
+        parsed = urlsplit(bound.url)
+        if (parsed.path != "/api/v1/datasets/leafmoone/game_cg_5M/repo"
+                or parsed.fragment or parsed.username or parsed.password):
+            return None
+        try:
+            params = parse_qs(parsed.query, keep_blank_values=True,
+                              strict_parsing=True)
+        except ValueError:
+            return None
+        if set(params) != {"Revision", "FilePath"} or params["Revision"] != [
+                bound.immutable_revision]:
+            return None
+        from ..records import canonical_object_id
+        if len(params["FilePath"]) != 1:
+            return None
+        path = params["FilePath"][0]
+        try:
+            canonical_object_id(path)
+        except (TypeError, ValueError, IndexError):
+            return None
+        # Exact SDK-audited provider builder order/encoding; no duplicate
+        # FilePath, permissive query aliases, extra signature or fragment.
+        if parsed.query != urlencode({"Revision": bound.immutable_revision,
+                                      "FilePath": path}):
+            return None
+        return bound.url
+
+    def _response(self, url: str, *, max_body: int, metadata: bool, inflight: int,
+                  headers: dict[str, str], refresh_origin: str | None = None):
+        """At most 3 attempts; any 403 fails closed, even at a signed redirect.
+
+        A canonical refresh origin can be checked but must NOT be used until an
+        externally verified provider-specific expiry signal is established.
+        """
+        self._host(url)
+        if refresh_origin is not None and refresh_origin != url:
+            raise RemoteIOError("refresh origin differs from frozen object")
+        for attempt in range(MAX_ATTEMPTS):
+            try:
+                response, lease = self._once(url, max_body=max_body, metadata=metadata,
+                                             inflight=inflight, headers=headers)
+            except _AmbiguousRead:
+                # The failed attempt and full unknown body remain charged.
+                if attempt + 1 < MAX_ATTEMPTS:
+                    time.sleep(self._retry_delay(None, attempt))
+                    continue
+                raise
+            status = response.status_code
+            if status in (301, 302, 303, 307, 308):
+                try:
+                    target = urljoin(url, response.headers.get("Location", ""))
+                    self._host(target)  # checked *before* next request
+                except (ValueError, RemoteIOError):
+                    target = None
+                response.close()
+                self.ledger.settle(lease)
+                if target is None:
+                    raise RemoteIOError("unsafe redirect target", code="redirect_policy",
+                                        phase="response_headers")
+                url = target
+                continue
+            if status in (429, 500, 502, 503, 504):
+                retry_after = response.headers.get("Retry-After")
+                response.close()
+                self.ledger.settle(lease)
+                if attempt + 1 < MAX_ATTEMPTS:
+                    time.sleep(self._retry_delay(retry_after, attempt))
+                    continue
+                raise RemoteIOError("bounded retry attempts exhausted")
+            return response, lease
+        raise RemoteIOError("bounded redirect attempts exhausted")
+
+    def _read_bounded(self, response: requests.Response, lease: str, limit: int,
+                      *, metadata: bool, exact: bool) -> bytes:
+        chunks: list[bytes] = []
+        got = 0
+        try:
+            while got <= limit:
+                # One extra byte, already reserved, detects overlong entities.
+                chunk = response.raw.read(min(READ_CHUNK, limit + 1 - got),
+                                          decode_content=False)
+                if not chunk:
+                    break
+                got += len(chunk)
+                self.ledger.consume_body(lease, len(chunk), metadata=metadata)
+                chunks.append(chunk)
+        except Exception:
+            failed = True
+        else:
+            failed = False
+        if failed:
+            raise _AmbiguousRead("raw body read failed; reservation retained",
+                                 phase="metadata_body" if metadata else "transport")
+        if got > limit or (exact and got != limit):
+            raise RemoteIOError("short or overlong entity body")
+        return b"".join(chunks)
+
+    @contextmanager
+    def stream_object(self, bound: BoundObject) -> Iterator[RawObjectStream]:
+        """Explicit administrator-only full-object scan; never a Range fallback.
+
+        A successful caller must let the context drain the raw entity through
+        EOF, then use the stream SHA to assign the final v4 object identity.
+        Parser failure retains a conservative pending lease, not a COMMIT.
+        """
+        if bound.size > 2 * (1 << 30):
+            raise ValueError("single TAR exceeds authorized 2 GiB")
+        headers = {"If-Match": bound.strong_etag} if bound.strong_etag else {}
+        response, lease = self._response(bound.url, max_body=bound.size + 1,
+                                         metadata=False, inflight=2 * READ_CHUNK,
+                                         headers=headers,
+                                         refresh_origin=self._pinned_refresh_origin(bound))
+        try:
+            if response.status_code != 200:
+                raise RemoteIOError("full stream must be explicitly returned as 200")
+            if response.headers.get("Content-Encoding", "identity").lower() != "identity":
+                raise RemoteIOError("encoded object stream refused")
+            declared = response.headers.get("Content-Length")
+            if declared is not None and declared != str(bound.size):
+                raise RemoteIOError("stream Content-Length mismatch")
+            if bound.strong_etag and response.headers.get("ETag") != bound.strong_etag:
+                raise RemoteIOError("stream ETag changed or missing")
+            stream = RawObjectStream(response, lease, self.ledger, bound.size)
+            yield stream
+            stream.drain_and_verify()
+        except _AmbiguousRead:
+            response.close()
+            raise  # raw bytes unknown; pending remains unavailable
+        except BaseException:
+            response.close()
+            # Conservative on parser failure: no valid completed object and
+            # no proof that no response bytes arrived; keep pending quota.
+            raise
+        response.close()
+        self.ledger.settle(lease)
+
+    @contextmanager
+    def read_range_owned(self, bound: BoundObject, offset: int,
+                         length: int) -> Iterator[bytes]:
+        """Keep reserved in-flight quota through the consumer's acknowledgement.
+
+        Use this for fetch workers and their bounded completion queue; readers
+        MUST exit the context only once data were consumed/written. A worker
+        must not return the raw bytes to an unbounded future after closing.
+        """
+        if (type(offset) is not int or type(length) is not int or offset < 0 or length < 0
+                or offset >= 2**64 or length >= 2**64 or offset + length > bound.size
+                or length > MAX_MEMBER):
+            raise ValueError("range outside bound object, uint64, or 64 MiB member cap")
+        if length == 0:
+            yield b""  # no HTTP request and no attempt quota
+            return
+        end = offset + length - 1
+        headers = {"Range": f"bytes={offset}-{end}"}
+        if bound.strong_etag:
+            headers["If-Match"] = bound.strong_etag
+        response, lease = self._response(bound.url, max_body=length + 1,
+                                         metadata=False,
+                                         inflight=3 * (length + 1) + 2 * READ_CHUNK,
+                                         headers=headers,
+                                         refresh_origin=self._pinned_refresh_origin(bound))
+        try:
+            if response.status_code != 206:  # 200 is NEVER a full-object fallback
+                raise RemoteIOError("range refused: response is not 206")
+            encoding = response.headers.get("Content-Encoding", "identity").lower()
+            if encoding != "identity" or "multipart/" in response.headers.get(
+                "Content-Type", "").lower():
+                raise RemoteIOError("encoded or multipart range refused")
+            parsed = _CONTENT_RANGE.fullmatch(response.headers.get("Content-Range", ""))
+            if parsed is None or tuple(map(int, parsed.groups())) != (
+                offset, end, bound.size
+            ):
+                raise RemoteIOError("Content-Range does not match object and request")
+            provided_length = response.headers.get("Content-Length")
+            if provided_length is not None and provided_length != str(length):
+                raise RemoteIOError("Content-Length does not equal requested length")
+            if bound.strong_etag and response.headers.get("ETag") != bound.strong_etag:
+                raise RemoteIOError("strong ETag changed or missing")
+            body = self._read_bounded(response, lease, length, metadata=False, exact=True)
+        except _AmbiguousRead:
+            response.close()  # unknown actual bytes: pending reservation is NOT refunded
+            raise
+        except RemoteIOError:
+            response.close()
+            self.ledger.settle(lease)  # validated reject, known short/overlong
+            raise
+        except BaseException:
+            response.close()  # unknown failure: NEVER refund pending
+            raise
+        response.close()
+        try:
+            yield body
+        except BaseException:
+            # Bytes may be handed off to another owner after a consumer fault.
+            # Preserve pending inflight until verified cleanup/recovery.
+            raise
+        else:
+            self.ledger.settle(lease)
+
+    def read_range(self, bound: BoundObject, offset: int, length: int) -> bytes:
+        """One-off synchronous reader; no future/queue may own returned bytes.
+
+        Concurrent fetchers MUST use read_range_owned through consumer ack.
+        """
+        with self.read_range_owned(bound, offset, length) as body:
+            return body
+
+    def verify_if_match(self, bound: BoundObject) -> str:
+        """Budgeted positive AND negative conditional test on the same object.
+
+        Required before authorizing real scan/fetch for the strong-ETag mode.
+        Distinguishes a server returning ETag while ignoring If-Match; it does
+        not mistake a 40-hex revision parameter for proof. Each attempt is
+        charged (including any redirects). Returns the positive byte SHA only,
+        not a signed URL or token. A provider with absent/ignored conditions
+        must block real work instead of silently accepting a mutable object.
+        """
+        if not bound.size or not bound.strong_etag:
+            raise ValueError("nonempty object with strong ETag is required")
+        first = self.read_range(bound, 0, 1)
+        mismatch = hashlib.sha256(bound.strong_etag.encode("ascii")).hexdigest()
+        negative = {"Range": "bytes=0-0", "If-Match": f'"p4-invalid-{mismatch}"'}
+        response, lease = self._response(bound.url, max_body=2, metadata=False,
+                                         inflight=4, headers=negative,
+                                         refresh_origin=self._pinned_refresh_origin(bound))
+        try:
+            if response.status_code != 412:
+                raise RemoteIOError("server did not enforce If-Match; do not scan")
+        except BaseException:
+            response.close()
+            self.ledger.settle(lease)
+            raise
+        response.close()  # 412 entity is not read; socket/TLS prefetch may occur
+        self.ledger.settle(lease)
+        return hashlib.sha256(first).hexdigest()
+
+    def ensure_verified_condition(self, bound: BoundObject, *, endpoint: str,
+                                  repository: str, path: str,
+                                  expected_probe_sha256: str | None = None) -> str:
+        """Persistent, guarded conditional proof bound to immutable identity.
+
+        The pre-scan probe cannot know full TAR content SHA. Its proof key
+        binds exactly the provider object/profile/revision/path/size/ETag;
+        the completed raw scan separately assigns SHA and RecordKey. The
+        package consumer checks that SHA against the v4 snapshot and hashes
+        each Range member. Fresh ledgers probe; repeat reads of the same
+        conditional binding reuse the guarded ledger, NOT a manifest boolean.
+        """
+        if (not bound.immutable_revision or (expected_probe_sha256 is not None
+                and (not isinstance(expected_probe_sha256, str)
+                     or not re.fullmatch(r"[0-9a-f]{64}", expected_probe_sha256)))):
+            raise ValueError("conditional binding lacks frozen provider identity")
+        self._host(endpoint)
+        self._host(bound.url)
+        if repository != "leafmoone/game_cg_5M" or not path or ":" in path or ".." in path:
+            raise ValueError("unapproved proof repository/path")
+        key = condition_binding_key(
+            endpoint=endpoint, repository=repository, revision=bound.immutable_revision,
+            path=path, size=bound.size, strong_etag=bound.strong_etag)
+        stored = self.ledger.condition_proof(key)
+        if stored is not None:
+            if expected_probe_sha256 is not None and stored != expected_probe_sha256:
+                raise RemoteIOError("manifest/ledger conditional proof mismatch")
+            return stored
+        observed = self.verify_if_match(bound)
+        if expected_probe_sha256 is not None and observed != expected_probe_sha256:
+            raise RemoteIOError("manifest conditional probe bytes mismatch")
+        self.ledger.record_condition_proof(key, observed)
+        return observed
+
+    def read_metadata(self, url: str, *, max_bytes: int = MIB) -> bytes:
+        """Guarded, bounded provider-listing response; no SDK bypass."""
+        if max_bytes < 0 or max_bytes > 64 * MIB:
+            raise ValueError("metadata single-response cap exceeded")
+        response, lease = self._response(url, max_body=max_bytes + 1,
+                                         metadata=True, inflight=2 * (max_bytes + 1),
+                                         headers={})
+        try:
+            if response.status_code != 200:
+                status = response.status_code
+                raise RemoteIOError("metadata response rejected", code="http_status",
+                                    phase="metadata_headers",
+                                    http_status=status if type(status) is int
+                                    and 100 <= status <= 599 else None)
+            if response.headers.get("Content-Encoding", "identity").lower() != "identity":
+                raise RemoteIOError("metadata response rejected", code="metadata_encoding",
+                                    phase="metadata_headers", http_status=200)
+            body = self._read_bounded(response, lease, max_bytes, metadata=True,
+                                      exact=False)
+        except _AmbiguousRead:
+            response.close()
+            raise
+        except RemoteIOError:
+            response.close()
+            self.ledger.settle(lease)  # validated reject/overlong with known raw count
+            raise
+        except BaseException:
+            response.close()
+            raise
+        response.close()
+        self.ledger.settle(lease)
+        return body

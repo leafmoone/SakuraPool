@@ -12,6 +12,7 @@ dependencies = ["pyarrow==18.1.0", "numpy==2.2.6", "pyroaring==1.1.0"]
 
 [project.optional-dependencies]
 dev = ["build==1.2.2.post1", "pytest==8.3.4", "ruff==0.9.2"]
+remote = ["requests==2.32.5", "modelscope-hub==0.4.0"]
 
 [project.scripts]
 sakurapool = "sakurapool.cli:main"

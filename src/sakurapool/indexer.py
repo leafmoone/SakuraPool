@@ -180,9 +180,10 @@ def _release_spool(resource: _SpoolState) -> list[BaseException]:
 
 
 class _MemberSpool:
-    def __init__(self, scope: _SpoolScope | None = None) -> None:
+    def __init__(self, scope: _SpoolScope | None = None,
+                 directory: Path | None = None) -> None:
         handle = tempfile.NamedTemporaryFile(
-            prefix="sakurapool-members-", suffix=".sqlite", delete=False
+            prefix="sakurapool-members-", suffix=".sqlite", delete=False, dir=directory
         )
         self.scope = scope or _SpoolScope()
         self.resource = _SpoolState(Path(handle.name), handle)
@@ -246,9 +247,10 @@ class _MemberSpool:
 
 class _SpoolRows:
     """Disk-backed row spool; only one bounded batch is materialized at a time."""
-    def __init__(self, scope: _SpoolScope | None = None) -> None:
+    def __init__(self, scope: _SpoolScope | None = None,
+                 directory: Path | None = None) -> None:
         handle = tempfile.NamedTemporaryFile(
-            prefix="sakurapool-spool-", suffix=".sqlite", delete=False
+            prefix="sakurapool-spool-", suffix=".sqlite", delete=False, dir=directory
         )
         self.scope = scope or _SpoolScope()
         self.resource = _SpoolState(Path(handle.name), handle)
@@ -452,15 +454,19 @@ def _object_id(rel: str, validator_sha256: str) -> str:
     return f"{rel}@sha256-{validator_sha256}"
 
 
-def _scan_shard_impl(path: Path, rel: str, adapter: DatasetAdapter, hash_images: bool,
+def _scan_shard_impl(path: Path | None, rel: str, adapter: DatasetAdapter, hash_images: bool,
                 timings: dict[str, float], validator: dict[str, Any],
-                verify_offsets: bool = False, scope: _SpoolScope | None = None) -> _SpoolRows:
+                verify_offsets: bool = False, scope: _SpoolScope | None = None,
+                *, staged_archive: Any = None,
+                spool_directory: Path | None = None) -> _SpoolRows:
     scope = scope or _SpoolScope()
-    rows = _SpoolRows(scope)
+    rows = _SpoolRows(scope, directory=spool_directory)
 
     object_id = _object_id(rel, validator["sha256"])
     rows["objects"].append(dict(
-        storage_id=adapter.storage_id, backend="local", repo_type="local",
+        storage_id=adapter.storage_id,
+        backend="modelscope" if staged_archive is not None else "local",
+        repo_type="dataset" if staged_archive is not None else "local",
         archive_format="tar", dataset=adapter.dataset, object_path=rel,
         object_size=validator["size"], object_version=validator["sha256"],
         validator=validator["sha256"], validator_kind="sha256",
@@ -481,11 +487,11 @@ def _scan_shard_impl(path: Path, rel: str, adapter: DatasetAdapter, hash_images:
 
     started = time.perf_counter()
     try:
-        archive = tarfile.open(path, "r:")
+        archive = staged_archive if staged_archive is not None else tarfile.open(path, "r:")
     except tarfile.ReadError as exc:
         raise UnsupportedArchiveError(f"unsupported_archive: {path}") from exc
     with archive:
-        member_spool = _MemberSpool(scope)
+        member_spool = _MemberSpool(scope, directory=spool_directory)
         member = _next_member(archive)
         while member is not None:
             if member.isdir():
@@ -590,7 +596,8 @@ def _scan_shard_impl(path: Path, rel: str, adapter: DatasetAdapter, hash_images:
             digest = digest.lower() if digest else None
             origin = "declared:json.sha256" if digest else "missing"
             if hash_images:
-                digest = _hash_member(archive, image)
+                digest = (staged_archive.member_sha256(image.name)
+                          if staged_archive is not None else _hash_member(archive, image))
                 origin = "computed:sha256"
             text = values.get(adapter.text_field)
             if text is not None and not isinstance(text, str):
@@ -679,11 +686,28 @@ def _verify_fragment(path: Path, schema: pa.Schema) -> int:
 
 
 def _write_fragments(files: dict[str, Path], rows: _SpoolRows,
-                     checkpoint: Callable[[str], None]) -> dict[str, dict]:
+                     checkpoint: Callable[[str], None],
+                     byte_limit: int | None = None) -> dict[str, dict]:
     info = {}
+    written = 0
+    class CappedStream:
+        def __init__(self, target):
+            self.target = target
+        def write(self, data):
+            nonlocal written
+            if byte_limit is not None and written + len(data) > byte_limit:
+                raise ValueError("durable fragment output byte cap reached")
+            consumed = self.target.write(data)
+            written += consumed
+            return consumed
+        def __getattr__(self, name):
+            return getattr(self.target, name)
     for name, final in files.items():
         partial = final.with_name(final.name + ".partial")
-        with partial.open("wb") as stream:
+        # Local P2 retains its original overwrite/recovery semantics. P4's
+        # explicit byte-limit path requires a fresh partial and fails closed.
+        with partial.open("xb" if byte_limit is not None else "wb") as raw:
+            stream = CappedStream(raw) if byte_limit is not None else raw
             with pq.ParquetWriter(stream, SCHEMAS[name]) as writer:
                 batches = rows.iter_batches(name)
                 first = next(batches, None)
