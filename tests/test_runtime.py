@@ -551,17 +551,17 @@ def test_crash_resume_after_bitmaps(tmp_path, monkeypatch):
 
 
 def test_crash_resume_ready_rename(tmp_path, monkeypatch):
-    """E: rename failed after the final markers were completed inside
-    staging. The staging directory must survive (never deleted); because
-    its marker role was already flipped to published, the compiler fails
-    closed on retry (it can never rmtree a directory it cannot prove it
-    still owns in staging state). Manual cleanup + recompile recovers.
-    No half-published directory is ever left behind."""
+    """E: os.rename failed after the final markers were completed inside
+    staging (READY + owner role=published). The staging directory must
+    survive (never deleted), and the next compile resumes per the
+    ownership protocol (§48F): it fully validates READY/manifest/file
+    hashes/schema/identity and promotes the directory with a plain
+    rename, so every published file byte is identical to the pre-resume
+    staging bytes. No manual cleanup, no half-published directory."""
+    import hashlib
     import os
-    import shutil
 
     import sakurapool.runtime.compiler as compiler
-    from sakurapool.runtime.errors import SnapshotCorruptError
 
     tars = {"a.tar": {"1.jpg": b"a", "1.json": meta(["t"])}}
     index = build_p2_index(tmp_path, "crash", tars)
@@ -584,14 +584,67 @@ def test_crash_resume_ready_rename(tmp_path, monkeypatch):
     assert len(stale) == 1, "staging must survive the rename failure"
     assert not list((root / "snapshots").glob("*/READY")), \
         "no half-published snapshot may exist"
-    with pytest.raises(SnapshotCorruptError, match="unowned staging"):
-        compiler.compile_runtime(inv, root)
-    assert stale[0].exists(), "compiler must never delete the stale staging"
-    shutil.rmtree(stale[0])
-    summary = compiler.compile_runtime(inv, root)
+    owner = json.loads((stale[0] / "OWNER.json").read_text(encoding="utf-8"))
+    assert owner["role"] == "published"
+    pre = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+           for p in stale[0].iterdir()}
+    summary = compiler.compile_runtime(inv, root)  # §48F auto-resume
+    final = root / "snapshots" / summary.snapshot_id
+    assert final.is_dir() and (final / "READY").is_file()
+    assert not list(root.glob(".staging-*")), \
+        "resume must consume the staging directory"
+    post = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in final.iterdir()}
+    assert pre == post, "promotion must not change a single interior byte"
+    current = json.loads((root / "current.json").read_text(encoding="utf-8"))
+    assert current["snapshot_id"] == summary.snapshot_id
     with RuntimeSnapshot.open(root) as rt:
         assert rt.rid_count == 1
     assert summary.rid_count == 1
+
+
+def test_crash_resume_ready_write_after_role_flip(tmp_path, monkeypatch):
+    """E2: crash after the owner role flipped to published but BEFORE the
+    deterministic READY write. The next compile must safely complete the
+    READY write (exact deterministic content), fully verify, and promote
+    - no manual cleanup, no deletion, no interior byte modified otherwise."""
+    import hashlib
+    import os
+
+    import sakurapool.runtime.compiler as compiler
+
+    tars = {"a.tar": {"1.jpg": b"a", "1.json": meta(["t"])}}
+    index = build_p2_index(tmp_path, "crash2", tars)
+    root = tmp_path / "rt-crash2"
+    inv = load_p2_inventory(index)
+    original_rename = os.rename
+    calls = {"n": 0}
+
+    def flaky_rename(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 1 and Path(src).name.startswith(".staging-"):
+            raise OSError("injected crash at rename")
+        return original_rename(src, dst)
+
+    monkeypatch.setattr(os, "rename", flaky_rename)
+    with pytest.raises(OSError, match="injected crash at rename"):
+        compiler.compile_runtime(inv, root)
+    monkeypatch.setattr(os, "rename", original_rename)
+    stale = next(root.glob(".staging-*"))
+    (stale / "READY").unlink()  # simulate the earlier crash point
+    assert (stale / "STAGE.txt").read_text(encoding="utf-8").strip() == "ready"
+    pre = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+           for p in stale.iterdir()}
+    summary = compiler.compile_runtime(inv, root)  # §48F auto-resume
+    final = root / "snapshots" / summary.snapshot_id
+    assert final.is_dir() and (final / "READY").is_file()
+    assert (final / "READY").read_text(encoding="utf-8") == summary.snapshot_id
+    assert not list(root.glob(".staging-*"))
+    post = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in final.iterdir()}
+    assert {k: v for k, v in post.items() if k != "READY"} == pre
+    with RuntimeSnapshot.open(root, full_verify=True) as rt:
+        assert rt.rid_count == 1
 
 
 def test_ready_snapshot_is_reused(tmp_path):

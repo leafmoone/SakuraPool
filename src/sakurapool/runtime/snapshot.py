@@ -101,7 +101,8 @@ class RuntimeSnapshot:
     # -- lifecycle ---------------------------------------------------------
     @classmethod
     def open(cls, path: Path | str, *, full_verify: bool = False,
-             cache_bytes: int = DEFAULT_CACHE_BYTES) -> "RuntimeSnapshot":
+             cache_bytes: int = DEFAULT_CACHE_BYTES,
+             snapshot_id: str | None = None) -> "RuntimeSnapshot":
         base = Path(path)
         if not base.is_dir():
             raise SnapshotCorruptError(f"snapshot path is not a directory: {base}")
@@ -116,9 +117,11 @@ class RuntimeSnapshot:
         elif (base / "SNAPSHOT.json").exists():
             root = base.parent.parent
             snap_dir = base
-            # Explicit snapshot directory: the directory name is the id and
-            # must agree with both READY and the SNAPSHOT.json manifest.
-            snapshot_id = base.name
+            # Explicit snapshot directory: the directory name is the id
+            # (or the caller-provided id for a staging directory verified
+            # before its publish rename), and it must agree with both
+            # READY and the SNAPSHOT.json manifest.
+            snapshot_id = snapshot_id or base.name
         else:
             raise SnapshotCorruptError(
                 f"not a runtime root or snapshot: {base}")

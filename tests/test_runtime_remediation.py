@@ -915,16 +915,18 @@ def test_published_markers_completed_before_rename(tmp_path):
     assert digest(snap) == before
 
 
-def test_rename_failure_recovers_fail_closed(tmp_path):
-    """R3-6: a failed os.rename leaves staging in place (never deleted,
-    never half-published); after manual cleanup the same input compiles to
-    the identical snapshot."""
-    import shutil as _shutil
+
+def test_rename_failure_auto_recovers(tmp_path):
+    """R3-6/§48F: a failed os.rename leaves staging in place (never
+    deleted, never half-published); the NEXT compile resumes automatically
+    - full READY/manifest/hash/schema/identity verification, then rename
+    promotion with no interior byte changed. No manual cleanup required."""
+    import hashlib as _hashlib
 
     import sakurapool.runtime.compiler as compiler
-    from sakurapool.runtime import load_p2_inventory
+    from sakurapool.runtime import RuntimeSnapshot, load_p2_inventory
     objs = [ObjectSpec("a.tar", [SampleSpec("1.jpg", "1", [("t", None)])])]
-    summary, root = _compile_synthetic(tmp_path, "renfail", objs)
+    summary, _ = _compile_synthetic(tmp_path, "renfail", objs)
     root_r = tmp_path / "rt-renfail2"
     rename_calls = [0]
     real_rename = compiler.os.rename
@@ -945,98 +947,281 @@ def test_rename_failure_recovers_fail_closed(tmp_path):
         monkey.undo()
     staging = root_r / f".staging-{summary.snapshot_id}"
     assert staging.exists(), "staging must survive a rename failure"
-    # fail-closed recovery: the marker role was already flipped, so the
-    # compiler refuses to rmtree it; manual cleanup then recompiles clean
-    _shutil.rmtree(staging)
+    assert (staging / "READY").is_file()
+    pre = {p.name: _hashlib.sha256(p.read_bytes()).hexdigest()
+           for p in staging.iterdir()}
     again = compiler.compile_runtime(
         load_p2_inventory(tmp_path / "p2-renfail"), root_r)
     assert again.snapshot_id == summary.snapshot_id
+    final = root_r / "snapshots" / summary.snapshot_id
+    assert not staging.exists(), "resume must consume the staging"
+    assert final.is_dir() and (final / "READY").is_file()
+    post = {p.name: _hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in final.iterdir()}
+    assert pre == post, "promotion must not change an interior byte"
+    with RuntimeSnapshot.open(root_r) as rt:
+        assert rt.rid_count == summary.rid_count
 
 
-def test_real_32mib_runtime_roaring_eviction(tmp_path):
-    """R3-2: real runtime Roaring eviction at a real 32 MiB budget. The
-    corpus is a tiny real snapshot; its bitmaps/catalog are extended with
-    40 deterministically generated ~1 MiB real pyroaring blobs loaded by
-    the real query path, totaling > 32 MiB so eviction is forced."""
+def test_corrupted_published_staging_refused_and_preserved(tmp_path):
+    """R3-6/§48F: a post-flip staging whose bytes no longer verify must be
+    REFUSED (fail closed) and preserved byte-for-byte for manual
+    inspection - never deleted, never half-reused. Manual removal is the
+    documented recovery, after which a fresh compile succeeds."""
     import hashlib as _hashlib
-    import random
-    import sqlite3
+    import shutil as _shutil
 
+    import sakurapool.runtime.compiler as compiler
+    from sakurapool.runtime import load_p2_inventory
+    from sakurapool.runtime.errors import SnapshotCorruptError
+    objs = [ObjectSpec("a.tar", [SampleSpec("1.jpg", "1", [("t", None)])])]
+    summary, _ = _compile_synthetic(tmp_path, "rencorr", objs)
+    root_r = tmp_path / "rt-rencorr2"
+    calls = [0]
+    real_rename = compiler.os.rename
+
+    def flaky(a, b):
+        calls[0] += 1
+        if calls[0] == 1:
+            raise OSError("simulated rename failure")
+        return real_rename(a, b)
+
+    monkey = _SimpleMonkey()
+    monkey.set(compiler.os, "rename", flaky)
+    try:
+        with pytest.raises(OSError, match="simulated rename failure"):
+            compiler.compile_runtime(
+                load_p2_inventory(tmp_path / "p2-rencorr"), root_r)
+    finally:
+        monkey.undo()
+    staging = root_r / f".staging-{summary.snapshot_id}"
+    cat = staging / "catalog.sqlite"
+    data = bytearray(cat.read_bytes())
+    data[64] ^= 0xFF
+    cat.write_bytes(bytes(data))
+    corrupted_sha = _hashlib.sha256(bytes(data)).hexdigest()
+    with pytest.raises(SnapshotCorruptError):
+        compiler.compile_runtime(
+            load_p2_inventory(tmp_path / "p2-rencorr"), root_r)
+    assert staging.exists(), "corrupted staging must be preserved"
+    assert _hashlib.sha256(cat.read_bytes()).hexdigest() == corrupted_sha, \
+        "the compiler must not modify the corrupted staging"
+    _shutil.rmtree(staging)  # manual inspection/removal (documented)
+    again = compiler.compile_runtime(
+        load_p2_inventory(tmp_path / "p2-rencorr"), root_r)
+    assert again.snapshot_id == summary.snapshot_id
+
+
+# ---------------------------------------------------------------------------
+# R3-2 (revised): LEGAL 32 MiB runtime Roaring eviction.
+#
+# The round-3 test was INVALID and is discarded (reviewer-confirmed): it
+# injected 2^24-rid bitmaps into a 1-record snapshot, contradicting
+# rid_count/catalog/locations, and only patched file sizes - not hashes.
+# This corpus is a normal, fully consistent snapshot compiled by the real
+# compiler from a real-contract synthetic P2 directory:
+#   2,000,000 records x 10 tags = 20,000,000 memberships over 168 tags;
+#   every bitmap holds rids < rid_count; catalog/manifest/locations agree.
+#   (Tag density is tuned so every per-tag bitmap stays in Roaring array
+#   containers, ~2 B/rid serialized: 20M x 2 B ~= 40 MiB > 32 MiB budget.)
+# Total serialized tag-bitmap bytes exceed the 32 MiB budget, so the real
+# RuntimeSnapshot query path must evict; every result is checked against
+# an independent reference plus real location resolution.
+# ---------------------------------------------------------------------------
+import tempfile  # noqa: E402
+
+_MIB = 1024 * 1024
+_N_OBJECTS = 2000
+_SAMPLES_PER_OBJECT = 1000
+_N_RIDS = _N_OBJECTS * _SAMPLES_PER_OBJECT          # 2,000,000
+_N_TAGS = 168
+_TAGS_PER_SAMPLE = 10
+_TAG_MOD = 168
+_TAG_MUL = 13                                       # gcd(13, 168) == 1
+_BUDGET = 32 * _MIB
+_BIG32_DIR = Path(tempfile.gettempdir()) / "sp3-big32"
+
+
+def _tag_values_for(global_index: int) -> tuple[str, ...]:
+    return tuple(sorted(f"b{(_TAG_MUL * global_index + k) % _TAG_MOD:03d}"
+                        for k in range(_TAGS_PER_SAMPLE)))
+
+
+def _big32_fingerprint() -> str:
+    """Whole source tree + synthetic generator + interpreter/dep versions
+    + corpus parameters: any change invalidates the cached build."""
+    h = hashlib.sha256()
+    root = SRC.parent
+    for path in sorted((root / "src" / "sakurapool").rglob("*.py")):
+        h.update(str(path.relative_to(root)).encode())
+        h.update(path.read_bytes())
+    h.update((root / "tests" / "synthetic_p2.py").read_bytes())
+    import numpy
+    import pyarrow
+    import pyroaring
+    h.update(f"py{sys.version.split()[0]}|"
+             f"{numpy.__version__}|{pyarrow.__version__}|"
+             f"{pyroaring.__version__}|"
+             f"{_N_OBJECTS}|{_SAMPLES_PER_OBJECT}|{_N_TAGS}|"
+             f"{_TAGS_PER_SAMPLE}|{_TAG_MUL}|{_TAG_MOD}".encode())
+    return h.hexdigest()
+
+
+@pytest.fixture(scope="module")
+def big32_corpus():
+    """Compile (once, cached in a persistent temp dir keyed by the full
+    fingerprint) the legal 32 MiB corpus. Returns
+    (runtime_root, rid_of_global, global_of_rid) numpy int32 arrays
+    recomputed INDEPENDENTLY of the compiler (canonical record sort key)."""
+    import numpy as np
+    from synthetic_p2 import _input_digest, _object_id
+
+    from sakurapool.records import RecordKey
+    from sakurapool.runtime import compile_runtime, load_p2_inventory
+
+    cache = _BIG32_DIR / _big32_fingerprint()
+    p2, rt = cache / "p2", cache / "rt"
+    rid_map = cache / "rid-map.npz"
+    if not (rt / "current.json").exists():
+        objects = []
+        for o in range(_N_OBJECTS):
+            objects.append(ObjectSpec(
+                f"o{o:04d}.tar",
+                [SampleSpec(f"{i}.jpg",
+                            str(o * _SAMPLES_PER_OBJECT + i),
+                            [(v, None) for v in _tag_values_for(
+                                o * _SAMPLES_PER_OBJECT + i)])
+                 for i in range(_SAMPLES_PER_OBJECT)]))
+        build_p2_directory(p2, dataset="ds32", source="src32",
+                           objects=objects,
+                           created_at="2025-01-01T00:00:00+00:00")
+        compile_runtime(load_p2_inventory(p2), rt)
+    if rid_map.exists():
+        z = np.load(rid_map)
+        return rt, z["rid_of"], z["g_of"]
+    keys = []
+    for o in range(_N_OBJECTS):
+        rel = f"o{o:04d}.tar"
+        digest = _input_digest(rel, "ds32")
+        object_id = _object_id(rel, digest)
+        for i in range(_SAMPLES_PER_OBJECT):
+            g = o * _SAMPLES_PER_OBJECT + i
+            keys.append((("ds32", object_id, f"{i}.jpg",
+                          RecordKey("ds32", object_id, f"{i}.jpg").record_id),
+                         g))
+    keys.sort(key=lambda pair: pair[0])
+    rid_of = np.empty(_N_RIDS, dtype=np.int32)
+    g_of = np.empty(_N_RIDS, dtype=np.int32)
+    for rid, (_key, g) in enumerate(keys):
+        rid_of[g] = rid
+        g_of[rid] = g
+    cache.mkdir(parents=True, exist_ok=True)
+    np.savez(rid_map, rid_of=rid_of, g_of=g_of)
+    return rt, rid_of, g_of
+
+
+def test_real_32mib_runtime_roaring_eviction(big32_corpus):
+    """Legal 32 MiB runtime Roaring eviction: full verify first, then the
+    real query path drives the ByteLRU past the 32 MiB budget with real
+    pyroaring blobs from a consistent snapshot; evictions happen, results
+    are per-rid identical to an independent reference before/after
+    eviction, and locations resolve to the correct objects."""
     from pyroaring import BitMap
 
     from sakurapool.runtime import RuntimeSnapshot
-    objs = [ObjectSpec("a.tar", [SampleSpec("1.jpg", "1", [("t", None)])])]
-    summary, root = _compile_synthetic(tmp_path, "mib32", objs)
-    snap = root / "snapshots" / summary.snapshot_id
 
-    n_rids = 524288  # ~1.05 MiB serialized Roaring each (array containers)
-    n_tags = 40      # 40 x ~1.05 MiB = ~42 MiB > 32 MiB budget
+    rt_root, rid_of, g_of = big32_corpus
+    with RuntimeSnapshot.open(rt_root, full_verify=True,
+                              cache_bytes=_BUDGET) as rt:
+        # -- the corpus is a legal, fully consistent snapshot -----------
+        assert rt.rid_count == _N_RIDS
+        manifest = rt.manifest
+        assert manifest["rid_count"] == _N_RIDS
+        assert manifest["locations"]["shape"] == [_N_RIDS]
+        assert manifest["tag_count"] == _N_TAGS
+        assert manifest["tag_memberships"] == _N_RIDS * _TAGS_PER_SAMPLE
+        assert rt._catalog.execute(
+            "SELECT rid_count FROM meta").fetchone()[0] == _N_RIDS
+        assert rt._bitmaps.execute(
+            "SELECT snapshot_id, rid_count FROM bitmaps_meta"
+        ).fetchone() == (rt.snapshot_id, _N_RIDS)
+        demand = rt._bitmaps.execute(
+            "SELECT SUM(serialized_bytes) FROM bitmaps WHERE kind = 'tag'"
+        ).fetchone()[0]
+        assert demand > _BUDGET, f"demand {demand} B must exceed the budget"
+        # tags live in catalog.sqlite, bitmaps in bitmaps.sqlite: join in
+        # Python, never across the two connections.
+        tag_names = dict(rt._catalog.execute(
+            "SELECT tag_id, value FROM tags").fetchall())
+        assert len(tag_names) == _N_TAGS
+        rows = rt._bitmaps.execute(
+            "SELECT id, cardinality, serialized_bytes, blob"
+            " FROM bitmaps WHERE kind = 'tag'").fetchall()
+        assert len(rows) == _N_TAGS
+        total_cardinality = 0
+        for _tid, card, ser, blob in rows:
+            assert _tid in tag_names
+            # pyroaring >= 1.1: deserialize returns a NEW bitmap
+            bm = BitMap.deserialize(blob)
+            assert len(bm) == card
+            assert len(blob) == ser
+            assert min(bm) >= 0 and max(bm) < _N_RIDS
+            total_cardinality += card
+        # independent consistency: total tag membership equals the corpus
+        assert total_cardinality == _N_RIDS * _TAGS_PER_SAMPLE
 
-    cat = sqlite3.connect(str(snap / "catalog.sqlite"))
-    cat.execute("INSERT INTO namespaces (namespace) VALUES ('syn')")
-    ns_id = cat.execute(
-        "SELECT namespace_id FROM namespaces WHERE namespace = 'syn'"
-    ).fetchone()[0]
-    for i in range(n_tags):
-        cat.execute(
-            "INSERT INTO tags (tag_id, namespace_id, value, category,"
-            " cardinality) VALUES (?,?,?,?,?)",
-            (9000 + i, ns_id, f"syn{i:02d}", None, n_rids))
-    cat.commit()
-    cat.close()
+        # -- real query path vs independent reference, per tag ----------
+        def reference_rids(tag_index: int) -> set:
+            residues = {(_TAG_MUL * (tag_index - k)) % _TAG_MOD
+                        for k in range(_TAGS_PER_SAMPLE)}
+            return {int(rid_of[g]) for r in residues
+                    for g in range(r, _N_RIDS, _TAG_MOD)}
 
-    bits = sqlite3.connect(str(snap / "bitmaps.sqlite"))
-    total_bytes = 0
-    expected_rids: dict[str, Any] = {}
-    for i in range(n_tags):
-        # deterministic collision-free rids (odd stride 31 over a 24-bit
-        # space: unique for the first 524288 values), still scattered so
-        # Roaring stores real array containers (~2 B/rid)
-        rng = random.Random(20260709 + i)
-        base = rng.randrange(0, 400_000)
-        bmap = BitMap((base + 31 * k) % (1 << 24) for k in range(n_rids))
-        blob = bytes(bmap.serialize())
-        total_bytes += len(blob)
-        assert len(blob) > 512 * 1024, f"blob too small: {len(blob)}"
-        expected_rids[f"syn{i:02d}"] = tuple(sorted(bmap))
-        bits.execute(
-            "INSERT INTO bitmaps (kind, id, cardinality, serialized_bytes,"
-            " blob_sha256, blob) VALUES (?,?,?,?,?,?)",
-            ("tag", 9000 + i, n_rids, len(blob),
-             _hashlib.sha256(blob).hexdigest(), blob))
-    bits.commit()
-    bits.close()
-    assert total_bytes > 32 * 1024 * 1024, (
-        f"total blobs {total_bytes} B do not exceed the 32 MiB budget")
+        keep: dict[str, tuple] = {}
+        for t in range(_N_TAGS):
+            tag = f"b{t:03d}"
+            q = rt.query(namespace="tags", all_tags=[tag])
+            got = tuple(q.iter_rids())
+            assert q.count() == len(got)
+            if t in (0, _N_TAGS // 4, _N_TAGS // 2, _N_TAGS - 2, _N_TAGS - 1):
+                keep[tag] = got
+            assert set(got) == reference_rids(t), f"tag {tag} mismatch"
+            assert max(got) < _N_RIDS
+        assert rt.cache.misses >= _N_TAGS
+        assert rt.cache.evictions >= 8, rt.cache.evictions
+        assert rt.cache.resident_bytes() <= _BUDGET
 
-    # keep the SNAPSHOT.json manifest consistent with the injected bytes
-    # (open() checks per-file sizes; full sha verify is not used here)
-    import json as _json
-    manifest_path = snap / "SNAPSHOT.json"
-    manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
-    for name in ("catalog.sqlite", "bitmaps.sqlite"):
-        manifest["files"][name]["bytes"] =             (snap / name).stat().st_size
-    manifest_path.write_text(_json.dumps(manifest), encoding="utf-8")
+        # -- warm hits for the most recent tags: identical results ------
+        before_hits = rt.cache.hits
+        for tag in (f"b{_N_TAGS - 2:03d}", f"b{_N_TAGS - 1:03d}"):
+            assert tuple(rt.query(namespace="tags",
+                                  all_tags=[tag]).iter_rids()) == keep[tag]
+        assert rt.cache.hits > before_hits
 
-    budget = 32 * 1024 * 1024
-    rt = RuntimeSnapshot.open(root, cache_bytes=budget)
-    first: dict[str, Any] = {}
-    for i in range(n_tags):
-        tag = f"syn{i:02d}"
-        q = rt.query(namespace="syn", all_tags=[tag])
-        first[tag] = (q.count(), tuple(q.iter_rids()))
-    assert rt.cache.evictions >= 8
-    assert all(n == n_rids for n, _ in first.values())
-    assert rt.cache.resident_bytes() <= budget
-    # the two most recently used blobs are still resident: warm hits with
-    # identical results
-    before_hits = rt.cache.hits
-    for tag in (f"syn{n_tags - 2:02d}", f"syn{n_tags - 1:02d}"):
-        q = rt.query(namespace="syn", all_tags=[tag])
-        assert (q.count(), tuple(q.iter_rids())) == first[tag]
-    assert rt.cache.hits >= 2 and rt.cache.hits > before_hits
-    # an evicted tag reloads and still returns the exact same result set
-    q0 = rt.query(namespace="syn", all_tags=["syn00"])
-    assert (q0.count(), tuple(q0.iter_rids())) == first["syn00"]
-    assert rt.cache.misses >= n_tags
-    assert rt.cache.resident_bytes() <= budget
+        # -- an evicted tag reloads with the exact same result set ------
+        assert tuple(rt.query(namespace="tags", all_tags=["b000"]
+                              ).iter_rids()) == keep["b000"]
+        assert rt.cache.resident_bytes() <= _BUDGET
+
+        # -- real location resolution for sampled rids -------------------
+        for tag in ("b000", f"b{_N_TAGS // 2:03d}", f"b{_N_TAGS - 1:03d}"):
+            sample = keep[tag]
+            for rid in (sample[0], sample[len(sample) // 2], sample[-1]):
+                loc = rt.location(rid)
+                obj = rt.object_ref(loc["object_idx"])
+                g = int(g_of[rid])
+                assert obj["object_path"] == (
+                    f"o{g // _SAMPLES_PER_OBJECT:04d}.tar"), (tag, rid)
+                assert loc["image_size"] == 32
+
+
+# The fixture contract: rid_of[g] == rid, g_of[rid] == g.
+def test_big32_corpus_maps_are_inverses(big32_corpus):
+    import numpy as np
+
+    _rt, rid_of, g_of = big32_corpus
+    assert rid_of.dtype == np.int32 and g_of.dtype == np.int32
+    idx = np.arange(_N_RIDS)
+    np.testing.assert_array_equal(rid_of[g_of[idx]], idx)
+    np.testing.assert_array_equal(g_of[rid_of[idx]], idx)
+    assert int(rid_of.min()) == 0 and int(rid_of.max()) == _N_RIDS - 1

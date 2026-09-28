@@ -735,25 +735,28 @@ def _marker_valid(path: Path, snap_id: str, role: str) -> bool:
             and marker.get("role") == role)
 
 
-def _staging_owned(staging: Path, snap_id: str) -> bool:
-    if not _marker_valid(staging, snap_id, "staging"):
-        return False
-    # Known-file audit: even with a forged marker, any file outside the
-    # compiler's own file list makes the directory foreign. The audit also
-    # checks entry TYPES, not just names: a directory, symlink, junction
-    # or reparse point named like a known file (e.g. a directory called
-    # catalog.sqlite hiding user data) is foreign and fails closed, so
-    # nothing nested inside it can ever be rmtree'd.
+def _staging_type_audit(staging: Path) -> bool:
+    """Known-file + entry-TYPE audit of a directory claimed to be ours.
+    A directory, symlink, junction or reparse point named like a known
+    file (e.g. a directory called catalog.sqlite hiding user data) makes
+    the directory foreign, so nothing nested inside it can ever be
+    rmtree'd. Never proves ownership by itself - the marker does."""
     try:
         entries = list(staging.iterdir())
     except OSError:
         return False
-    names = set()
     for entry in entries:
         if _is_link(entry) or not entry.is_file():
             return False
-        names.add(entry.name)
-    return names <= KNOWN_STAGING_FILES
+    return {entry.name for entry in entries} <= KNOWN_STAGING_FILES
+
+
+def _staging_owned(staging: Path, snap_id: str) -> bool:
+    if not _marker_valid(staging, snap_id, "staging"):
+        return False
+    # Known-file audit: even with a forged marker, any file outside the
+    # compiler's own file list makes the directory foreign.
+    return _staging_type_audit(staging)
 
 
 def _refuse_link_escape(output_root: Path, child: Path) -> None:
@@ -796,6 +799,23 @@ def _write_owner_marker(path: Path, snap_id: str, role: str) -> None:
                   .encode())
 
 
+def _verify_manifest_files(final: Path, snap_id: str) -> dict[str, Any]:
+    """Stream-hash every manifested file against the SNAPSHOT.json
+    manifest (bounded RSS). READY and identity are NOT checked here."""
+    manifest = json.loads((final / "SNAPSHOT.json").read_text(encoding="utf-8"))
+    if manifest.get("snapshot_id") != snap_id:
+        raise SnapshotMixError("SNAPSHOT.json snapshot_id mismatch")
+    for entry in manifest["files"].values():
+        path = final / entry["path"]
+        if not path.is_file():
+            raise SnapshotCorruptError(f"missing published file: {entry['path']}")
+        if path.stat().st_size != entry["bytes"]:
+            raise SnapshotCorruptError(f"size mismatch: {entry['path']}")
+        if _sha256_file(path) != entry["sha256"]:
+            raise SnapshotCorruptError(f"sha256 mismatch: {entry['path']}")
+    return manifest
+
+
 def _verify_ready(final: Path, snap_id: str) -> dict[str, Any]:
     """Reuse validation of a published snapshot (fail closed).
 
@@ -809,20 +829,80 @@ def _verify_ready(final: Path, snap_id: str) -> dict[str, Any]:
         raise SnapshotCorruptError("published snapshot has no READY")
     if ready.read_text(encoding="utf-8").strip() != snap_id:
         raise SnapshotCorruptError("READY content does not match snapshot_id")
-    manifest = json.loads((final / "SNAPSHOT.json").read_text(encoding="utf-8"))
-    if manifest.get("snapshot_id") != snap_id:
-        raise SnapshotMixError("SNAPSHOT.json snapshot_id mismatch")
-    for entry in manifest["files"].values():
-        path = final / entry["path"]
-        if not path.is_file():
-            raise SnapshotCorruptError(f"missing published file: {entry['path']}")
-        if path.stat().st_size != entry["bytes"]:
-            raise SnapshotCorruptError(f"size mismatch: {entry['path']}")
-        if _sha256_file(path) != entry["sha256"]:
-            raise SnapshotCorruptError(f"sha256 mismatch: {entry['path']}")
-    opened = RuntimeSnapshot.open(final)  # meta/identity fast checks
+    manifest = _verify_manifest_files(final, snap_id)
+    opened = RuntimeSnapshot.open(final, snapshot_id=snap_id)
     opened.close()
     return manifest
+
+
+def _resume_interrupted_publish(staging: Path, final: Path,
+                                snap_id: str) -> None:
+    """§48F resume: our staging survived a publish failure AFTER the owner
+    role had already been flipped to "published". Two crash windows:
+
+    (a) READY written inside staging, os.rename failed;
+    (b) role flipped, READY not yet written (deterministic content lost).
+
+    Safe resume is fully deterministic and never deletes: verify the READY
+    file (or, in (b), STAGE=ready plus every manifested file), complete a
+    missing READY with its exact deterministic content, re-verify
+    everything (READY, manifest, streamed file hashes, schema/identity via
+    a real open), require the entry set to equal exactly the published
+    file set (no sidecars, no foreign files), then promote with a plain
+    os.rename - which writes no interior byte. Any mismatch fails closed:
+    the directory is left in place for manual inspection."""
+    if final.exists():
+        raise SnapshotCorruptError(
+            f"cannot resume publish: staging {staging.name} and final "
+            f"{final.name} both exist; refusing to touch either (remove "
+            "one manually after inspection)")
+    ready = staging / "READY"
+    if not (ready.is_file()
+            and ready.read_text(encoding="utf-8").strip() == snap_id):
+        if _Stage(staging).current != len(_STAGES) - 1:
+            raise SnapshotCorruptError(
+                f"staging {staging.name} carries a published owner marker "
+                "but is not a completed build (no valid READY): refusing "
+                "to touch it (remove it manually after inspection)")
+        # Deterministic completion of the interrupted READY write: the
+        # content is exactly the snapshot id, nothing else is written.
+        ready.write_text(snap_id, encoding="utf-8")
+    manifest = _verify_ready(staging, snap_id)
+    expected = ({entry["path"] for entry in manifest["files"].values()}
+                | {"OWNER.json", "STAGE.txt", "READY", "SNAPSHOT.json"})
+    entries = set()
+    for entry in staging.iterdir():
+        if _is_link(entry) or not entry.is_file():
+            raise SnapshotCorruptError(
+                f"staging {staging.name} contains a non-regular entry "
+                f"({entry.name}); refusing to touch it (remove it manually "
+                "after inspection)")
+        entries.add(entry.name)
+    if entries != expected:
+        raise SnapshotCorruptError(
+            f"staging {staging.name} does not match the published file "
+            "set; refusing to touch it (remove it manually after inspection)")
+    final.parent.mkdir(parents=True, exist_ok=True)
+    os.rename(staging, final)
+
+
+def _finish_publish(output_root: Path, final: Path,
+                    snap_id: str) -> "CompiledSnapshot":
+    """Post-rename tail: the EXTERNAL current.json update plus the summary.
+    The published directory itself is never written after the rename."""
+    current = {
+        "snapshot_id": snap_id,
+        "path": f"snapshots/{snap_id}",
+        "runtime_format_version": RUNTIME_FORMAT_VERSION,
+        "compiler": RUNTIME_COMPILER,
+    }
+    _atomic_write(output_root / "current.json",
+                  json.dumps(current, indent=2, sort_keys=True).encode())
+    manifest = json.loads((final / "SNAPSHOT.json").read_text(encoding="utf-8"))
+    return CompiledSnapshot(
+        snap_id, final, manifest["rid_count"], manifest["object_count"],
+        manifest["source_count"], manifest["dataset_count"],
+        manifest["tag_count"], manifest["tag_memberships"])
 
 
 def _sqlite_one(path: Path, sql: str) -> tuple | None:
@@ -964,36 +1044,45 @@ def compile_runtime(
     staging = output_root / f".staging-{snap_id}"
     if staging.exists():
         _refuse_link_escape(output_root, staging)
-        if not _staging_owned(staging, snap_id):
+        if _marker_valid(staging, snap_id, "published"):
+            # Interrupted publish after the role flip (§48F): fully verify
+            # and promote, or fail closed - this branch never deletes. The
+            # resume consumes the staging (rename promotion), so the build
+            # steps must not re-run: finish externally and return.
+            _refuse_link_escape(output_root, final)
+            _resume_interrupted_publish(staging, final, snap_id)
+            return _finish_publish(output_root, final, snap_id)
+        elif not _staging_owned(staging, snap_id):
             # Fail closed: the directory name alone proves nothing, so a
             # pre-created .staging-<snap_id> (marker missing or foreign
             # files inside) is never deleted or reused.
             raise SnapshotCorruptError(
                 f"refusing to touch unowned staging directory: {staging} "
                 "(remove it manually if it is stale)")
-        stage = _Stage(staging)
-        if stage.current < 0:
-            # Ownership proven (marker + known-file audit), so every entry
-            # is a compiler artifact and resetting is safe.
-            shutil.rmtree(staging)
         else:
-            checks = [("stage1", lambda: _verify_stage1(staging)),
-                      ("stage2", lambda: _verify_stage2(staging)),
-                      ("catalog", lambda: _verify_catalog(staging, snap_id)),
-                      ("bitmaps", lambda: _verify_bitmaps(staging, snap_id)),
-                      ("locations", lambda: _verify_locations(staging, snap_id)),
-                      ("snapshot", lambda: _verify_snapshot(staging, snap_id))]
-            for index, (name, check) in enumerate(checks):
-                if index > stage.current:
-                    break
-                if not check():
-                    if index == 0:
-                        (staging / "STAGE.txt").unlink()
-                    else:
-                        (staging / "STAGE.txt").write_text(checks[index - 1][0],
-                                                           encoding="utf-8")
-                    stage.current = index - 1
-                    break
+            stage = _Stage(staging)
+            if stage.current < 0:
+                # Ownership proven (marker + known-file audit), so every
+                # entry is a compiler artifact and resetting is safe.
+                shutil.rmtree(staging)
+            else:
+                checks = [("stage1", lambda: _verify_stage1(staging)),
+                          ("stage2", lambda: _verify_stage2(staging)),
+                          ("catalog", lambda: _verify_catalog(staging, snap_id)),
+                          ("bitmaps", lambda: _verify_bitmaps(staging, snap_id)),
+                          ("locations", lambda: _verify_locations(staging, snap_id)),
+                          ("snapshot", lambda: _verify_snapshot(staging, snap_id))]
+                for index, (name, check) in enumerate(checks):
+                    if index > stage.current:
+                        break
+                    if not check():
+                        if index == 0:
+                            (staging / "STAGE.txt").unlink()
+                        else:
+                            (staging / "STAGE.txt").write_text(checks[index - 1][0],
+                                                               encoding="utf-8")
+                        stage.current = index - 1
+                        break
     staging.mkdir(parents=True, exist_ok=True)
     _refuse_link_escape(output_root, staging)
     _staging_owner_marker(staging, snap_id)
@@ -1056,7 +1145,12 @@ def compile_runtime(
             sources=sources, datasets=datasets, tags=tags, memberships=memberships,
             created_at=datetime.now(timezone.utc).isoformat()))
         stage.complete("snapshot")
-    if redo("ready", final / "READY"):
+    # The ready step is gated on the final READY file, not on STAGE.txt:
+    # a crash between `complete("ready")` and the READY write (or after
+    # the role flip, handled by _resume_interrupted_publish above) must
+    # re-run this tail, and a READY'd final directory can only be reached
+    # through the reuse path above.
+    if not (final / "READY").exists():
         for name in ("compiler-staging.sqlite", "bitmap_parts.sqlite",
                      "ns-known.sqlite", "FORMAT-IDS.json", "STAGE1-COUNTS.json",
                      "STAGE2-COUNTS.json", "TAG-IDS.json", "CATEGORIES.json"):
@@ -1081,24 +1175,13 @@ def compile_runtime(
         # staging BEFORE the atomic rename. After the rename this process
         # writes nothing inside final (only the external current.json),
         # so a failure after the rename can never leave a half-marked
-        # published directory. Crash before the rename leaves staging
-        # with role=published and no READY: that staging fails closed on
-        # the next compile (its role no longer matches) and is cleaned
-        # up manually, never rmtree'd by us.
+        # published directory. A crash in the flip->READY->rename window
+        # leaves staging with role=published: the NEXT compile resumes it
+        # via _resume_interrupted_publish (full verification, then rename
+        # promotion with no interior byte written), or fails closed and
+        # preserves it - it is never rmtree'd and never half-reused.
         _Stage(staging).complete("ready")
         _write_owner_marker(staging, snap_id, "published")
         (staging / "READY").write_text(snap_id, encoding="utf-8")
         os.rename(staging, final)
-    current = {
-        "snapshot_id": snap_id,
-        "path": f"snapshots/{snap_id}",
-        "runtime_format_version": RUNTIME_FORMAT_VERSION,
-        "compiler": RUNTIME_COMPILER,
-    }
-    _atomic_write(output_root / "current.json",
-                  json.dumps(current, indent=2, sort_keys=True).encode())
-    manifest = json.loads((final / "SNAPSHOT.json").read_text(encoding="utf-8"))
-    return CompiledSnapshot(
-        snap_id, final, manifest["rid_count"], manifest["object_count"],
-        manifest["source_count"], manifest["dataset_count"],
-        manifest["tag_count"], manifest["tag_memberships"])
+    return _finish_publish(output_root, final, snap_id)
