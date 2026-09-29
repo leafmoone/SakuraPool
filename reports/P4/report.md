@@ -17,6 +17,18 @@
   - `konachan_full-correct-path-range.json` — 正确 tree 路径及两跳 Range 证据，SHA-256 `9bdc2671599deecc15c5680abdaa9e2173470fdbb4c477c7cabcabd6e8f4e221`。
 - **账本与当前结论**：本次只保存了 `konachan_full-ledger-after.json`，**ledger-before 缺失，因此不能计算或声称 before/after delta**。配置化实现已提交；公开仓库 OpenAPI/tree 与按真实 tree 路径执行的 1B 两跳 Range 均成功。P4 仍为 `P4_PARTIAL / WAITING_REVIEW`：产品未解锁，完整下载、TAR 扫描、生产解锁和 If-Match 仍未执行，不能升级为 `P4_IMPLEMENTED`。
 
+## game_cg_5M 真实验证 addendum
+
+- **实现绑定**：当前实现 `dfd5121af933ac5f63b66ed031ce46a569dcf469`，实现 tree `64e7db4b11c92903e9777a7592d9b0156ae49ec6`。本 addendum 只补充已完成的 `leafmoone/game_cg_5M` 只读验证，不修改旧 game 或 konachan 证据。
+- **真实事实**：token 来自 `D:/sm_data/ms-token.tmp`，值未记录；OpenAPI HTTP **200**；tree HTTP **200**，`TotalCount=147`；真实 tree 路径 `pre/gamecg-v1-pre-p00-001.tar`，声明大小 `2240399360` B；origin `/repo` HTTP **302**；随后对同次 CDN `Location` 以**无凭证**方式请求，CDN HTTP **206**；`Range: bytes=0-0`，`Content-Range: bytes 0-0/2240399360`，`Content-Length: 1`，实际读取 **1 B**。
+- **目标证据**（仓库外固定工作根，均为脱敏文件）：
+  - `D:/SakuraTool/SakuraPool-P4-work/reports/P4/game_cg_5M-real-verification.json` — 1192 B，SHA-256 `87f23a7bf7676ca67854700e779a97b3ca35fb704d1cc99d2d4e30f48f286911`。
+  - `game_cg_5M-ledger-before.json` — 186 B，SHA-256 `c5c6525c9bbbd3d611f5dcf68f16062f1882283fd4fb73fef446b914aa7a97b7`；状态为 `not_collected`，不是伪造快照。
+  - `game_cg_5M-ledger-after.json` — 215 B，SHA-256 `0e92fd7ba299269b3d77f194960307492ef7bf718f141174ca1ef222a7f8e448`；状态为 `not_collected`，因此 delta 为 `not_computable`。
+  - `game_cg_5M-verification.stdout.log` — 238 B，SHA-256 `a98a5c345b333f6bbb7cc48a968cf8ee5f0325f72343bf2ae551feb552312f0e`。
+  - `game_cg_5M-verification.stderr.log` — 0 B，SHA-256 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`。
+- **明确未完成/未执行**：未执行完整 TAR 下载、一次顺序 TAR scan、P2 durable v4、P3 compile、package build、production fetch、并发 `1/4/8` 矩阵、fresh-process 验证；也未证明固定工作根的 4 GiB 物理边界。没有绕过生产门禁，没有上传/修改远端数据。P4 仍为 `P4_PARTIAL / WAITING_REVIEW`，不能据此升级为 `P4_IMPLEMENTED`。
+
 ## 1. 基线、提交、边界
 
 - BASE、`main`、`origin/main`：`edc72fbaaddc4dc8f9865ddfa576b737c7b15f5a`。两笔连续实现提交：`7f8afbcb5185a348fc069fb339308eef2a77c1b1`（guarded remote discovery、预算、离线读写 seam）；`56f40c43d0a85943b633c38eab6a4175d53b434f`（production fetch 禁止与可核 durable package 纠正）。均在 `dev` 正常 push；`git ls-remote origin refs/heads/dev refs/heads/main` 于后笔实现提交后核验 `origin/dev=56f40c43d0a85943b633c38eab6a4175d53b434f`、`origin/main=BASE`。尚无报告提交；报告-only 提交会另列，**不回写被认证产品 SHA**。
