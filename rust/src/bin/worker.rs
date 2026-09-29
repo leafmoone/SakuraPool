@@ -11,12 +11,12 @@
 //! conditions and is drained (with a bound) by the supervisor.
 
 use sakurapool_rust::{
-    parse_loopback_url, scan_tar_file, validate_content_range, BudgetLimits, ByteRange, JobBudget,
+    http_request, scan_tar_file, BudgetLimits, ByteRange, HttpOp, HttpPolicy, JobBudget,
     ScanLimits, StreamingSha256, MAX_LINE_BYTES, PROTOCOL_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, BufRead, Write};
 
 const CAPABILITIES: [&str; 3] = ["hash_file", "fetch_range", "scan_tar"];
 
@@ -232,8 +232,19 @@ fn dispatch(request: &Request) -> Result<serde_json::Value, &'static str> {
         "fetch_range" => {
             let payload: FetchRangePayload = serde_json::from_value(request.payload.clone())
                 .map_err(|_| "protocol_violation")?;
-            let value = fetch_range(&payload.url, payload.start, payload.end, payload.total)?;
-            Ok(serde_json::json!({ "sha256": value.0, "bytes": value.1 }))
+            let range = ByteRange::new(payload.start, payload.end, payload.total)?;
+            let response = http_request(
+                &HttpOp::Range {
+                    range,
+                    total: payload.total,
+                },
+                &payload.url,
+                range.len(),
+                &HttpPolicy::default(),
+            )?;
+            let mut hasher = StreamingSha256::new();
+            hasher.update(&response.body);
+            Ok(serde_json::json!({ "sha256": hasher.finish(), "bytes": range.len() }))
         }
         "scan_tar" => {
             let payload: ScanTarPayload = serde_json::from_value(request.payload.clone())
@@ -277,80 +288,4 @@ fn respond(
         eprintln!("worker stdout failure: {error:?}");
         std::process::exit(2);
     }
-}
-
-/// Loopback-only HTTP/1.1 range fetch with exact Content-Range validation and
-/// streaming SHA-256. Rejected targets never open a connection.
-fn fetch_range(url: &str, start: u64, end: u64, total: u64) -> Result<(String, u64), &'static str> {
-    use std::net::TcpStream;
-    use std::time::Duration;
-    let target = parse_loopback_url(url)?;
-    let range = ByteRange::new(start, end, total)?;
-    let mut stream =
-        TcpStream::connect((target.host.as_str(), target.port)).map_err(|_| "io_error")?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(30)))
-        .map_err(|_| "io_error")?;
-    let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}:{}\r\nRange: bytes={}-{}\r\nConnection: close\r\n\r\n",
-        target.path, target.host, target.port, range.start, range.end
-    );
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|_| "io_error")?;
-    let mut buffer = Vec::new();
-    let mut chunk = [0u8; 8192];
-    let mut header_end: Option<usize> = None;
-    loop {
-        if header_end.is_none() {
-            if let Some(index) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
-                header_end = Some(index + 4);
-            }
-        }
-        if header_end.is_some() {
-            break;
-        }
-        let count = stream.read(&mut chunk).map_err(|_| "io_error")?;
-        if count == 0 {
-            return Err("connection closed before headers");
-        }
-        buffer.extend_from_slice(&chunk[..count]);
-        if buffer.len() > 65536 {
-            return Err("response headers too large");
-        }
-    }
-    let header_end = header_end.unwrap();
-    let head_str = std::str::from_utf8(&buffer[..header_end]).map_err(|_| "headers not utf-8")?;
-    let mut lines = head_str.lines();
-    let status = lines.next().ok_or("empty response")?;
-    if status.split_whitespace().nth(1) != Some("206") {
-        return Err("expected http 206");
-    }
-    let mut content_range = String::new();
-    for line in lines {
-        if let Some((name, value)) = line.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("content-range") {
-                content_range = value.trim().to_owned();
-            }
-        }
-    }
-    validate_content_range(range, total, &content_range, range.len())?;
-    let mut body = buffer.split_off(header_end);
-    let expected = range.len() as usize;
-    let mut hasher = StreamingSha256::new();
-    loop {
-        if body.len() > expected {
-            return Err("body longer than requested range");
-        }
-        if body.len() == expected {
-            break;
-        }
-        let count = stream.read(&mut chunk).map_err(|_| "io_error")?;
-        if count == 0 {
-            return Err("body shorter than requested range");
-        }
-        body.extend_from_slice(&chunk[..count]);
-    }
-    hasher.update(&body);
-    Ok((hasher.finish(), range.len()))
 }

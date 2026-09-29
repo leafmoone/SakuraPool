@@ -5,6 +5,9 @@
 //! whose counters are intentionally lost on crash (a crash refunds nothing;
 //! the Python durable ledger keeps the reservation pending).
 
+mod http;
+pub use http::{http_request, HttpOp, HttpPolicy, HttpResponse, HTTP_MAX_HEADER_BYTES};
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::{self, Read};
