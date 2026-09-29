@@ -18,6 +18,9 @@ enum Request {
     Cancel {
         id: String,
     },
+    HashFile {
+        path: String,
+    },
 }
 #[derive(Serialize)]
 struct Response {
@@ -63,6 +66,15 @@ fn main() -> io::Result<()> {
                 )
             }
             Ok(Request::Cancel { id }) => response(Ok(format!("cancelled:{id}"))),
+            Ok(Request::HashFile { path }) => {
+                let result = std::fs::File::open(&path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|file| {
+                        sakurapool_r1::StreamingSha256::digest_reader(file)
+                            .map_err(|e| e.to_string())
+                    });
+                response(result)
+            }
             Err(error) => response(Err(error.to_string())),
         };
         serde_json::to_writer(&mut stdout, &reply)?;

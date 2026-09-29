@@ -21,11 +21,18 @@
   - `cargo test`：exit 0；`test result: ok. 4 passed`（lib 单元）+ `ok. 1 passed`（worker NDJSON 进程级集成）。
   - `cargo clippy --all-targets --all-features`：exit 0，0 warning。
   - `cargo build --release`：exit 0。
-- 哈希：`rust/Cargo.lock` SHA-256 `4af42f2c4de975cd9379dd43f1d64ad5c1d6f24af61e957928991c7cfda8e2d8`；release 二进制 `D:\SakuraTool\SakuraPool-P4-work\rust-target\release\sakurapool-r1-worker.exe`（576,493 B）SHA-256 `cb501474cde7eb14a1415dfe1afccb4e93dec659260c99f32983665156794888`。
+- 哈希：`rust/Cargo.lock` SHA-256 `4af42f2c4de975cd9379dd43f1d64ad5c1d6f24af61e957928991c7cfda8e2d8`；release 二进制 `D:\SakuraTool\SakuraPool-P4-work\rust-target\release\sakurapool-r1-worker.exe`（当前 603,289 B，含 `hash_file` 扩展）SHA-256 `87fe96f9638826c5c1834027da8da7ddfde89c3a7f561738f06b7fe7dfe0cc8a`（本节初版 576,493 B / `cb501474cde7eb14a1415dfe1afccb4e93dec659260c99f32983665156794888`）。
+
+### R1 Rust worker 扩展 + Python 薄 bridge 阶段
+
+- Rust worker 新增 `hash_file` op（流式 SHA-256 本地文件，无网络）；集成测试改为持久读线程 `Session` 客户端，新增 `worker_hash_file_streams_sha256`（131,072 B 载荷，与 `sha2` 独立计算逐字节一致；不存在文件返回 `ok:false`）。修正记录：Windows 路径反斜杠曾破坏 JSON 转义，改用 `serde_json::json!` 构造。
+- 实际验证（全部真实执行，`CARGO_TARGET_DIR` 仓库外）：`cargo fmt --check` exit 0；`cargo test` exit 0（`ok. 4 passed` lib 单元 + `ok. 2 passed` 集成）；`cargo clippy --all-targets --all-features` exit 0、0 warning；`cargo build --release` exit 0。哈希不变：`rust/Cargo.lock` `4af42f2c4de975cd9379dd43f1d64ad5c1d6f24af61e957928991c7cfda8e2d8`；worker.exe（603,289 B）`87fe96f9638826c5c1834027da8da7ddfde89c3a7f561738f06b7fe7dfe0cc8a`。
+- Python 薄 bridge `src/sakurapool/storage/rust_bridge.py`：spawn 本地 worker（二进制经 `SAKURAPPOOL_R1_WORKER` 或 `CARGO_TARGET_DIR`/仓库默认路径解析），stdin/stdout NDJSON，持久读线程，二进制管道 + UTF-8 容错解码（修复 Windows GBK 默认解码导致的读线程崩溃），静态失败面 `RustWorkerError`，`close` 幂等。不发起任何网络请求，不记录凭证。
+- 实际验证：`.venv312w3`（Python 3.12.13）+ `PYTHONPATH=src` + `SAKURAPPOOL_R1_WORKER` 指向仓库外 release 二进制；`pytest tests/test_r1_bridge.py -v` → **5 passed**（含 4 MiB 载荷与 Python `hashlib` 分块流式哈希逐字节一致）、0 failed，0.57 s。`ruff check`/`ruff format --check` 两文件均 exit 0。
 
 ### R1 当前缺口（未完成，不伪报）
 
-- Python 薄 bridge 调用 Rust worker 的 NDJSON 集成尚未实现；Rust 侧流式 SHA-256/Range 校验尚未接入 Python transport 生命周期。
+- Rust 侧流式 SHA-256/Range 校验尚未接入 Python transport 生命周期（bridge 现为独立能力）。
 - 离线 loopback 全链闭环（scan→P2 durable v4→P3 compile/query→Rust fetch 字节一致）未开始；预算迁移（请求前持久预留/块内内存计数/崩溃不退款覆盖输出/临时/IPC）未做；4 GiB 预算语义改应用数据工作集口径的 docs 迁移未完成。
 - wheel/fresh-process R1 来源验证、Python 全量回归在 R1 收尾阶段执行。
 - **阶段结论**：`P4_R1=WAITING_REVIEW`，`P4_COMPLETE=NO`，`MERGE_AUTHORIZED=NO`，`R2/P5=NO`。
