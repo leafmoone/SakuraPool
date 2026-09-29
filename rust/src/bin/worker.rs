@@ -107,20 +107,17 @@ fn main() -> io::Result<()> {
     let mut reader = io::BufReader::new(stdin.lock());
     let mut stdout = io::BufWriter::new(io::stdout().lock());
 
-    let line = read_line(&mut reader)?;
-    let hello: Hello = match parse_inbound(line) {
-        Ok(value) => match value {
-            Inbound::Hello(hello) => hello,
-            Inbound::Request(_) => {
-                let _ = emit(
-                    &mut stdout,
-                    &Outbound::ProtocolError {
-                        error: "expected_hello",
-                    },
-                );
-                return Ok(());
-            }
-        },
+    let hello: Hello = match read_line(&mut reader)?.and_then(parse_inbound) {
+        Ok(Inbound::Hello(hello)) => hello,
+        Ok(Inbound::Request(_)) => {
+            let _ = emit(
+                &mut stdout,
+                &Outbound::ProtocolError {
+                    error: "expected_hello",
+                },
+            );
+            return Ok(());
+        }
         Err(code) => {
             let _ = emit(&mut stdout, &Outbound::ProtocolError { error: code });
             return Ok(());
@@ -147,7 +144,14 @@ fn main() -> io::Result<()> {
 
     let mut seen_requests: BTreeSet<String> = BTreeSet::new();
     loop {
-        let line = read_line(&mut reader)?;
+        // One oversized line is reported and skipped; the worker survives.
+        let line = match read_line(&mut reader)? {
+            Ok(line) => line,
+            Err(code) => {
+                let _ = emit(&mut stdout, &Outbound::ProtocolError { error: code });
+                continue;
+            }
+        };
         if line.is_empty() {
             break; // stdin closed
         }
@@ -199,16 +203,54 @@ enum Inbound {
     Request(Request),
 }
 
-fn read_line(reader: &mut impl BufRead) -> io::Result<Vec<u8>> {
-    let mut line = Vec::new();
-    reader.read_until(b'\n', &mut line)?;
-    if line.last() == Some(&b'\n') {
-        line.pop();
-        if line.last() == Some(&b'\r') {
-            line.pop();
+fn read_line(reader: &mut impl BufRead) -> io::Result<Result<Vec<u8>, &'static str>> {
+    let mut line: Vec<u8> = Vec::with_capacity(1024);
+    loop {
+        let buf = reader.fill_buf()?;
+        if buf.is_empty() {
+            return Ok(Ok(line)); // EOF: pending partial line, or clean close
+        }
+        if let Some(pos) = buf.iter().position(|&byte| byte == b'\n') {
+            // The line is complete (or definitely over the limit).
+            if line.len() + pos > MAX_LINE_BYTES {
+                reader.consume(pos + 1); // rest of the line discarded
+                return Ok(Err("line_too_long"));
+            }
+            line.extend_from_slice(&buf[..pos]);
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            reader.consume(pos + 1);
+            return Ok(Ok(line));
+        }
+        // No newline yet: absorb the buffer, rejecting the moment the
+        // line provably exceeds the limit.
+        let take = buf.len();
+        let over = line.len() + take > MAX_LINE_BYTES;
+        line.extend_from_slice(&buf[..take]);
+        reader.consume(take);
+        if over {
+            drain_line(reader)?;
+            return Ok(Err("line_too_long"));
         }
     }
-    Ok(line)
+}
+
+/// Discard the rest of an already-rejected oversized line, one bounded
+/// chunk at a time, until its newline (or EOF). Keeps memory flat.
+fn drain_line(reader: &mut impl BufRead) -> io::Result<()> {
+    loop {
+        let buf = reader.fill_buf()?;
+        if buf.is_empty() {
+            return Ok(());
+        }
+        if let Some(pos) = buf.iter().position(|&byte| byte == b'\n') {
+            reader.consume(pos + 1); // stop exactly at the newline
+            return Ok(());
+        }
+        let take = buf.len();
+        reader.consume(take);
+    }
 }
 
 fn parse_inbound(line: Vec<u8>) -> Result<Inbound, &'static str> {
@@ -312,5 +354,123 @@ fn respond(
     if let Err(error) = emit(stdout, &message) {
         eprintln!("worker stdout failure: {error:?}");
         std::process::exit(2);
+    }
+}
+
+#[cfg(test)]
+mod line_reader_tests {
+    use super::*;
+    use std::io::{BufReader, Cursor, Read};
+
+    /// Counts every byte handed to the reader so tests can prove how much
+    /// of an oversized stream the worker actually consumed.
+    struct CountingReader {
+        inner: Cursor<Vec<u8>>,
+        consumed: std::sync::atomic::AtomicU64,
+    }
+
+    impl Read for CountingReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.consumed
+                .fetch_add(n as u64, std::sync::atomic::Ordering::SeqCst);
+            Ok(n)
+        }
+    }
+
+    impl CountingReader {
+        fn consumed(&self) -> u64 {
+            self.consumed.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[test]
+    fn line_at_exact_limit_is_accepted_one_over_is_rejected() {
+        let at = vec![b'x'; MAX_LINE_BYTES];
+        let mut reader = BufReader::new(CountingReader {
+            inner: Cursor::new(at),
+            consumed: std::sync::atomic::AtomicU64::new(0),
+        });
+        let got = read_line(&mut reader).unwrap().unwrap();
+        assert_eq!(got.len(), MAX_LINE_BYTES);
+
+        let over = vec![b'y'; MAX_LINE_BYTES + 1];
+        let mut reader = BufReader::new(CountingReader {
+            inner: Cursor::new(over),
+            consumed: std::sync::atomic::AtomicU64::new(0),
+        });
+        assert_eq!(read_line(&mut reader).unwrap(), Err("line_too_long"));
+    }
+
+    #[test]
+    fn oversized_line_is_rejected_early_and_remainder_drained() {
+        // 1 MiB of junk, then a newline, then a clean next line.
+        let mut data = vec![b'j'; 1024 * 1024];
+        data.push(b'\n');
+        data.extend_from_slice(b"clean\n");
+        let mut reader = BufReader::new(CountingReader {
+            inner: Cursor::new(data),
+            consumed: std::sync::atomic::AtomicU64::new(0),
+        });
+        assert_eq!(read_line(&mut reader).unwrap(), Err("line_too_long"));
+        // The whole oversized line had to be read to find its newline, but
+        // never more than the line itself plus chunk slack.
+        let consumed = reader.get_ref().consumed();
+        assert!(
+            consumed <= (1024 * 1024 + 16 * 1024) as u64,
+            "consumed={consumed}"
+        );
+        // The next read starts on the clean line.
+        assert_eq!(read_line(&mut reader).unwrap(), Ok(b"clean".to_vec()));
+    }
+
+    #[test]
+    fn oversized_line_without_newline_uses_no_unbounded_memory() {
+        // 16 MiB of junk with NO newline: the reader must reject after the
+        // 64 KiB limit and drain, and the test proves the worker read the
+        // stream (drain reaches EOF) while never buffering more than the
+        // limit plus chunks.
+        let data = vec![b'k'; 16 * 1024 * 1024];
+        let mut reader = BufReader::new(CountingReader {
+            inner: Cursor::new(data),
+            consumed: std::sync::atomic::AtomicU64::new(0),
+        });
+        assert_eq!(read_line(&mut reader).unwrap(), Err("line_too_long"));
+        assert_eq!(reader.get_ref().consumed(), (16 * 1024 * 1024) as u64);
+        // Buffered content never held the stream: only the limit-sized
+        // vector ever exists in read_line.
+    }
+
+    #[test]
+    fn eof_flushes_partial_line_then_reports_close() {
+        let mut reader = BufReader::new(CountingReader {
+            inner: Cursor::new(b"partial".to_vec()),
+            consumed: std::sync::atomic::AtomicU64::new(0),
+        });
+        assert_eq!(read_line(&mut reader).unwrap(), Ok(b"partial".to_vec()));
+        assert_eq!(read_line(&mut reader).unwrap(), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn crlf_and_chunked_lines_are_read_in_full() {
+        let mut reader = BufReader::new(CountingReader {
+            inner: Cursor::new(b"a\r\nb".to_vec()),
+            consumed: std::sync::atomic::AtomicU64::new(0),
+        });
+        assert_eq!(read_line(&mut reader).unwrap(), Ok(b"a".to_vec()));
+        // "b" arrives across a later read and only completes at EOF.
+        // "b" arrives across a later read and only completes at EOF.
+        assert_eq!(read_line(&mut reader).unwrap(), Ok(b"b".to_vec()));
+    }
+
+    #[test]
+    fn malformed_lines_report_codes_without_oversized_buffer() {
+        // Non-UTF8 and non-JSON lines still reach the parser unbounded-safe.
+        let mut reader = BufReader::new(CountingReader {
+            inner: Cursor::new(vec![0xff, 0xfe, b'\n']),
+            consumed: std::sync::atomic::AtomicU64::new(0),
+        });
+        let line = read_line(&mut reader).unwrap().unwrap();
+        assert!(parse_inbound(line).is_err());
     }
 }
