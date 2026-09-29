@@ -1,13 +1,34 @@
 # SakuraPool P4 阶段报告 — P4_R1 · WAITING_REVIEW
 
-## P4-R1 阶段执行记录（blocked at Rust toolchain preflight）
+## P4-R1 阶段执行记录
 
-- **固定基线**：`MAIN_BASE=edc72fbaaddc4dc8f9865ddfa576b737c7b15f5a`；`R1_START=5b10f7e153fc7094a32e4e27cf41eba9c90f0418`；执行分支 `dev`。Preflight 实际核验：本地 HEAD=`5b10f7e153fc7094a32e4e27cf41eba9c90f0418`，`origin/dev` 相同，`origin/main`=`MAIN_BASE`。
+- **固定基线**：`MAIN_BASE=edc72fbaaddc4dc8f9865ddfa576b737c7b15f5a`；`R1_START=5b10f7e153fc7094a32e4e27cf41eba9c90f0418`；执行分支 `dev`。Preflight 实际核验：本地 HEAD=`R1_START`，`origin/dev`=`R1_START`，`origin/main`=`MAIN_BASE`。
 - **保护边界**：未修改 `main`，未 amend/reset/rebase/force-push，未执行 ModelScope 或其它真实仓库请求，未执行完整真实 TAR 扫描、上传、R2/P5；既有 dirty/untracked 文件保持原样，未使用 `git add -A`。
-- **工具链阻塞证据**：`rustc --version && cargo --version && python --version && git diff --stat && git status --short` 在 `rustc --version` 处退出 **127**（`rustc: command not found`），因此本阶段未创建未经编译验证的 Cargo package/worker。`command -v rustc`, `command -v cargo`, `command -v rustup` 均无输出；当前 PATH 及用户目录核查未发现可用 Rust 二进制。
-- **已完成范围**：仅完成 R1 preflight 和本报告的事实记录；Python 既有实现未改，未声称 Rust core、NDJSON worker、预算迁移、Python bridge、Rust/Python 离线闭环或完整 R1 验收已完成。此前 P4 实现/测试事实仍见后文，不能冒充 R1 结果。
-- **未执行命令**：因 Rust toolchain 缺失，`cargo fmt`, `cargo test`, `cargo clippy`, `cargo build`、Cargo.lock/toolchain hash、Rust worker 集成、wheel/fresh-process R1 验证均未执行；没有测试统计可报告。Python 全量回归也未在本 R1 阶段重跑。
-- **阶段结论**：`P4_R1=WAITING_REVIEW`，`P4_COMPLETE=NO`，`MERGE_AUTHORIZED=NO`，`R2/P5=NO`。继续实现所需最小前提是提供可执行的 Rust toolchain；恢复后应从 `R1_START` 继续，不重做或覆盖既有 dirty/untracked。
+
+### R1 工具链安装（用户授权，系统/用户标准位置，不在仓库内）
+
+- `winget install --id Rustlang.Rustup --exact`（v1.29.1，exit 0）；rustup home `C:\Users\PC\.rustup`，cargo bin `C:\Users\PC\.cargo\bin`。rustup-init 标准行为把 `C:\Users\PC\.cargo\bin` 写入**用户级注册表 PATH**（已核验）；未改机器 PATH，未写入仓库任何位置。
+- 构建 target 放仓库外：用户级环境变量 `CARGO_TARGET_DIR=D:\SakuraTool\SakuraPool-P4-work\rust-target`（已持久化）；`rust/target` 不存在。
+- 链接器事实：系统无 MSVC 构建工具，`link.exe` 解析为 Git 自带 POSIX `C:\Program Files\Git\usr\bin\link.exe`，MSVC 链接全部失败（`link: extra operand`）。改用官方替代：`rustup toolchain install stable-x86_64-pc-windows-gnu` + MSYS2 ucrt64 MinGW（`winget install MSYS2.MSYS2` + `pacman -S mingw-w64-ucrt-x86_64-gcc`，均 exit 0），默认 toolchain 设为 `stable-x86_64-pc-windows-gnu`。
+- **新进程核验**（PowerShell 从注册表 Machine+User PATH 构建干净环境块后启动进程）：`where.exe rustc` → `C:\Users\PC\.cargo\bin\rustc.exe`（exit 0）；`where.exe cargo` → `C:\Users\PC\.cargo\bin\cargo.exe`（exit 0）；`rustc --version` → `rustc 1.98.1 (48a229cea 2026-09-01)`（exit 0）；`cargo --version` → `cargo 1.98.1 (797e8a9bc 2026-08-05)`（exit 0）；`rustup show` → active `stable-x86_64-pc-windows-gnu`（exit 0）；`rustup target list --installed` → `x86_64-pc-windows-msvc`、`x86_64-pc-windows-gnu`。组件：rustc/cargo/rust-std/rust-docs/rustfmt/clippy 齐全。
+
+### R1 Rust core 阶段（`rust/` workspace，仅离线原语）
+
+- 新增：`rust/Cargo.toml`（workspace）、`rust/crates/sakurapool-r1/`（lib + `sakurapool-r1-worker` NDJSON 二进制 + 集成测试）。lib 提供：持久化有限预算账本（reserve 先持久化、settle 只减差额、崩溃不自动退款、重复预留/超额拒绝）、精确 Range/Content-Range 校验、流式 SHA-256、response lifecycle（created/begin/complete/cancel）。worker 为 stdin NDJSON 请求 → stdout NDJSON 应答的进程级协议，含 cancel。
+- 修正记录：worker 首版 `reserve` 存在类型/语义 bug（新条目 id 错误复用末条），已改为直接写入调用方 id；`ByteRange` 补 `is_empty` 消除 clippy 警告。
+- 实际验证（`CARGO_TARGET_DIR` 指向仓库外，全部真实执行）：
+  - `cargo fmt --check`：exit 0（先 `cargo fmt` 修复格式差异，复验通过）。
+  - `cargo test`：exit 0；`test result: ok. 4 passed`（lib 单元）+ `ok. 1 passed`（worker NDJSON 进程级集成）。
+  - `cargo clippy --all-targets --all-features`：exit 0，0 warning。
+  - `cargo build --release`：exit 0。
+- 哈希：`rust/Cargo.lock` SHA-256 `4af42f2c4de975cd9379dd43f1d64ad5c1d6f24af61e957928991c7cfda8e2d8`；release 二进制 `D:\SakuraTool\SakuraPool-P4-work\rust-target\release\sakurapool-r1-worker.exe`（576,493 B）SHA-256 `cb501474cde7eb14a1415dfe1afccb4e93dec659260c99f32983665156794888`。
+
+### R1 当前缺口（未完成，不伪报）
+
+- Python 薄 bridge 调用 Rust worker 的 NDJSON 集成尚未实现；Rust 侧流式 SHA-256/Range 校验尚未接入 Python transport 生命周期。
+- 离线 loopback 全链闭环（scan→P2 durable v4→P3 compile/query→Rust fetch 字节一致）未开始；预算迁移（请求前持久预留/块内内存计数/崩溃不退款覆盖输出/临时/IPC）未做；4 GiB 预算语义改应用数据工作集口径的 docs 迁移未完成。
+- wheel/fresh-process R1 来源验证、Python 全量回归在 R1 收尾阶段执行。
+- **阶段结论**：`P4_R1=WAITING_REVIEW`，`P4_COMPLETE=NO`，`MERGE_AUTHORIZED=NO`，`R2/P5=NO`。
 
 > 本文件第 1–6 节保留历史 P4 game dataset 认证口径，历史实现冻结为 `56f40c43d0a85943b633c38eab6a4175d53b434f`。当前 repository 运行时配置化实现已在 dev 新提交 `dfd5121af933ac5f63b66ed031ce46a569dcf469` 完成；当前 `konachan_full` 目标验证见下方“当前配置化 addendum”，不覆盖旧 game 证据。
 
