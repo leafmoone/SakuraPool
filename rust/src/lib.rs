@@ -1,105 +1,79 @@
-//! Offline, bounded primitives for the first SakuraPool Rust stage.
+//! Offline, bounded primitives for the SakuraPool Rust worker.
+//!
+//! All worker state is in-memory by contract: the durable budget ledger
+//! lives exclusively on the Python side. [JobBudget] is a per-process guard
+//! whose counters are intentionally lost on crash (a crash refunds nothing;
+//! the Python durable ledger keeps the reservation pending).
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct LedgerEntry {
-    pub id: String,
-    pub reserved: u64,
-    pub settled: Option<u64>,
+/// Version of the NDJSON control protocol spoken on stdin/stdout.
+pub const PROTOCOL_VERSION: u32 = 1;
+/// Hard cap for a single control line in either direction.
+pub const MAX_LINE_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BudgetLimits {
+    /// Cumulative raw body bytes the job may consume.
+    pub body: u64,
+    /// Maximum per-request disk (staging/output) bytes.
+    pub disk: u64,
+    /// Maximum per-request in-flight (network + IPC) bytes.
+    pub inflight: u64,
+    /// Cumulative number of attempts the job may start.
+    pub attempts: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct LedgerState {
-    budget: u64,
-    spent: u64,
-    entries: Vec<LedgerEntry>,
+/// In-memory job budget. Never persisted; lost on crash on purpose.
+#[derive(Debug, Clone)]
+pub struct JobBudget {
+    limit: BudgetLimits,
+    attempts_used: u64,
+    body_consumed: u64,
 }
 
-#[derive(Debug)]
-pub struct BudgetLedger {
-    path: PathBuf,
-    state: LedgerState,
-}
-
-impl BudgetLedger {
-    pub fn open(path: impl AsRef<Path>, budget: u64) -> io::Result<Self> {
-        let path = path.as_ref().to_path_buf();
-        let exists = path.exists();
-        let state = if exists {
-            serde_json::from_reader(File::open(&path)?).map_err(invalid_data)?
-        } else {
-            LedgerState {
-                budget,
-                ..Default::default()
-            }
-        };
-        if state.budget != budget || state.spent > state.budget {
-            return Err(invalid_data("invalid budget state"));
+impl JobBudget {
+    pub fn new(limit: BudgetLimits) -> Self {
+        Self {
+            limit,
+            attempts_used: 0,
+            body_consumed: 0,
         }
-        Ok(Self { path, state })
     }
-    pub fn available(&self) -> u64 {
-        self.state.budget - self.state.spent
+    pub fn limit(&self) -> BudgetLimits {
+        self.limit
     }
-    pub fn reserve(&mut self, id: impl Into<String>, amount: u64) -> io::Result<()> {
-        let id = id.into();
-        if self.state.entries.iter().any(|e| e.id == id) {
-            return Err(invalid_data("duplicate reservation"));
+    pub fn attempts_used(&self) -> u64 {
+        self.attempts_used
+    }
+    pub fn body_consumed(&self) -> u64 {
+        self.body_consumed
+    }
+    /// Fail-closed admission check for one request reservation.
+    pub fn admit(&self, need: &BudgetLimits) -> Result<(), &'static str> {
+        if need.attempts > self.limit.attempts.saturating_sub(self.attempts_used) {
+            return Err("budget_exceeded");
         }
-        if amount > self.available() {
-            return Err(io::Error::other("budget exceeded"));
+        if need.body > self.limit.body.saturating_sub(self.body_consumed) {
+            return Err("budget_exceeded");
         }
-        self.state.spent += amount;
-        self.state.entries.push(LedgerEntry {
-            id,
-            reserved: amount,
-            settled: None,
-        });
-        self.persist()
-    }
-    pub fn settle(&mut self, id: &str, actual: u64) -> io::Result<()> {
-        let entry = self
-            .state
-            .entries
-            .iter_mut()
-            .find(|e| e.id == id)
-            .ok_or_else(|| invalid_data("unknown reservation"))?;
-        if entry.settled.is_some() {
-            return Err(invalid_data("already settled"));
+        if need.disk > self.limit.disk {
+            return Err("budget_exceeded");
         }
-        if actual > entry.reserved {
-            return Err(invalid_data("settlement exceeds reservation"));
+        if need.inflight > self.limit.inflight {
+            return Err("budget_exceeded");
         }
-        self.state.spent -= entry.reserved - actual;
-        entry.settled = Some(actual);
-        self.persist()
+        Ok(())
     }
-    pub fn entry(&self, id: &str) -> Option<&LedgerEntry> {
-        self.state.entries.iter().find(|e| e.id == id)
+    pub fn commit_attempt(&mut self) {
+        self.attempts_used = self.attempts_used.saturating_add(1);
     }
-    fn persist(&self) -> io::Result<()> {
-        let tmp = self.path.with_extension("tmp");
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&tmp)?;
-        serde_json::to_writer(&mut file, &self.state).map_err(invalid_data)?;
-        file.sync_all()?;
-        fs::rename(tmp, &self.path)
+    pub fn commit_body(&mut self, bytes: u64) {
+        self.body_consumed = self.body_consumed.saturating_add(bytes);
     }
-}
-
-fn invalid_data<E: std::fmt::Display>(error: E) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, error.to_string())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,11 +89,10 @@ impl ByteRange {
         Ok(Self { start, end })
     }
     pub fn len(self) -> u64 {
-        self.end - self.start + 1
+        self.end.saturating_sub(self.start).saturating_add(1)
     }
-    /// A valid range always spans at least one byte (`start <= end`).
     pub fn is_empty(self) -> bool {
-        false
+        self.end < self.start
     }
 }
 
@@ -129,25 +102,25 @@ pub fn validate_content_range(
     value: &str,
     body_len: u64,
 ) -> Result<(), &'static str> {
-    let (unit, rest) = value.split_once(' ').ok_or("invalid Content-Range")?;
+    let (unit, rest) = value.split_once(' ').ok_or("invalid content range")?;
     if unit != "bytes" {
         return Err("unsupported range unit");
     }
-    let (span, advertised_total) = rest.split_once('/').ok_or("invalid Content-Range")?;
-    let (start, end) = span.split_once('-').ok_or("invalid Content-Range")?;
+    let (span, advertised_total) = rest.split_once('/').ok_or("invalid content range")?;
+    let (start, end) = span.split_once('-').ok_or("invalid content range")?;
     let parsed = ByteRange::new(
-        start.parse().map_err(|_| "invalid start")?,
-        end.parse().map_err(|_| "invalid end")?,
+        start.parse().map_err(|_| "invalid content range")?,
+        end.parse().map_err(|_| "invalid content range")?,
         total,
     )?;
     if parsed != request
         || advertised_total
             .parse::<u64>()
-            .map_err(|_| "invalid total")?
+            .map_err(|_| "invalid content range")?
             != total
         || body_len != request.len()
     {
-        return Err("Content-Range does not match request");
+        return Err("content range mismatch");
     }
     Ok(())
 }
@@ -201,65 +174,19 @@ impl StreamingSha256 {
     pub fn finish(self) -> String {
         format!("{:x}", self.0.finalize())
     }
-    pub fn digest_reader<R: Read>(mut reader: R) -> io::Result<String> {
+    pub fn digest_reader<R: Read>(mut reader: R) -> io::Result<(String, u64)> {
         let mut hasher = Self::new();
         let mut buffer = [0u8; 64 * 1024];
+        let mut total = 0u64;
         loop {
             let count = reader.read(&mut buffer)?;
             if count == 0 {
                 break;
             }
+            total += count as u64;
             hasher.update(&buffer[..count]);
         }
-        Ok(hasher.finish())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Lifecycle {
-    Created,
-    Responding,
-    Completed,
-    Cancelled,
-}
-#[derive(Debug)]
-pub struct ResponseLifecycle {
-    state: Lifecycle,
-}
-impl Default for ResponseLifecycle {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-impl ResponseLifecycle {
-    pub fn new() -> Self {
-        Self {
-            state: Lifecycle::Created,
-        }
-    }
-    pub fn state(&self) -> Lifecycle {
-        self.state
-    }
-    pub fn begin(&mut self) -> Result<(), &'static str> {
-        if self.state != Lifecycle::Created {
-            return Err("response already started");
-        }
-        self.state = Lifecycle::Responding;
-        Ok(())
-    }
-    pub fn complete(&mut self) -> Result<(), &'static str> {
-        if self.state != Lifecycle::Responding {
-            return Err("response is not active");
-        }
-        self.state = Lifecycle::Completed;
-        Ok(())
-    }
-    pub fn cancel(&mut self) -> Result<(), &'static str> {
-        if matches!(self.state, Lifecycle::Completed | Lifecycle::Cancelled) {
-            return Err("response already closed");
-        }
-        self.state = Lifecycle::Cancelled;
-        Ok(())
+        Ok((hasher.finish(), total))
     }
 }
 
@@ -267,45 +194,95 @@ impl ResponseLifecycle {
 mod tests {
     use super::*;
     use std::io::Cursor;
-    use std::time::{SystemTime, UNIX_EPOCH};
-    fn temp() -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "sakurapool-worker-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
-    }
+
     #[test]
-    fn ledger_reserve_settle_and_reopen() {
-        let path = temp();
-        let mut ledger = BudgetLedger::open(&path, 10).unwrap();
-        ledger.reserve("a", 7).unwrap();
-        assert_eq!(ledger.available(), 3);
-        assert!(ledger.reserve("b", 4).is_err());
-        ledger.settle("a", 5).unwrap();
-        assert_eq!(ledger.available(), 5);
-        let reopened = BudgetLedger::open(&path, 10).unwrap();
-        assert_eq!(reopened.entry("a").unwrap().settled, Some(5));
-        let _ = fs::remove_file(path);
+    fn budget_admits_within_limits_and_rejects_overbudget() {
+        let limit = BudgetLimits {
+            body: 100,
+            disk: 10,
+            inflight: 10,
+            attempts: 2,
+        };
+        let mut budget = JobBudget::new(limit);
+        assert!(budget
+            .admit(&BudgetLimits {
+                body: 60,
+                disk: 4,
+                inflight: 4,
+                attempts: 1
+            })
+            .is_ok());
+        budget.commit_attempt();
+        budget.commit_body(60);
+        // Body remainder is now 40; a 60-byte request must fail.
+        assert_eq!(
+            budget.admit(&BudgetLimits {
+                body: 60,
+                disk: 4,
+                inflight: 4,
+                attempts: 1
+            }),
+            Err("budget_exceeded")
+        );
+        // Attempts are exhausted after one more admission.
+        assert!(budget
+            .admit(&BudgetLimits {
+                body: 40,
+                disk: 4,
+                inflight: 4,
+                attempts: 1
+            })
+            .is_ok());
+        budget.commit_attempt();
+        assert_eq!(
+            budget.admit(&BudgetLimits {
+                body: 0,
+                disk: 0,
+                inflight: 0,
+                attempts: 1
+            }),
+            Err("budget_exceeded")
+        );
+        // Per-request disk/inflight caps are independent of consumption.
+        assert_eq!(
+            JobBudget::new(limit).admit(&BudgetLimits {
+                body: 0,
+                disk: 11,
+                inflight: 0,
+                attempts: 0
+            }),
+            Err("budget_exceeded")
+        );
+        assert_eq!(
+            JobBudget::new(limit).admit(&BudgetLimits {
+                body: 0,
+                disk: 0,
+                inflight: 11,
+                attempts: 0
+            }),
+            Err("budget_exceeded")
+        );
     }
+
     #[test]
     fn range_is_exact() {
         let range = ByteRange::new(10, 19, 100).unwrap();
         assert!(validate_content_range(range, 100, "bytes 10-19/100", 10).is_ok());
         assert!(validate_content_range(range, 100, "bytes 10-20/100", 10).is_err());
     }
+
     #[test]
     fn hash_is_streaming() {
         let mut hasher = StreamingSha256::new();
         hasher.update(b"a");
         hasher.update(b"bc");
-        assert_eq!(
-            hasher.finish(),
-            StreamingSha256::digest_reader(Cursor::new(b"abc")).unwrap()
-        );
+        let (direct, bytes) = (hasher.finish(), 3);
+        let (streamed, streamed_bytes) =
+            StreamingSha256::digest_reader(Cursor::new(b"abc")).unwrap();
+        assert_eq!(direct, streamed);
+        assert_eq!(bytes, streamed_bytes);
     }
+
     #[test]
     fn loopback_url_rejects_everything_but_loopback_http() {
         let ok = parse_loopback_url("http://127.0.0.1:8080/data/obj.bin").unwrap();
@@ -323,12 +300,5 @@ mod tests {
         assert!(parse_loopback_url("127.0.0.1:1/").is_err());
         assert!(parse_loopback_url("http://127.0.0.1").is_err());
         assert!(parse_loopback_url("http://127.0.0.1:70000/").is_err());
-    }
-    #[test]
-    fn lifecycle_rejects_invalid_transitions() {
-        let mut lifecycle = ResponseLifecycle::new();
-        lifecycle.begin().unwrap();
-        lifecycle.complete().unwrap();
-        assert!(lifecycle.cancel().is_err());
     }
 }

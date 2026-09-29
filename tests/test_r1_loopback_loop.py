@@ -7,6 +7,7 @@ loopback HTTP. No external network, no real repository access.
 
 import hashlib
 import json
+import os
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,22 +21,34 @@ from sakurapool.runtime.inventory import load_p2_inventory
 from sakurapool.runtime.query import RuntimeQuerySpec
 from sakurapool.runtime.snapshot import RuntimeSnapshot
 from sakurapool.storage.budget import DEFAULT_WORK_ROOT, MIB, BudgetLedger
-from sakurapool.storage.rust_bridge import (
-    RustWorker,
-    RustWorkerError,
-    find_worker_binary,
-)
+from sakurapool.storage.rust_bridge import RustWorker, RustWorkerError
 
-try:
-    find_worker_binary()
-except RustWorkerError:
-    _WORKER_AVAILABLE = False
-else:
-    _WORKER_AVAILABLE = True
+
+def _worker_binary() -> str | None:
+    """Explicit binary resolution for tests (the bridge itself has no fallback)."""
+    explicit = os.environ.get("SAKURAPOOL_RUST_WORKER")
+    if explicit:
+        return explicit if os.path.isfile(explicit) else None
+    for cand in (
+        "D:/SakuraTool/SakuraPool-P4-work/rust-target/release/sakurapool-worker.exe",
+        "D:/SakuraTool/SakuraPool-P4-work/rust-target/debug/sakurapool-worker.exe",
+    ):
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
+_WORKER_BINARY = _worker_binary()
+
+WORKER_JOB_BUDGET = {
+    "body": 4 * 1024 * 1024,
+    "disk": 4 * 1024 * 1024,
+    "inflight": 8 * 1024 * 1024,
+    "attempts": 5,
+}
 
 requires_worker = pytest.mark.skipif(
-    not _WORKER_AVAILABLE, reason="sakurapool-worker binary not built"
-)
+    _WORKER_BINARY is None, reason="sakurapool-worker binary not built")
 
 
 @pytest.fixture
@@ -114,28 +127,30 @@ def test_scan_p2_p3_rust_fetch_bytes_agree(work_root: Path) -> None:
     )
     server, url, _thread = _serve(tar_bytes)
     try:
-        with RustWorker(ledger=ledger) as worker:
+        with RustWorker(_WORKER_BINARY, job_budget=WORKER_JOB_BUDGET) as worker:
             reply = worker.fetch_range_gated(
-                url, 0, len(tar_bytes) - 1, len(tar_bytes), disk_reserve=len(tar_bytes)
+                url, 0, len(tar_bytes) - 1, len(tar_bytes), ledger=ledger,
+                disk_reserve=len(tar_bytes),
             )
-            assert reply == f"sha256:{expected}:bytes:{len(tar_bytes)}"
+            assert reply == {"sha256": expected, "bytes": len(tar_bytes)}
             status = ledger.status()
             assert status["attempts"] == 1
             assert status["body"] == len(tar_bytes)
             assert status["records"] == 0
         # Clean rejection: lease settles, the attempt stays charged.
-        with RustWorker(ledger=ledger) as worker:
+        with RustWorker(_WORKER_BINARY, job_budget=WORKER_JOB_BUDGET) as worker:
             with pytest.raises(RustWorkerError, match="worker rejected request"):
-                worker.fetch_range_gated("http://example.invalid:80/x", 0, 9, 100)
+                worker.fetch_range_gated(
+                    "http://example.invalid:80/x", 0, 9, 100, ledger=ledger)
             status = ledger.status()
             assert status["attempts"] == 2
             assert status["body"] == len(tar_bytes)
         # Crash-class failure: pending lease is retained, i.e. no refund.
-        crashed = RustWorker(ledger=ledger, timeout_s=1.0)
+        crashed = RustWorker(_WORKER_BINARY, job_budget=WORKER_JOB_BUDGET, timeout_s=1.0)
         crashed._proc.kill()
         # Crash-class failure (dead pipe / timeout): pending lease retained.
         with pytest.raises((RustWorkerError, OSError)):
-            crashed.fetch_range_gated(url, 0, 1023, len(tar_bytes))
+            crashed.fetch_range_gated(url, 0, 1023, len(tar_bytes), ledger=ledger)
         status = ledger.status()
         assert status["attempts"] == 3
         assert status["body"] == len(tar_bytes) + 1024
