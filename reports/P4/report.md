@@ -4,16 +4,16 @@
 
 ## 当前配置化 addendum（2026-09-29）
 
-- **实现提交**：`dfd5121af933ac5f63b66ed031ce46a569dcf469` (`feat(p4): make repository runtime configurable`)；未 amend、未 main。P4 repository 现在是运行时 `owner/name` 字符串，由 `location_gate.parse_repository` 唯一解析；`ModelScopeDataset`、tree/probe/proof、`BoundObject` 和 legacy condition proof 全链绑定同一配置 repository。P2 package manifest 的冻结 `_REPO` 仍是另一契约，未宣称支持 package schema 迁移。
+- **实现提交/tree**：`dfd5121af933ac5f63b66ed031ce46a569dcf469` (`feat(p4): make repository runtime configurable`)，tree `64e7db4b11c92903e9777a7592d9b0156ae49ec6`；未 amend、未 main。P4 repository 现在是运行时 `owner/name` 字符串，由 `location_gate.parse_repository` 唯一解析；`ModelScopeDataset`、tree/probe/proof、`BoundObject` 和 legacy condition proof 全链绑定同一配置 repository。P2 package manifest 的冻结 `_REPO` 仍是另一契约，未宣称支持 package schema 迁移。
 - **测试**：受影响套件 `216 passed, 1 skipped`，ruff 全部通过。当前提交后的工作树无 P4 源码/测试未提交改动；工作树剩余 P2/P3 报告噪音未纳入。
 - **目标**：`leafmoone/konachan_full`。token 直接来自 `D:/sm_data/ms-token.tmp`，token 值未写入证据。
-- **真实网络**：`network_request_started=true`。OpenAPI endpoint HTTP **200**，读取 1923 B；tree endpoint HTTP **200**，读取 906 B；legacy `/repo` Range `bytes=0-0` 对 `pre/gamecg-v1-pre-p02-003.tar` 返回 HTTP **404**，读取 1 B。因此 OpenAPI/tree 已真实可访问，但**未获得 HTTP 206，不能宣称 1B Range 可读**。没有完整下载、TAR 扫描、生产解锁或 If-Match 验证。
-- **目标证据**（仓库外固定工作根，未覆盖旧 game 证据）：
+- **真实网络**：目标为 `leafmoone/konachan_full`，`network_request_started=true`。OpenAPI endpoint HTTP **200**，tree endpoint HTTP **200**；legacy `/repo` Range `bytes=0-0` 对 `pre/gamecg-v1-pre-p02-003.tar` 返回 HTTP **404**，**未获得 HTTP 206，不能宣称 1B Range 可读**。没有完整下载、TAR 扫描、生产解锁或 If-Match 验证；产品仍未解锁。
+- **目标证据**（仓库外固定工作根，未覆盖旧 game 证据；以下四项均已固定 SHA）：
   - `D:/SakuraTool/SakuraPool-P4-work/reports/P4/konachan_full-real-verification.json` — 1507 B，SHA-256 `5ececb7bf8595bee43714bd81d3e9e21f517a88461b76090b64a3ce2c716b51d`。
   - `konachan_full-real-verification.stdout.log` — 1219 B，SHA-256 `7f52de97757f458bf3778d4cb9ffcdc9cb1827c1312cb7ed487482f80c0e6f67`。
   - `konachan_full-real-verification.stderr.log` — 0 B，SHA-256 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`。
   - `konachan_full-ledger-after.json` — 207 B，SHA-256 `610c9ba8e6b4858cda9e4ba352abc71f443568e09e8eda0d60d58bd28d2f5372`。本次没有 before 快照，不能伪造 ledger delta。
-- **当前结论**：配置化实现已提交；`konachan_full` OpenAPI/tree 成功，当前下载端点返回 404，1B Range **未验证**。P4 仍为 `P4_PARTIAL / WAITING_REVIEW`，不能升级为 `P4_IMPLEMENTED`。
+- **账本与当前结论**：本次只保存了 `konachan_full-ledger-after.json`，**ledger-before 缺失，因此不能计算或声称 before/after delta**。配置化实现已提交；`konachan_full` OpenAPI/tree 成功，当前下载端点返回 404，1B Range **未验证**。P4 仍为 `P4_PARTIAL / WAITING_REVIEW`，产品未解锁，不能升级为 `P4_IMPLEMENTED`。
 
 ## 1. 基线、提交、边界
 
