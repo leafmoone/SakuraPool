@@ -139,6 +139,20 @@ def test_package_inventory_and_exact_runtime_record_binding(package_root):
     assert not any("token" in json.dumps(item).lower() for item in manifest["files"])
 
 
+def test_frozen_package_schema_rejects_heterogeneous_repository(package_root):
+    root, manifest = package_root
+    foreign = dict(manifest, repo_id="leafmoone/konachan_full")
+    (root / "index-package.json").write_text(json.dumps(foreign))
+    # This is a frozen P2 schema boundary, not migration support: foreign
+    # repositories are rejected before provider/network/fetch code is reached.
+    with pytest.raises(PackageCorrupt, match="unapproved repository"):
+        load_package(root)
+    malformed = dict(manifest, repo_id="a..b/invalid")
+    (root / "index-package.json").write_text(json.dumps(malformed))
+    with pytest.raises(PackageCorrupt, match="unapproved repository"):
+        load_package(root)
+
+
 @pytest.mark.parametrize("change", ["size", "hash", "missing", "escape", "duplicate",
                                      "binding", "snapshot", "symlink", "directory"])
 def test_package_fails_closed_on_invalid_inventory_or_binding(package_root, change):

@@ -809,7 +809,7 @@ def test_full_stream_size_failure_keeps_pending(http_and_budget, name):
 
 def test_provider_metadata_uses_same_transport_and_ledger(http_and_budget):
     base, ledger, client = http_and_budget
-    provider = ModelScopeDataset(client, base)
+    provider = ModelScopeDataset(client, base, "leafmoone/game_cg_5M")
     assert provider.revisions() == ["a" * 40]
     files, complete = provider.list_files("a" * 40)
     assert complete and files[0].path == "example.tar"
@@ -977,12 +977,41 @@ def test_refresh_origin_requires_one_exact_provider_path_and_pin(http_and_budget
     rev = "a" * 40
     good = (base + "/api/v1/datasets/leafmoone/game_cg_5M/repo?"
             + "Revision=" + rev + "&FilePath=example.tar")
-    assert client._pinned_refresh_origin(BoundObject(good, len(DATA), rev, ETAG)) == good
+    # The refresh origin is rebuilt from the PERSISTENT repository identity
+    # sealed into the bound object, not from any hardcoded repository.
+    assert client._pinned_refresh_origin(BoundObject(
+        good, len(DATA), rev, ETAG,
+        repository="leafmoone/game_cg_5M")) == good
+    # A bound object without a repository configuration refuses refresh.
+    assert client._pinned_refresh_origin(BoundObject(good, len(DATA), rev, ETAG)) is None
+    # A provider repo route carrying a DIFFERENT owner/name than the sealed
+    # repository identity is refused at binding time.
+    other_route = good.replace("/leafmoone/game_cg_5M/",
+                               "/other-owner/other-name/")
+    with pytest.raises(ValueError, match="repository route mismatch"):
+        BoundObject(other_route, len(DATA), rev, ETAG,
+                    repository="leafmoone/game_cg_5M")
+    # A SWAPPED owner/name is not accepted either: the route must equal the
+    # configured (owner, name) exactly, in order; there is no swapped branch.
+    swapped_route = good.replace("/leafmoone/game_cg_5M/",
+                                 "/game_cg_5M/leafmoone/")
+    with pytest.raises(ValueError, match="repository route mismatch"):
+        BoundObject(swapped_route, len(DATA), rev, ETAG,
+                    repository="leafmoone/game_cg_5M")
+    # The correct route still binds, so the refusal is the mismatch, not the
+    # route shape itself.
+    assert client._pinned_refresh_origin(BoundObject(
+        good, len(DATA), rev, ETAG,
+        repository="leafmoone/game_cg_5M")) == good
+    # Malformed repository configuration is refused by the bound object too.
+    with pytest.raises(ValueError, match="owner/name"):
+        BoundObject(good, len(DATA), rev, ETAG, repository="a..b/c")
     for url in (good + "&FilePath=changed.tar", good + "&token=SECRET",
                 good + "#fragment", good.replace("&FilePath=example.tar", ""),
                 good.replace("example.tar", "../escape.tar")):
         try:
-            candidate = BoundObject(url, len(DATA), rev, ETAG)
+            candidate = BoundObject(url, len(DATA), rev, ETAG,
+                                    repository="leafmoone/game_cg_5M")
         except ValueError:
             continue  # bound object can fail before the resolver
         assert client._pinned_refresh_origin(candidate) is None

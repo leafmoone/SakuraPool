@@ -19,14 +19,20 @@ import pytest
 from sakurapool.storage.budget import DEFAULT_WORK_ROOT, MIB, BudgetLedger
 from sakurapool.storage.location_gate import (
     LocationRejected,
+    RepositoryConfigError,
     TwoHopKeyError,
     check_location,
     check_token_not_in_etag,
+    parse_repository,
     two_hop_proof_key,
     two_hop_record_key,
     validate_two_hop_record,
 )
-from sakurapool.storage.modelscope import ListedFile, ModelScopeDataset
+from sakurapool.storage.modelscope import (
+    ListedFile,
+    ModelScopeDataset,
+    TwoHopProbe,
+)
 from sakurapool.storage.transport import (
     GuardedTransport,
     RemoteIOError,
@@ -36,6 +42,7 @@ from sakurapool.storage.transport import (
 )
 
 REV = "a" * 40
+REPO = "leafmoone/game_cg_5M"
 TOKEN = "tk-secret-0123456789abcdef"
 ETAG = '"5483AA783C561A81C28B0A5E27E99E4E-134"'
 CDN = "cdn-lfs-cn-1.modelscope.cn"
@@ -189,29 +196,30 @@ def test_record_schema_fail_closed():
                revision_candidate=REV, path="pre/x.tar", size=10,
                policy_profile_descriptor="modelscope_dataset_legacy",
                observed_batch="b1")
-    built = validate_two_hop_record(dict(rec))
+    built = validate_two_hop_record(dict(rec),
+                                     expected_repository=REPO)
     assert two_hop_record_key(built) == two_hop_proof_key(
         **_v2_kwargs(revision=REV, path="pre/x.tar", size=10))
     bad = dict(rec)
     bad["schema_version"] = "transport_validator_v0"
     with pytest.raises(TwoHopKeyError):
-        validate_two_hop_record(bad)
+        validate_two_hop_record(bad, expected_repository=REPO)
     bad = dict(rec)
     bad.pop("repository")
     with pytest.raises(TwoHopKeyError):
-        validate_two_hop_record(bad)
+        validate_two_hop_record(bad, expected_repository=REPO)
     bad = dict(rec)
     bad["cdn_host"] = bad["origin_host"]  # degenerate one-host chain
     with pytest.raises(TwoHopKeyError):
-        validate_two_hop_record(bad)
+        validate_two_hop_record(bad, expected_repository=REPO)
     bad = dict(rec)
     bad["cdn_host"] = CDN.upper()  # unnormalized
     with pytest.raises(TwoHopKeyError):
-        validate_two_hop_record(bad)
+        validate_two_hop_record(bad, expected_repository=REPO)
     bad = dict(rec)
     bad["policy_profile_descriptor"] = "other_profile"
     with pytest.raises(TwoHopKeyError):
-        validate_two_hop_record(bad)
+        validate_two_hop_record(bad, expected_repository=REPO)
 
 
 # ------------------------------------------------------- transport behaviours
@@ -310,7 +318,7 @@ class FakeTransport:
 def test_list_files_maps_totalcount_field():
     page = [{"Path": "dir/1.tar", "Size": 2048, "Type": "blob"}]
     provider = ModelScopeDataset(FakeTransport([page], total_field="TotalCount"),
-                                 "http://localhost")
+                                 "http://localhost", REPO)
     files, complete = provider.list_files(REV)
     assert complete and files[0].path == "dir/1.tar"
     # Every tree entry is tagged with the revision candidate it was listed
@@ -321,13 +329,13 @@ def test_list_files_maps_totalcount_field():
 def test_list_files_rejects_disagreeing_totals():
     page = [{"Path": "dir/1.tar", "Size": 2048, "Type": "blob"}]
     provider = ModelScopeDataset(FakeTransport([page], total_field="both"),
-                                 "http://localhost")
+                                 "http://localhost", REPO)
     with pytest.raises(RemoteIOError):
         provider.list_files(REV)
 
 
 def test_range_probe_binds_tree_entry_identity():
-    provider = ModelScopeDataset(FakeTransport([]), "http://localhost")
+    provider = ModelScopeDataset(FakeTransport([]), "http://localhost", REPO)
     entry = ListedFile(path="dir/1.tar", size=2048, provider_sha256=None,
                        lfs=False, revision_candidate=REV)
     probe = provider.range_probe(entry, start=0, length=1, batch="verify")
@@ -346,7 +354,7 @@ def test_range_probe_binds_tree_entry_identity():
 
 
 def test_range_probe_rejects_unbound_or_malformed_entries():
-    provider = ModelScopeDataset(FakeTransport([]), "http://localhost")
+    provider = ModelScopeDataset(FakeTransport([]), "http://localhost", REPO)
     base = dict(path="dir/1.tar", size=2048, provider_sha256=None, lfs=False,
                 revision_candidate=REV)
     for bad in (dict(path="pre/../x.tar"), dict(path="/abs.tar"),
@@ -363,7 +371,7 @@ def test_range_probe_rejects_unbound_or_malformed_entries():
 
 def test_record_probe_proof_uses_only_bound_identity():
     ft = FakeTransport([])
-    provider = ModelScopeDataset(ft, "http://localhost")
+    provider = ModelScopeDataset(ft, "http://localhost", REPO)
     entry = ListedFile(path="dir/1.tar", size=2048, provider_sha256=None,
                        lfs=False, revision_candidate=REV)
     probe = provider.range_probe(entry, start=0, length=1, batch="verify")
@@ -423,12 +431,18 @@ def test_v2_proof_cross_host_and_cross_profile_never_share_key(tmp_path):
 
 
 def test_v2_proof_requires_full_business_identity():
-    # The v2 key domain binds the complete object identity: unauthorized
-    # repository, malformed revision, and non-canonical path all fail closed.
+    # The v2 key domain binds the complete object identity: malformed
+    # repository configuration, malformed revision, and non-canonical path all
+    # fail closed; a different well-formed repository configuration yields a
+    # different key (cross-repository isolation).
     base = _v2_kwargs()
     assert two_hop_proof_key(**base)
     with pytest.raises(TwoHopKeyError):
-        two_hop_proof_key(**_v2_kwargs(repository="other/user_repo"))
+        two_hop_proof_key(**_v2_kwargs(repository="a..b/user_repo"))
+    with pytest.raises(TwoHopKeyError):
+        two_hop_proof_key(**_v2_kwargs(repository="other user/repo"))
+    assert two_hop_proof_key(**_v2_kwargs(repository="other/user_repo")) != \
+        two_hop_proof_key(**base)
     with pytest.raises(TwoHopKeyError):
         two_hop_proof_key(**_v2_kwargs(revision="master"))
     with pytest.raises(TwoHopKeyError):
@@ -452,19 +466,22 @@ def test_v2_record_validation_binds_identity_and_profile():
                     observed_batch="b1")
         base.update(over)
         return base
-    # Unauthorized repository / malformed revision / traversal path refuse.
+    # A record from another repository than the runtime configuration, or a
+    # malformed revision, or a traversal path, all refuse.
     for over in (dict(repository="other/user_repo"),
                  dict(revision_candidate="master"),
                  dict(path="pre/../x.tar"),
                  dict(path="/pre/x.tar")):
         with pytest.raises(TwoHopKeyError):
-            validate_two_hop_record(rec(**over))
+            validate_two_hop_record(rec(**over), expected_repository=REPO)
     # Cross-profile: descriptor must equal the repository type exactly.
     with pytest.raises(TwoHopKeyError):
-        validate_two_hop_record(rec(policy_profile_descriptor="other"))
+        validate_two_hop_record(rec(policy_profile_descriptor="other"),
+                                expected_repository=REPO)
     # origin endpoint and host must be the same normalized identity.
     with pytest.raises(TwoHopKeyError):
-        validate_two_hop_record(rec(origin_host="other-origin.cn"))
+        validate_two_hop_record(rec(origin_host="other-origin.cn"),
+                                expected_repository=REPO)
 
 
 # ------------------------------------------------ loopback two-hop end-to-end
@@ -607,3 +624,124 @@ def test_two_hop_cdn_must_be_credential_free(tmp_path, monkeypatch):
     finally:
         origin.shutdown()
         cdn.shutdown()
+
+
+# --------------------------------------------- runtime repository configuration
+
+@pytest.mark.parametrize("repo",
+                         ["leafmoone/game_cg_5M", "leafmoone/konachan_full",
+                          "owner2/dataset-name_v2", "a1/b_2.c-3",
+                          "some_owner.some/some.repo.name"])
+def test_parse_repository_accepts_runtime_owner_name(repo):
+    parsed = parse_repository(repo)
+    assert (parsed.owner, parsed.name) == tuple(repo.split("/"))
+    assert parsed.id == repo
+
+
+@pytest.mark.parametrize("bad", [
+    "", "leafmoone", "leafmoone/", "/game_cg_5M", "a/b/c",
+    "a..b/c", "owner/a..b", "..a/b", "a/..", "owner/../name",
+    ".owner/name", "_.owner/name", "owner/-name", "owner/name_",
+    "leaf%2Fmoone/game", "leaf\\moone/game", "leaf moone/game",
+    "leaf\nmoone/game", "leafmoone/game_cg_5M/",
+    "leafmoone/game_cg_5M?Revision=x", "leafmoone/game_cg_5M#f",
+    "x" * 101 + "/y", "o/" + "y" * 101, 123, None, ("leafmoone", "game"),
+])
+def test_parse_repository_rejects_invalid_configuration(bad):
+    with pytest.raises(RepositoryConfigError):
+        parse_repository(bad)
+
+
+def test_parse_repository_rejects_consecutive_dots_with_dedicated_diagnostic():
+    # Explicit reviewer rule: any ".." substring in owner or name is refused
+    # with a dedicated diagnostic (never silently normalized away). Single
+    # interior dots remain valid syntax: this parser is not a provider
+    # allowlist, so it must not over-restrict legal owner/name spellings.
+    assert parse_repository("o.wner/name").owner == "o.wner"
+    for bad in ("a..b/c", "owner/a..b", "..a/b", "a/..b..c"):
+        with pytest.raises(RepositoryConfigError, match="consecutive dots"):
+            parse_repository(bad)
+
+
+def test_v2_key_rejects_malformed_repository_and_is_repo_isolated():
+    with pytest.raises(TwoHopKeyError):
+        two_hop_proof_key(**_v2_kwargs(repository="a..b/c"))
+    with pytest.raises(TwoHopKeyError):
+        two_hop_proof_key(**_v2_kwargs(repository="owner only"))
+    assert two_hop_proof_key(**_v2_kwargs()) != \
+        two_hop_proof_key(**_v2_kwargs(repository="leafmoone/konachan_full"))
+
+
+def test_validate_two_hop_record_requires_expected_repository():
+    rec = dict(schema_version="transport_validator_v1", kind="cdn_strong_etag",
+               etag_value=ETAG, repository=REPO,
+               repository_type="modelscope_dataset_legacy",
+               origin_endpoint="https://modelscope.cn",
+               origin_host="modelscope.cn", cdn_host=CDN, hop_count=2,
+               revision_candidate=REV, path="pre/x.tar", size=10,
+               policy_profile_descriptor="modelscope_dataset_legacy",
+               observed_batch="b1")
+    # The parameter is mandatory: no format-only lenient default exists.
+    with pytest.raises(TwoHopKeyError, match="expected_repository"):
+        validate_two_hop_record(dict(rec))
+    with pytest.raises(TwoHopKeyError):
+        validate_two_hop_record(dict(rec), expected_repository="a..b/c")
+    # Matching configuration accepts (the old game repo is a valid config too).
+    built = validate_two_hop_record(dict(rec), expected_repository=REPO)
+    assert built.repository == REPO
+    # A record of another repository is refused under this configuration.
+    foreign = dict(rec, repository="leafmoone/konachan_full")
+    with pytest.raises(TwoHopKeyError, match="match expected_repository"):
+        validate_two_hop_record(foreign, expected_repository=REPO)
+    # And the SAME record is readable under its own configuration.
+    assert validate_two_hop_record(
+        foreign, expected_repository="leafmoone/konachan_full").repository == \
+        "leafmoone/konachan_full"
+
+
+def _fake_probe(repository):
+    result = TwoHopResult(hop1_status=302, hop2_status=206,
+                          approved_host="loopback.test", etag=ETAG,
+                          bytes_read=1, payload=b"z", attempts=2, batch="b1")
+    return TwoHopProbe(repository=repository, revision_candidate=REV,
+                       path="dir/1.tar", size=2048, result=result)
+
+
+def test_probe_proof_refuses_cross_instance_reuse():
+    provider = ModelScopeDataset(FakeTransport([]), "http://localhost", REPO)
+    # A probe of the same object produced under a DIFFERENT configured
+    # repository is refused by this instance: identity is instance-bound.
+    foreign = _fake_probe("leafmoone/konachan_full")
+    with pytest.raises(TwoHopKeyError, match="does not belong"):
+        provider.record_probe_proof(foreign, payload_sha="0" * 64)
+    # A probe carrying this instance's own repository is accepted (endpoint
+    # binding is additionally enforced by the proof key downstream).
+    assert provider.record_probe_proof(
+        _fake_probe(REPO), payload_sha="0" * 64) == "k" * 64
+
+
+def test_provider_normalizes_and_binds_repository_configuration():
+    provider = ModelScopeDataset(FakeTransport([]), "http://localhost", REPO)
+    assert provider.repository_id.id == REPO
+    assert (provider.repository_id.owner, provider.repository_id.name) == \
+        ("leafmoone", "game_cg_5M")
+    url = provider.download_url(REV, "dir/1.tar")
+    assert url.startswith(f"http://localhost/api/v1/datasets/{REPO}/repo?")
+    for bad in ("a..b/c", "owner", "", "o/n/"):
+        with pytest.raises(ValueError, match="owner/name"):
+            ModelScopeDataset(FakeTransport([]), "http://localhost", bad)
+
+
+def test_unknown_repo_is_provider_answer_not_parser_restriction():
+    # Any syntactically valid owner/name may be configured; the parser must
+    # not act as a repository allowlist. A well-formed repository that
+    # ModelScope does not have is accepted at construction and surfaces as
+    # a clear provider error at request time.
+    unknown = ModelScopeDataset(FakeTransport([]), "http://localhost",
+                                 "some-owner/never-compiled-repo")
+    assert unknown.repository_id.owner == "some-owner"
+    assert unknown.repository_id.name == "never-compiled-repo"
+    # The configured identity drives every URL built by this instance.
+    url = unknown.download_url(REV, "dir/1.tar")
+    assert url.startswith(
+        "http://localhost/api/v1/datasets/some-owner/never-compiled-repo/repo?")

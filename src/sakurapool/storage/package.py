@@ -25,6 +25,7 @@ from ..runtime.compiler import HAS_METADATA
 from ..runtime.inventory import load_p2_inventory
 from ..runtime.snapshot import RuntimeSnapshot
 from .budget import DEFAULT_WORK_ROOT, BudgetExceeded, BudgetLedger, Reservation
+from .location_gate import RepositoryConfigError, parse_repository
 from .retrieval import AuditedSample, Extent, fetch_bound_sample
 from .transport import BoundObject, GuardedTransport, condition_binding_key
 
@@ -606,6 +607,12 @@ def fetch_from_package(root: Path, record_id: str, output: Path,
     snapshot/record/object/audit bindings all succeed. Provider resolution and
     conditional semantics then use this exact frozen package revision; URL is
     ephemeral, never stored. The guarded transport owns every remote attempt.
+
+    The P2 manifest schema is FROZEN to _REPO: load_package refuses any other
+    repository, and that boundary does NOT imply migration support for new
+    repositories. The parse_repository gate below is defensive parsing of the
+    already-frozen value so the same sealed identity flows into BoundObject,
+    not a repository configuration surface.
     """
     from .modelscope import ModelScopeDataset
 
@@ -615,12 +622,26 @@ def fetch_from_package(root: Path, record_id: str, output: Path,
     if not Path(root).absolute().is_relative_to(transport.ledger.root):
         raise PackageCorrupt("package and transport budget roots differ")
     package = load_package(root, allow_offline_loopback=transport.ledger.offline_mode)
+    # The package schema is frozen to its producer contract; parse again here
+    # before provider/bound-object construction so malformed runtime identity
+    # cannot cross this boundary. This is defensive validation, not migration.
+    try:
+        parse_repository(package.repo_id)
+    except (RepositoryConfigError, TypeError):
+        raise PackageCorrupt("package repository is not a valid owner/name") from None
     with RuntimeSnapshot.open(package.root / package.runtime, full_verify=True) as snapshot:
         binding, sample = package.sample(snapshot, record_id)
+    # Defensive re-parse of the frozen manifest value: the sealed parsed
+    # identity (BoundObject.repository_id) must equal the runtime
+    # configuration; a malformed value can never flow into the transport.
+    try:
+        parse_repository(package.repo_id)
+    except (RepositoryConfigError, TypeError):
+        raise PackageCorrupt("package repository is not a valid owner/name") from None
     provider = ModelScopeDataset(transport, package.endpoint, package.repo_id)
     url = provider.download_url(package.data_revision, binding.path)
     bound = BoundObject(url, binding.size, package.data_revision,
-                        binding.strong_etag)
+                        binding.strong_etag, repository=package.repo_id)
     # Package booleans are UNTRUSTED. Only the guarded persistent budget
     # ledger's exact identity-bound proof can suppress redundant 2-call
     # positive/negative probes. Fresh workspaces must probe before reading.

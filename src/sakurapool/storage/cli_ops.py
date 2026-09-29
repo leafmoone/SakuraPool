@@ -16,7 +16,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .budget import DEFAULT_WORK_ROOT, BudgetExceeded, BudgetLedger, Reservation, _cluster_bytes
-from .modelscope import REPO_ID, ModelScopeDataset
+from .location_gate import RepositoryConfigError, parse_repository
+from .modelscope import ModelScopeDataset
 from .package import fetch_from_package, load_package
 from .transport import GuardedTransport
 
@@ -36,8 +37,10 @@ def _profile(path: Path, *, offline_fixture: bool,
     if (not isinstance(data, dict) or set(data) != {
             "repo_id", "endpoint", "revision", "trusted_hosts", "work_root"}):
         raise ValueError("unknown or incomplete storage profile")
-    if data["repo_id"] != REPO_ID:
-        raise ValueError("profile references an unauthorized repository")
+    try:
+        parse_repository(data["repo_id"])
+    except (RepositoryConfigError, TypeError):
+        raise ValueError("profile repository is not a valid owner/name") from None
     endpoint, revision = data["endpoint"], data["revision"]
     if (not isinstance(endpoint, str) or (revision is None and require_revision)
             or (revision is not None and (not isinstance(revision, str)
@@ -118,7 +121,8 @@ def inspect(config_path: Path, output: Path, *, offline_fixture: bool = False) -
     settled = False
     try:
         with _transport(ledger, config) as transport:
-            provider = ModelScopeDataset(transport, config["endpoint"])
+            provider = ModelScopeDataset(transport, config["endpoint"],
+                                         config["repo_id"])
             revisions = provider.revisions()
             if config["revision"] is not None and config["revision"] not in revisions:
                 raise ValueError("selected commit absent from guarded revision response")
@@ -128,7 +132,7 @@ def inspect(config_path: Path, output: Path, *, offline_fixture: bool = False) -
                                if config["revision"] is not None else ([], False))
             plan = {
                 "format": "sakurapool-p4-inspect-v1",
-                "repository": REPO_ID, "repo_type": "dataset",
+                "repository": config["repo_id"], "repo_type": "dataset",
                 "endpoint": config["endpoint"],
                 "requested_revision": config["revision"],
                 "revision_candidates": revisions[:64],

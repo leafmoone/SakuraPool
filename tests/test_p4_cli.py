@@ -48,9 +48,9 @@ def test_remote_cli_invalid_profile_or_blocked_scan_no_output(tmp_path, operatio
 
 def test_profile_rejects_offline_external_and_production_root_swap(tmp_path):
     from sakurapool.storage.cli_ops import _profile
-    from sakurapool.storage.modelscope import REPO_ID
 
-    base = {"repo_id": REPO_ID, "endpoint": "https://modelscope.cn",
+    base = {"repo_id": "leafmoone/game_cg_5M",
+            "endpoint": "https://modelscope.cn",
             "revision": "a" * 40, "trusted_hosts": ["modelscope.cn"],
             "work_root": str(tmp_path)}
     path = tmp_path / "profile.json"

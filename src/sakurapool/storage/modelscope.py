@@ -20,12 +20,13 @@ from .location_gate import (
     _REVISION as _REV_SHAPE,
 )
 from .location_gate import (
+    RepositoryConfigError,
     TwoHopKeyError,
     _is_canonical_path,
+    parse_repository,
 )
 from .transport import GuardedTransport, RemoteIOError, TwoHopResult
 
-REPO_ID = "leafmoone/game_cg_5M"
 PAGE_SIZE = 200
 MAX_PAGES = 50  # provider request ceiling; result is capped earlier
 MAX_LISTED = 1000  # bounded inspect memory; never full-repo crawl
@@ -65,12 +66,22 @@ class TwoHopProbe:
 
 
 class ModelScopeDataset:
-    """One fixed repo/type and one guarded metadata/download transport."""
+    """One configured repo and one guarded metadata/download transport.
+
+    repo_id is an explicit RUNTIME configuration string (owner/name), parsed
+    exactly once by parse_repository and normalized on this instance. Every
+    URL, tree listing, probe identity and proof record is derived from THIS
+    instance's bound identity (endpoint + repository + fixed type profile);
+    probes are never reusable against a different instance configuration.
+    """
 
     def __init__(self, transport: GuardedTransport, endpoint: str,
-                 repo_id: str = REPO_ID):
-        if repo_id != REPO_ID:
-            raise ValueError("only the authorized dataset repo may be inspected")
+                 repo_id: str):
+        try:
+            self.repository_id = parse_repository(repo_id)
+        except RepositoryConfigError:
+            raise ValueError(
+                "repository configuration is not a valid owner/name") from None
         try:
             parsed = urlsplit(endpoint)
         except ValueError:
@@ -83,8 +94,9 @@ class ModelScopeDataset:
         transport._host(endpoint)
         self.endpoint = endpoint.rstrip("/")
         self.transport = transport
-        self.repo_id = repo_id
-        self.base = f"{self.endpoint}/api/v1/datasets/{REPO_ID}"
+        self.repo_id = self.repository_id.id
+        self.base = (f"{self.endpoint}/api/v1/datasets"
+                     f"/{self.repository_id.owner}/{self.repository_id.name}")
 
     def _data(self, url: str, *, phase: str = "provider_revision_shape") -> object:
         payload = self.transport.read_metadata(url)
@@ -244,7 +256,7 @@ class ModelScopeDataset:
         result = self.transport.two_hop_range(
             url, start=start, length=length, expected_size=entry.size,
             batch=batch)
-        return TwoHopProbe(repository=REPO_ID,
+        return TwoHopProbe(repository=self.repo_id,
                            revision_candidate=entry.revision_candidate,
                            path=entry.path, size=entry.size, result=result)
 
@@ -257,12 +269,16 @@ class ModelScopeDataset:
         """
         if not isinstance(probe, TwoHopProbe):
             raise ValueError("record_probe_proof requires a TwoHopProbe")
-        if probe.repository != REPO_ID:
-            raise TwoHopKeyError("unauthorized repository for two-hop proof")
+        # Cross-instance/cross-repository reuse is refused: the probe identity
+        # must belong to THIS instance's normalized configuration, and the
+        # type profile stays fixed (never relaxed to another descriptor).
+        if probe.repository != self.repo_id:
+            raise TwoHopKeyError("probe does not belong to this repository")
+        repository_type = "modelscope_dataset_legacy"
         return self.transport.record_two_hop_proof(
             origin_endpoint=self.endpoint,
             repository=probe.repository,
-            repository_type="modelscope_dataset_legacy",
+            repository_type=repository_type,
             revision=probe.revision_candidate,
             path=probe.path,
             size=probe.size,

@@ -28,11 +28,13 @@ from urllib3.util.retry import Retry
 from .budget import MIB, BudgetLedger, Reservation
 from .location_gate import (
     LocationRejected,
+    RepositoryConfigError,
     TwoHopKeyError,
     check_location,
     check_token_not_in_etag,
     normalize_endpoint,
     normalize_host,
+    parse_repository,
     two_hop_proof_key,
     two_hop_record_key,
     validate_two_hop_record,
@@ -85,12 +87,37 @@ class _AmbiguousRead(RemoteIOError):
 class BoundObject:
     """Ephemeral object identity. Not a dataclass: asdict must not leak a URL."""
 
-    __slots__ = ("url", "size", "immutable_revision", "strong_etag", "_sealed")
+    __slots__ = ("url", "size", "immutable_revision", "strong_etag", "repository_id",
+                 "_sealed")
 
     def __init__(self, url: str, size: int, immutable_revision: str | None = None,
-                 strong_etag: str | None = None):
+                 strong_etag: str | None = None, repository: str | None = None):
         if type(size) is not int or not 0 <= size < 2**64:
             raise ValueError("object size must be uint64")
+        repo = None
+        if repository is not None:
+            # Persistent identity binding: the runtime repository configuration
+            # is parsed ONCE (parse_repository, fail-closed) and sealed into the
+            # bound object; downstream refresh-origin and condition-proof logic
+            # only ever sees this structured value, never a raw string.
+            try:
+                repo = parse_repository(repository)
+            except RepositoryConfigError:
+                raise ValueError("bound object repository is not a valid owner/name") from None
+            # If this URL is a provider repo route, its owner/name segments
+            # must EQUAL the configured (owner, name) exactly, in order. A
+            # swapped or otherwise mismatched route is a clear refusal (never
+            # accepted, never silently re-bound), so refresh and proofs can
+            # not bind a repository-X object under identity Y.
+            # Non-provider URLs (loopback fixtures) are not repo routes and
+            # stay repository-neutral.
+            segments = urlsplit(url).path.split("/")
+            if (len(segments) == 7 and segments[1:4] == ["api", "v1", "datasets"]
+                    and segments[6] == "repo"
+                    and (segments[4], segments[5]) != (repo.owner, repo.name)):
+                raise ValueError(
+                    "repository route mismatch: bound object URL owner/name "
+                    "does not equal the configured repository")
         if strong_etag and (strong_etag.startswith("W/") or not re.fullmatch(
                 r'"[\x21\x23-\x7e]+"', strong_etag)):
             raise ValueError("weak or malformed ETag is not a reliable validator")
@@ -112,6 +139,7 @@ class BoundObject:
         object.__setattr__(self, "size", size)
         object.__setattr__(self, "immutable_revision", immutable_revision)
         object.__setattr__(self, "strong_etag", strong_etag)
+        object.__setattr__(self, "repository_id", repo)
         object.__setattr__(self, "_sealed", True)
 
     def __setattr__(self, _name: str, _value: object) -> None:
@@ -560,7 +588,8 @@ class GuardedTransport:
             cdn_host=normalize_host(cdn_host), hop_count=2,
             revision_candidate=revision, path=path, size=size,
             policy_profile_descriptor=repository_type,
-            observed_batch=observed_batch or "unbound"))
+            observed_batch=observed_batch or "unbound"),
+            expected_repository=repository)
         if two_hop_record_key(record) != key:
             raise RemoteIOError("two-hop proof key/record domain mismatch",
                                 code="redirect_policy", phase="two_hop_redirect")
@@ -596,11 +625,20 @@ class GuardedTransport:
 
         This validator does NOT authorize a refresh on 403; expiry recovery is
         unavailable until provider semantics are independently established.
+
+        The provider path segment is rebuilt from the PERSISTENT repository
+        identity sealed into the bound object (parse_repository output), never
+        from a hardcoded repository name: a bound object without a parsed
+        repository configuration refuses the refresh origin entirely.
         """
-        if not bound.immutable_revision or not bound.strong_etag:
+        if (not bound.immutable_revision or not bound.strong_etag
+                or bound.repository_id is None):
             return None
         parsed = urlsplit(bound.url)
-        if (parsed.path != "/api/v1/datasets/leafmoone/game_cg_5M/repo"
+        expected_repo_path = ("/api/v1/datasets"
+                              f"/{bound.repository_id.owner}"
+                              f"/{bound.repository_id.name}/repo")
+        if (parsed.path != expected_repo_path
                 or parsed.fragment or parsed.username or parsed.password):
             return None
         try:
@@ -849,19 +887,37 @@ class GuardedTransport:
 
         Legacy single-hop domain only: the hashed identity must never contain
         the v2 two-hop domain constant (two-hop keys never resolve here).
+
+        The repository is the RUNTIME configuration value, strictly parsed once
+        (parse_repository, fail-closed). The parsed owner/name are additionally
+        cross-checked against the bound object URL's provider path: a legacy
+        record stored under one repository cannot be re-bound to a different
+        configured repository, so reconfiguring can never resurrect an old
+        record under a new configuration.
         """
         if (not bound.immutable_revision or (expected_probe_sha256 is not None
                 and (not isinstance(expected_probe_sha256, str)
                      or not re.fullmatch(r"[0-9a-f]{64}", expected_probe_sha256)))):
             raise ValueError("conditional binding lacks frozen provider identity")
+        try:
+            repo = parse_repository(repository)
+        except RepositoryConfigError:
+            raise ValueError("unapproved proof repository") from None
         from .location_gate import TWOHOP_DOMAIN
         assert TWOHOP_DOMAIN not in json.dumps(
             [endpoint, repository, bound.immutable_revision, path, bound.size,
              bound.strong_etag], separators=(",", ":")), "legacy key domain polluted"
         self._host(endpoint)
         self._host(bound.url)
-        if repository != "leafmoone/game_cg_5M" or not path or ":" in path or ".." in path:
+        if not path or ":" in path or ".." in path:
             raise ValueError("unapproved proof repository/path")
+        # Isolation note: the condition key itself hashes the repository, so
+        # records stored under one configured repository are never addressable
+        # under another; the bound object additionally seals the parsed
+        # repository (BoundObject) when it is a provider repo route, and the
+        # v2 two-hop domain stays disjoint from this legacy key by
+        # construction. Reconfiguring can therefore not resurrect old records.
+        del repo
         key = condition_binding_key(
             endpoint=endpoint, repository=repository, revision=bound.immutable_revision,
             path=path, size=bound.size, strong_etag=bound.strong_etag)

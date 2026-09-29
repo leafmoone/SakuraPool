@@ -45,9 +45,6 @@ _TAG = re.compile(r'"[\x21\x23-\x7e]+"\Z')
 # paths are clean ASCII, so a percent sequence there is a mixed/partial
 # encoding and is always suspicious.
 _QUERY_ALLOWED_ESCAPES = frozenset(("2F", "3D", "2B"))
-# Frozen object identity for v2 proof records (design §6bis/§7.1):
-# exactly one authorized repository, hex revisions, canonical relative paths.
-AUTHORIZED_REPOSITORY = "leafmoone/game_cg_5M"
 _REVISION = re.compile(r"[0-9a-f]{40}\Z|[0-9a-f]{64}\Z")
 _SEG = re.compile(r"[A-Za-z0-9_.-]+\Z")
 
@@ -73,6 +70,71 @@ class LocationRejected(ValueError):
 
 class TwoHopKeyError(ValueError):
     """Proof-key domain misuse; never carries raw key material."""
+
+
+class RepositoryConfigError(ValueError):
+    """A runtime repository configuration string failed strict parsing."""
+
+
+@dataclass(frozen=True)
+class RepositoryId:
+    """Structured owner/name parsed ONCE from a runtime configuration string.
+
+    Every URL, probe identity and proof key downstream must use these parsed
+    components; the raw configuration string is never re-split or re-parsed.
+    No fixed repository allowlist exists: any SYNTACTICALLY valid owner/name
+    is accepted as a runtime configuration; whether ModelScope actually has
+    that repository is the provider's answer (a clear not-found error), not
+    this parser's. The fail-closed boundary here is SYNTAX plus full identity
+    binding (cross-repository reuse is rejected by construction).
+    """
+
+    owner: str
+    name: str
+
+    @property
+    def id(self) -> str:
+        return f"{self.owner}/{self.name}"
+
+
+_REPO_PART = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\Z")
+
+
+def parse_repository(repo_id: str) -> RepositoryId:
+    """The single repository parser (fail-closed).
+
+    Exactly one '/' separating a nonempty owner and name; each part is
+    1-100 chars of [A-Za-z0-9_.-] starting alphanumerically, never ending
+    with a dot/dash/underscore. This is a SYNTAX boundary only: it does not
+    enumerate or allowlist provider repositories; an unknown-but-well-formed
+    repository is accepted here and surfaces as a clear provider error.
+    Consecutive dots ("a..b") are rejected with a dedicated diagnostic, so
+    ANY ".." substring is refused. Also rejects: non-str, empty, extra or
+    missing slash, percent signs (pre-encoded traversal), backslashes,
+    control characters, blanks and overlong parts. Callers must use the
+    returned RepositoryId, not re-parse.
+    """
+    if not isinstance(repo_id, str) or not repo_id or len(repo_id) > 201:
+        raise RepositoryConfigError("repository must be a bounded nonempty string")
+    if "\\" in repo_id or "%" in repo_id or any(ord(c) < 0x20 or ord(c) == 0x7F
+                                                 for c in repo_id):
+        raise RepositoryConfigError("repository contains forbidden characters")
+    parts = repo_id.split("/")
+    if len(parts) != 2:
+        raise RepositoryConfigError("repository must be owner/name with exactly one slash")
+    owner, name = parts
+    for part in (owner, name):
+        # Explicit consecutive-dot / ".." rejection (dedicated diagnostic),
+        # then the strict charset (dots are not allowed at all), then the
+        # trailing punctuation rule.
+        if ".." in part:
+            raise RepositoryConfigError("repository part carries consecutive dots")
+        if not _REPO_PART.fullmatch(part):
+            raise RepositoryConfigError("repository part is not owner/name safe")
+        if part[-1] in "._-":
+            raise RepositoryConfigError(
+                "repository part cannot end with dot, dash or underscore")
+    return RepositoryId(owner=owner, name=name)
 
 
 def _reject(reason: str) -> None:
@@ -276,8 +338,10 @@ def two_hop_proof_key(*, origin_endpoint: str, repository: str, repository_type:
             not isinstance(etag, str) or not etag or type(size) is not int or
             size < 0 or size >= 2**64):
         raise TwoHopKeyError("incomplete two-hop identity")
-    if repository != AUTHORIZED_REPOSITORY:
-        raise TwoHopKeyError("unauthorized repository for two-hop proof")
+    try:
+        parse_repository(repository)
+    except RepositoryConfigError:
+        raise TwoHopKeyError("repository not a valid configuration owner/name") from None
     if not _REVISION.fullmatch(revision):
         raise TwoHopKeyError("revision not a valid object candidate")
     if not _is_canonical_path(path):
@@ -309,8 +373,33 @@ class TwoHopRecord:
 _RECORD_FIELDS = frozenset(TwoHopRecord.__dataclass_fields__)
 
 
-def validate_two_hop_record(record: dict) -> TwoHopRecord:
-    """Fail-closed reader-side validation; unknown/old/foreign profiles refuse."""
+class _Missing:
+    """Sentinel: expected_repository has NO default; omission is a contract
+    refusal, not a lenient fallback."""
+
+    def __repr__(self) -> str:
+        return "<missing expected_repository>"
+
+
+_MISSING = _Missing()
+
+
+def validate_two_hop_record(record: dict, *, expected_repository: "str | _Missing" = _MISSING) -> TwoHopRecord:
+    """Fail-closed reader-side validation; unknown/old/foreign profiles refuse.
+
+    expected_repository (the RUNTIME configuration value) is REQUIRED: there
+    is no default. Omission is a contract refusal via the explicit sentinel
+    (fixed diagnostic, not an accidental fallback); a malformed or
+    non-matching configuration refuses the record. There is no format-only
+    lenient path; records from any other repo can never be read back under a
+    different configuration.
+    """
+    if expected_repository is _MISSING:
+        raise TwoHopKeyError("expected_repository is required")
+    try:
+        expected = parse_repository(expected_repository)
+    except (RepositoryConfigError, TypeError):
+        raise TwoHopKeyError("expected_repository is missing or invalid") from None
     if not isinstance(record, dict) or set(record) != _RECORD_FIELDS:
         raise TwoHopKeyError("schema field set mismatch")
     try:
@@ -323,8 +412,8 @@ def validate_two_hop_record(record: dict) -> TwoHopRecord:
         raise TwoHopKeyError("unknown validator kind")
     if built.hop_count != 2:
         raise TwoHopKeyError("hop count mismatch")
-    if built.repository != AUTHORIZED_REPOSITORY:
-        raise TwoHopKeyError("unauthorized repository for two-hop proof")
+    if built.repository != expected.id:
+        raise TwoHopKeyError("record repository does not match expected_repository")
     if built.repository_type not in PROFILE_DESCRIPTORS:
         raise TwoHopKeyError("unapproved repository type")
     if built.policy_profile_descriptor != built.repository_type:
