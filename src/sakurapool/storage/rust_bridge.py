@@ -14,9 +14,12 @@ import subprocess
 import threading
 from pathlib import Path
 
+from .budget import Reservation
+
 _WORKER_ENV = "SAKURAPPOOL_R1_WORKER"
 _WORKER_NAME = "sakurapool-r1-worker"
 _TIMEOUT_S = 60.0
+_REJECTED = "worker rejected request"
 
 
 class RustWorkerError(RuntimeError):
@@ -51,8 +54,18 @@ def find_worker_binary() -> Path:
 class RustWorker:
     """One spawned worker with a persistent stdout reader thread."""
 
-    def __init__(self, binary: Path | str | None = None) -> None:
+    def __init__(
+        self,
+        binary: Path | str | None = None,
+        *,
+        ledger: object | None = None,
+        timeout_s: float = _TIMEOUT_S,
+    ) -> None:
         self.binary = Path(binary) if binary is not None else find_worker_binary()
+        # Optional BudgetLedger: when set, fetch_range_gated reserves budget
+        # durably BEFORE any worker request and settles per crash semantics.
+        self.ledger = ledger
+        self.timeout_s = timeout_s
         self._proc = subprocess.Popen(
             [str(self.binary)],
             stdin=subprocess.PIPE,
@@ -75,7 +88,7 @@ class RustWorker:
         self._proc.stdin.write((json.dumps(request) + "\n").encode("utf-8"))
         self._proc.stdin.flush()
         try:
-            raw = self._lines.get(timeout=_TIMEOUT_S)
+            raw = self._lines.get(timeout=self.timeout_s)
         except queue.Empty as exc:
             raise RustWorkerError("worker timed out") from exc
         try:
@@ -83,8 +96,47 @@ class RustWorker:
         except json.JSONDecodeError as exc:
             raise RustWorkerError("worker returned invalid json") from exc
         if not bool(reply.get("ok")):
-            raise RustWorkerError("worker rejected request")
+            raise RustWorkerError(_REJECTED)
         return str(reply["result"])
+
+    def fetch_range_gated(
+        self,
+        url: str,
+        start: int,
+        end: int,
+        total: int,
+        *,
+        disk_reserve: int = 0,
+        ipc_reserve: int = 4096,
+    ) -> str:
+        """Loopback range fetch with a durable pre-request budget reservation.
+
+        Covers output/temp (``disk_reserve``), the body, and IPC overhead
+        (``ipc_reserve``) in one reservation installed before any worker
+        request. The body is counted in the worker's single in-memory block
+        and charged once. A clean worker rejection settles the lease (the
+        attempt stays charged; no refund). Timeout/protocol failure is treated
+        as a crash-class error: the lease is left pending, i.e. never
+        refunded.
+        """
+        if self.ledger is None:
+            raise RustWorkerError("no ledger configured")
+        if not 0 <= start <= end < total:
+            raise RustWorkerError("range outside resource")
+        body = end - start + 1
+        lease = self.ledger.reserve(  # type: ignore[attr-defined]
+            Reservation(body=body, disk=disk_reserve, inflight=body + ipc_reserve, attempt=True)
+        )
+        try:
+            result = self.call("fetch_range", url=url, start=start, end=end, total=total)
+        except RustWorkerError as error:
+            if str(error) != _REJECTED:
+                raise  # crash-class: pending lease is retained, no refund
+            self.ledger.settle(lease)  # type: ignore[attr-defined]
+            raise
+        self.ledger.consume_body(lease, body)  # type: ignore[attr-defined]
+        self.ledger.settle(lease)  # type: ignore[attr-defined]
+        return result
 
     def hash_file(self, path: Path | str) -> str:
         return self.call("hash_file", path=str(path))
@@ -92,9 +144,16 @@ class RustWorker:
     def close(self) -> None:
         if self._proc is None:
             return
-        if self._proc.stdin is not None:
-            self._proc.stdin.close()
-        self._proc.wait(timeout=_TIMEOUT_S)
+        try:
+            if self._proc.stdin is not None:
+                self._proc.stdin.close()
+        except OSError:
+            pass  # dead worker: the pipe may already be gone
+        try:
+            self._proc.wait(timeout=self.timeout_s)
+        except subprocess.TimeoutExpired:
+            self._proc.kill()
+            self._proc.wait(timeout=self.timeout_s)
         self._proc = None
 
     def __enter__(self) -> RustWorker:

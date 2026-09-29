@@ -37,10 +37,17 @@
 - 实际验证（真实执行）：`cargo fmt --check` exit 0；`cargo test` exit 0（`ok. 5 passed` lib 单元（含 loopback URL 拒绝矩阵）+ `ok. 2 passed` 集成）；`cargo clippy --all-targets --all-features` exit 0、0 warning；`cargo build --release` exit 0。当前 worker.exe（639,877 B）SHA-256 `eac066b4de00553dc9d2f06ab7bcb7e46ad490f487842d3ddc23f4d3f84c27f9`；`rust/Cargo.lock` 不变 `4af42f2c4de975cd9379dd43f1d64ad5c1d6f24af61e957928991c7cfda8e2d8`。
 - Python：`tests/test_r1_bridge.py` 新增 `test_loopback_fetch_range_bytes_match_python`：本地 `ThreadingHTTPServer`（127.0.0.1 随机端口）服务 2 MiB 合成载荷，Rust `fetch_range` 全量与 64 KiB 子区间均与 Python `hashlib` 逐字节一致；非 loopback URL（`http://example.invalid:80/x`）在 worker 内拒绝，无网络。`pytest tests/test_r1_bridge.py` → **6 passed**，1.18 s；`ruff check`/`ruff format --check` exit 0。
 
+### R1 预算门控 + 离线 loopback 全链闭环阶段
+
+- Python：`RustWorker` 增加可选 `ledger`（duck-typed `BudgetLedger`）、`timeout_s`；新增 `fetch_range_gated(url, start, end, total, disk_reserve, ipc_reserve)`：一次 `Reservation(body, disk, inflight, attempt=True)` **在 worker 请求前持久预留**，覆盖输出/临时（disk）+ body + IPC；worker 单块内存计数后一次 `consume_body`；正常拒绝 → `settle`（attempt 永不退）；超时/死管道等崩溃类错误 → 租约留账**不退款**；`close()` 对已死 worker 健壮（关管道/等待容错，超时 kill）。
+- 修正记录：死进程上 `stdin.flush/close` 抛 `OSError EBADF`，语义归入崩溃类（租约保留），`close()` 容错。
+- 端到端闭环 `tests/test_r1_loopback_loop.py`（全合成、loopback、工作根在 `DEFAULT_WORK_ROOT` 下）：`make_tar` 合成 128 KiB 图像 TAR → `indexer.scan` P2 durable v4（INPUT.json 声明 sha256 = 真实文件 sha256）→ `compile_runtime`+`RuntimeSnapshot` P3 查询/tag/location 解析 → loopback 服务该 TAR → `fetch_range_gated` 全量取回，返回哈希 = P2 声明哈希 = 本地文件哈希（三段字节一致）；随后验证：干净拒绝 → attempts 2/body 不变；kill worker 崩溃 → attempts 3、pending body +1024、inflight 保留（不退款）。
+- 实际验证（真实执行）：`pytest tests/test_r1_loopback_loop.py tests/test_r1_bridge.py -v` → **7 passed**（含闭环）、0 failed，10.50 s；`ruff check`/`ruff format --check` 新增/修改文件 exit 0。
+
 ### R1 当前缺口（未完成，不伪报）
 
-- 离线 loopback 全链闭环（scan→P2 durable v4→P3 compile/query→Rust fetch 字节一致）中 scan/P2/P3 段尚未与 Rust fetch 串成一条端到端测试；Rust 侧校验尚未接入 Python transport 生命周期（bridge 现为独立能力）。
-- 预算迁移（请求前持久预留/块内内存计数/崩溃不退款覆盖输出/临时/IPC）未做；4 GiB 预算语义改应用数据工作集口径的 docs 迁移未完成。
+- Rust 侧校验尚未接入 Python transport 生命周期（bridge 现为独立能力，未改既有 transport/modelscope 路径）。
+- 4 GiB 预算语义改应用数据工作集口径的 docs 迁移未完成（`docs/PROJECT_RULES.md` 与本报告的口径表述待统一）。
 - wheel/fresh-process R1 来源验证、Python 全量回归在 R1 收尾阶段执行。
 - **阶段结论**：`P4_R1=WAITING_REVIEW`，`P4_COMPLETE=NO`，`MERGE_AUTHORIZED=NO`，`R2/P5=NO`。
 
