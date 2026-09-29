@@ -96,3 +96,9 @@ P4 开始时按另行下发的执行单取得实际文件清单、对象版本�
 - Rust worker（`rust/` workspace，`sakurapool-r1`）只接受 loopback http 目标（127.0.0.1/localhost/::1）；预算在请求前持久预留（`reserve` → 请求 → 块内内存计数 → `consume_body`/`settle`），崩溃类失败租约留账不退款。
 - **R1 边界**：R1 交付物只允许离线验证（合成 fixture、loopback）；禁止任何 ModelScope/真实仓库请求、完整真实 TAR 扫描、远端数据上传、R2/P5 工作；`main` 分支不受 R1 影响。合成结果不冒称生产性能或生产可用性。
 - Rust 工具链安装于系统/用户标准位置（`C:\Users\PC\.cargo` / `C:\Users\PC\.rustup`，MSVC 目标不可用时采用官方 windows-gnu + MSYS2 ucrt64 链接器）；构建产物固定放仓库外 `CARGO_TARGET_DIR=D:\SakuraTool\SakuraPool-P4-work\rust-target`，仓库内不得出现 `rust/target`。
+
+## 11. 索引构建调度规则（2026-09-30 起）
+
+- **管理员独立调度**：索引构建调度只存在于管理员链路，作为独立任务单元运行（自己的授权、预算与租约）；不依赖、不阻塞、不借用用户查询链路的资源或会话。用户链路只消费已发布索引，不触发任何扫描。
+- **两种扫描模式 P2 语义等价**：下载后扫描（先取对象再本地 `scan_tar`）与远端流式扫描（`scan_http_tar` 单次流式读取）必须走同一个审计与暂存契约（`storage.rust_index.build_stage_from_scan`）；二者对同一对象产生的 P2 durable v4 stage（schema、偏移、长度、逐成员 SHA、整包 SHA、stamp、marker 顺序）逐字段一致。等价性由共享模块 + 字段级对照测试保证，禁止为任一模式单独分叉 stage 契约。
+- **不排期大仓库扫描**：调度器不得把整个大仓库（如 `leafmoone/game_cg_5M`）当作扫描任务排入队列；正式大仓库索引必须按 §2/§3 另行授权、建立 canary 清单后逐对象执行。任何"默认全库扫描"的调度入口都视为越权。
