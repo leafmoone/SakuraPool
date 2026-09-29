@@ -1,7 +1,7 @@
 """Shared pytest configuration for the SakuraPool test suite.
 
 R1 environment gate: the Rust worker binary is resolved in exactly one
-place (``resolve_r1_worker``). An explicit ``SAKURAPPOOL_RUST_WORKER`` is
+place (``resolve_r1_worker``). An explicit ``SAKURAPOOL_RUST_WORKER`` is
 authoritative - a missing file named by it resolves to ``None`` (the R1
 worker tests skip with a report) instead of silently falling back to a
 stale binary. The session header always reports the R1 environment state.
@@ -27,7 +27,7 @@ def resolve_r1_worker(environ: dict[str, str] | None = None) -> str | None:
     touching the real environment.
     """
     env = os.environ if environ is None else environ
-    explicit = env.get("SAKURAPPOOL_RUST_WORKER", "")
+    explicit = env.get("SAKURAPOOL_RUST_WORKER", "")
     if explicit:
         return explicit if os.path.isfile(explicit) else None
     for candidate in R1_WORKER_CANDIDATES:
@@ -43,7 +43,7 @@ def pytest_report_header(config) -> list[str]:
             "R1 worker: NOT FOUND - R1 worker tests will be skipped",
             "  build it: cargo build --release with the fixed CARGO_TARGET_DIR "
             "outside the repo (D:\\SakuraTool\\SakuraPool-P4-work\\rust-target), "
-            "or set SAKURAPPOOL_RUST_WORKER explicitly",
+            "or set SAKURAPOOL_RUST_WORKER explicitly",
         ]
     try:
         digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]

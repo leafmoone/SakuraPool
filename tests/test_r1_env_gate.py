@@ -26,12 +26,12 @@ FAKE_WORKER = "D:/SakuraTool/SakuraPool-P4-work/r1-env-gate-missing-worker.exe"
 
 def test_worker_resolver_explicit_env_is_authoritative():
     # A missing file named explicitly must resolve to skip, never fall back.
-    assert resolve_r1_worker({"SAKURAPPOOL_RUST_WORKER": FAKE_WORKER}) is None
+    assert resolve_r1_worker({"SAKURAPOOL_RUST_WORKER": FAKE_WORKER}) is None
     with tempfile.TemporaryDirectory(
             prefix="r1-env-resolver-", dir=DEFAULT_WORK_ROOT) as temp:
         fake = Path(temp) / "sakurapool-worker.exe"
         fake.write_bytes(b"\x00" * 16)
-        assert resolve_r1_worker({"SAKURAPPOOL_RUST_WORKER": str(fake)}) == str(fake)
+        assert resolve_r1_worker({"SAKURAPOOL_RUST_WORKER": str(fake)}) == str(fake)
 
 
 def test_worker_resolver_fallback_only_returns_existing_files():
@@ -44,7 +44,7 @@ def test_worker_resolver_fallback_only_returns_existing_files():
 def test_r1_suite_skips_and_reports_without_worker():
     """No build output -> the whole R1 bridge file skips (exit 0) and the
     session header carries the report with the build instruction."""
-    env = {**os.environ, "SAKURAPPOOL_RUST_WORKER": FAKE_WORKER,
+    env = {**os.environ, "SAKURAPOOL_RUST_WORKER": FAKE_WORKER,
            "PYTHONPATH": "src"}
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "tests/test_r1_bridge.py",
