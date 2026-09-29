@@ -7,13 +7,13 @@ loopback HTTP. No external network, no real repository access.
 
 import hashlib
 import json
-import os
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+from conftest import resolve_r1_worker
 from test_runtime import build_p2_index
 
 from sakurapool.runtime.compiler import compile_runtime
@@ -23,22 +23,9 @@ from sakurapool.runtime.snapshot import RuntimeSnapshot
 from sakurapool.storage.budget import DEFAULT_WORK_ROOT, MIB, BudgetLedger
 from sakurapool.storage.rust_bridge import RustWorker, RustWorkerError
 
-
-def _worker_binary() -> str | None:
-    """Explicit binary resolution for tests (the bridge itself has no fallback)."""
-    explicit = os.environ.get("SAKURAPOOL_RUST_WORKER")
-    if explicit:
-        return explicit if os.path.isfile(explicit) else None
-    for cand in (
-        "D:/SakuraTool/SakuraPool-P4-work/rust-target/release/sakurapool-worker.exe",
-        "D:/SakuraTool/SakuraPool-P4-work/rust-target/debug/sakurapool-worker.exe",
-    ):
-        if os.path.isfile(cand):
-            return cand
-    return None
-
-
-_WORKER_BINARY = _worker_binary()
+# Single source of truth: tests/conftest.py (explicit env var is
+# authoritative; missing binary -> None -> the suite skips with a report).
+_WORKER_BINARY = resolve_r1_worker()
 
 WORKER_JOB_BUDGET = {
     "body": 4 * 1024 * 1024,

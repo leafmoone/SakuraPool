@@ -18,6 +18,7 @@ import tempfile
 import threading
 
 import pytest
+from conftest import resolve_r1_worker
 
 from sakurapool.storage import rust_bridge as bridge
 from sakurapool.storage.budget import (
@@ -29,18 +30,12 @@ from sakurapool.storage.budget import (
 )
 from sakurapool.storage.rust_bridge import RustWorker, RustWorkerError
 
-RUST_WORKER = os.environ.get("SAKURAPOOL_RUST_WORKER", "")
-if not RUST_WORKER:
-    for cand in (
-        "D:/SakuraTool/SakuraPool-P4-work/rust-target/release/sakurapool-worker.exe",
-        "D:/SakuraTool/SakuraPool-P4-work/rust-target/debug/sakurapool-worker.exe",
-    ):
-        if os.path.isfile(cand):
-            RUST_WORKER = cand
-            break
+# Single source of truth: tests/conftest.py (explicit env var is
+# authoritative; missing binary -> None -> the suite skips with a report).
+RUST_WORKER = resolve_r1_worker()
 
 NEEDS_WORKER = pytest.mark.skipif(
-    not RUST_WORKER, reason="sakurapool-worker binary not built (RUST-CARGO-TARGET required)")
+    not RUST_WORKER, reason="sakurapool-worker binary not found (see R1 header report)")
 
 
 @pytest.fixture
@@ -321,9 +316,8 @@ def test_cancel_is_immediate_kill_and_wait(worker_path):
     assert not alive, "cancel() must kill the worker and wait for exit"
 
 
+@NEEDS_WORKER
 def test_stderr_tail_is_bounded(worker_path):
-    if not RUST_WORKER:
-        pytest.skip("sakurapool-worker binary not built")
     worker = RustWorker(worker_path, job_budget=WORKER_JOB_BUDGET)
     try:
         chunk = b"e" * 10_000
@@ -533,9 +527,8 @@ def test_double_settle_rejected(worker_path, ledger):
         ledger.settle(lease)
 
 
+@NEEDS_WORKER
 def test_gated_fetch_without_ledger_refuses(worker_path):
-    if not RUST_WORKER:
-        pytest.skip("sakurapool-worker binary not built")
     with RustWorker(worker_path, job_budget=WORKER_JOB_BUDGET) as worker:
         with pytest.raises(TypeError):
             worker.fetch_range_gated("http://127.0.0.1:9/", 0, 10, 100)
