@@ -152,6 +152,39 @@ pub fn validate_content_range(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoopbackTarget {
+    pub host: String,
+    pub port: u16,
+    pub path: String,
+}
+
+/// Only loopback http URLs are acceptable; everything else is rejected before any I/O.
+pub fn parse_loopback_url(url: &str) -> Result<LoopbackTarget, &'static str> {
+    let rest = url
+        .split_once("://")
+        .ok_or("missing scheme")
+        .and_then(|(scheme, rest)| {
+            (scheme == "http")
+                .then_some(rest)
+                .ok_or("only http is allowed")
+        })?;
+    let (hostport, path) = match rest.find('/') {
+        Some(index) => (&rest[..index], &rest[index..]),
+        None => (rest, "/"),
+    };
+    let (host, port) = hostport.rsplit_once(':').ok_or("missing port")?;
+    let port = port.parse::<u16>().map_err(|_| "invalid port")?;
+    if host != "127.0.0.1" && host != "localhost" && host != "::1" {
+        return Err("non-loopback target");
+    }
+    Ok(LoopbackTarget {
+        host: host.to_owned(),
+        port,
+        path: path.to_owned(),
+    })
+}
+
 pub struct StreamingSha256(Sha256);
 impl Default for StreamingSha256 {
     fn default() -> Self {
@@ -272,6 +305,24 @@ mod tests {
             hasher.finish(),
             StreamingSha256::digest_reader(Cursor::new(b"abc")).unwrap()
         );
+    }
+    #[test]
+    fn loopback_url_rejects_everything_but_loopback_http() {
+        let ok = parse_loopback_url("http://127.0.0.1:8080/data/obj.bin").unwrap();
+        assert_eq!(
+            ok,
+            LoopbackTarget {
+                host: "127.0.0.1".to_owned(),
+                port: 8080,
+                path: "/data/obj.bin".to_owned()
+            }
+        );
+        assert!(parse_loopback_url("http://localhost:9/x").is_ok());
+        assert!(parse_loopback_url("http://example.com:1/").is_err());
+        assert!(parse_loopback_url("https://127.0.0.1:1/").is_err());
+        assert!(parse_loopback_url("127.0.0.1:1/").is_err());
+        assert!(parse_loopback_url("http://127.0.0.1").is_err());
+        assert!(parse_loopback_url("http://127.0.0.1:70000/").is_err());
     }
     #[test]
     fn lifecycle_rejects_invalid_transitions() {

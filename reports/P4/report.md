@@ -26,14 +26,21 @@
 ### R1 Rust worker 扩展 + Python 薄 bridge 阶段
 
 - Rust worker 新增 `hash_file` op（流式 SHA-256 本地文件，无网络）；集成测试改为持久读线程 `Session` 客户端，新增 `worker_hash_file_streams_sha256`（131,072 B 载荷，与 `sha2` 独立计算逐字节一致；不存在文件返回 `ok:false`）。修正记录：Windows 路径反斜杠曾破坏 JSON 转义，改用 `serde_json::json!` 构造。
-- 实际验证（全部真实执行，`CARGO_TARGET_DIR` 仓库外）：`cargo fmt --check` exit 0；`cargo test` exit 0（`ok. 4 passed` lib 单元 + `ok. 2 passed` 集成）；`cargo clippy --all-targets --all-features` exit 0、0 warning；`cargo build --release` exit 0。哈希不变：`rust/Cargo.lock` `4af42f2c4de975cd9379dd43f1d64ad5c1d6f24af61e957928991c7cfda8e2d8`；worker.exe（603,289 B）`87fe96f9638826c5c1834027da8da7ddfde89c3a7f561738f06b7fe7dfe0cc8a`。
+- 实际验证（全部真实执行，`CARGO_TARGET_DIR` 仓库外）：`cargo fmt --check` exit 0；`cargo test` exit 0（`ok. 4 passed` lib 单元 + `ok. 2 passed` 集成）；`cargo clippy --all-targets --all-features` exit 0、0 warning；`cargo build --release` exit 0。哈希：`rust/Cargo.lock` `4af42f2c4de975cd9379dd43f1d64ad5c1d6f24af61e957928991c7cfda8e2d8`；worker.exe（603,289 B）`87fe96f9638826c5c1834027da8da7ddfde89c3a7f561738f06b7fe7dfe0cc8a`。
 - Python 薄 bridge `src/sakurapool/storage/rust_bridge.py`：spawn 本地 worker（二进制经 `SAKURAPPOOL_R1_WORKER` 或 `CARGO_TARGET_DIR`/仓库默认路径解析），stdin/stdout NDJSON，持久读线程，二进制管道 + UTF-8 容错解码（修复 Windows GBK 默认解码导致的读线程崩溃），静态失败面 `RustWorkerError`，`close` 幂等。不发起任何网络请求，不记录凭证。
 - 实际验证：`.venv312w3`（Python 3.12.13）+ `PYTHONPATH=src` + `SAKURAPPOOL_R1_WORKER` 指向仓库外 release 二进制；`pytest tests/test_r1_bridge.py -v` → **5 passed**（含 4 MiB 载荷与 Python `hashlib` 分块流式哈希逐字节一致）、0 failed，0.57 s。`ruff check`/`ruff format --check` 两文件均 exit 0。
 
+### R1 loopback fetch 阶段
+
+- Rust：lib 新增 `parse_loopback_url`/`LoopbackTarget`（仅接受 `127.0.0.1`/`localhost`/`::1` 的 http URL，其余在 I/O 前拒绝）；worker 新增 `fetch_range` op：std-only（无新依赖）HTTP/1.1 单连接 Range GET，30 s 读超时，64 KiB 头上限，精确 `Content-Range` 校验（复用 `validate_content_range`），body 长度与请求区间严格一致才流式 SHA-256，返回 `sha256:{hex}:bytes:{n}`。
+- 修正记录：初版 body 切分 `split_off(len-4)` 会把尾部 4 字节当 body 且丢首 chunk body 字节，改为 `header_end` 标记 + `split_off(header_end)`；let-chain 在 edition 2021 不可用，改写嵌套 `if let`。
+- 实际验证（真实执行）：`cargo fmt --check` exit 0；`cargo test` exit 0（`ok. 5 passed` lib 单元（含 loopback URL 拒绝矩阵）+ `ok. 2 passed` 集成）；`cargo clippy --all-targets --all-features` exit 0、0 warning；`cargo build --release` exit 0。当前 worker.exe（639,877 B）SHA-256 `eac066b4de00553dc9d2f06ab7bcb7e46ad490f487842d3ddc23f4d3f84c27f9`；`rust/Cargo.lock` 不变 `4af42f2c4de975cd9379dd43f1d64ad5c1d6f24af61e957928991c7cfda8e2d8`。
+- Python：`tests/test_r1_bridge.py` 新增 `test_loopback_fetch_range_bytes_match_python`：本地 `ThreadingHTTPServer`（127.0.0.1 随机端口）服务 2 MiB 合成载荷，Rust `fetch_range` 全量与 64 KiB 子区间均与 Python `hashlib` 逐字节一致；非 loopback URL（`http://example.invalid:80/x`）在 worker 内拒绝，无网络。`pytest tests/test_r1_bridge.py` → **6 passed**，1.18 s；`ruff check`/`ruff format --check` exit 0。
+
 ### R1 当前缺口（未完成，不伪报）
 
-- Rust 侧流式 SHA-256/Range 校验尚未接入 Python transport 生命周期（bridge 现为独立能力）。
-- 离线 loopback 全链闭环（scan→P2 durable v4→P3 compile/query→Rust fetch 字节一致）未开始；预算迁移（请求前持久预留/块内内存计数/崩溃不退款覆盖输出/临时/IPC）未做；4 GiB 预算语义改应用数据工作集口径的 docs 迁移未完成。
+- 离线 loopback 全链闭环（scan→P2 durable v4→P3 compile/query→Rust fetch 字节一致）中 scan/P2/P3 段尚未与 Rust fetch 串成一条端到端测试；Rust 侧校验尚未接入 Python transport 生命周期（bridge 现为独立能力）。
+- 预算迁移（请求前持久预留/块内内存计数/崩溃不退款覆盖输出/临时/IPC）未做；4 GiB 预算语义改应用数据工作集口径的 docs 迁移未完成。
 - wheel/fresh-process R1 来源验证、Python 全量回归在 R1 收尾阶段执行。
 - **阶段结论**：`P4_R1=WAITING_REVIEW`，`P4_COMPLETE=NO`，`MERGE_AUTHORIZED=NO`，`R2/P5=NO`。
 
