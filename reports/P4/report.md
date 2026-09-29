@@ -1,4 +1,13 @@
-# SakuraPool P4 阶段报告 — P4_PARTIAL · WAITING_REVIEW
+# SakuraPool P4 阶段报告 — P4_R1 · WAITING_REVIEW
+
+## P4-R1 阶段执行记录（blocked at Rust toolchain preflight）
+
+- **固定基线**：`MAIN_BASE=edc72fbaaddc4dc8f9865ddfa576b737c7b15f5a`；`R1_START=5b10f7e153fc7094a32e4e27cf41eba9c90f0418`；执行分支 `dev`。Preflight 实际核验：本地 HEAD=`5b10f7e153fc7094a32e4e27cf41eba9c90f0418`，`origin/dev` 相同，`origin/main`=`MAIN_BASE`。
+- **保护边界**：未修改 `main`，未 amend/reset/rebase/force-push，未执行 ModelScope 或其它真实仓库请求，未执行完整真实 TAR 扫描、上传、R2/P5；既有 dirty/untracked 文件保持原样，未使用 `git add -A`。
+- **工具链阻塞证据**：`rustc --version && cargo --version && python --version && git diff --stat && git status --short` 在 `rustc --version` 处退出 **127**（`rustc: command not found`），因此本阶段未创建未经编译验证的 Cargo package/worker。`command -v rustc`, `command -v cargo`, `command -v rustup` 均无输出；当前 PATH 及用户目录核查未发现可用 Rust 二进制。
+- **已完成范围**：仅完成 R1 preflight 和本报告的事实记录；Python 既有实现未改，未声称 Rust core、NDJSON worker、预算迁移、Python bridge、Rust/Python 离线闭环或完整 R1 验收已完成。此前 P4 实现/测试事实仍见后文，不能冒充 R1 结果。
+- **未执行命令**：因 Rust toolchain 缺失，`cargo fmt`, `cargo test`, `cargo clippy`, `cargo build`、Cargo.lock/toolchain hash、Rust worker 集成、wheel/fresh-process R1 验证均未执行；没有测试统计可报告。Python 全量回归也未在本 R1 阶段重跑。
+- **阶段结论**：`P4_R1=WAITING_REVIEW`，`P4_COMPLETE=NO`，`MERGE_AUTHORIZED=NO`，`R2/P5=NO`。继续实现所需最小前提是提供可执行的 Rust toolchain；恢复后应从 `R1_START` 继续，不重做或覆盖既有 dirty/untracked。
 
 > 本文件第 1–6 节保留历史 P4 game dataset 认证口径，历史实现冻结为 `56f40c43d0a85943b633c38eab6a4175d53b434f`。当前 repository 运行时配置化实现已在 dev 新提交 `dfd5121af933ac5f63b66ed031ce46a569dcf469` 完成；当前 `konachan_full` 目标验证见下方“当前配置化 addendum”，不覆盖旧 game 证据。
 
