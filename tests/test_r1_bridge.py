@@ -26,7 +26,7 @@ else:
 
 requires_worker = pytest.mark.skipif(
     not _WORKER_AVAILABLE,
-    reason="sakurapool-r1 worker binary not built",
+    reason="sakurapool-worker binary not built",
 )
 
 

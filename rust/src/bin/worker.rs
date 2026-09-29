@@ -1,4 +1,4 @@
-use sakurapool_r1::{ByteRange, ResponseLifecycle};
+use sakurapool_rust::{ByteRange, ResponseLifecycle};
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, Read, Write};
 
@@ -52,7 +52,7 @@ fn main() -> io::Result<()> {
                 let result = ByteRange::new(start, end, total)
                     .map_err(str::to_owned)
                     .and_then(|r| {
-                        sakurapool_r1::validate_content_range(r, total, &content_range, body_len)
+                        sakurapool_rust::validate_content_range(r, total, &content_range, body_len)
                             .map(|_| "valid".to_owned())
                             .map_err(str::to_owned)
                     });
@@ -76,7 +76,7 @@ fn main() -> io::Result<()> {
                 let result = std::fs::File::open(&path)
                     .map_err(|e| e.to_string())
                     .and_then(|file| {
-                        sakurapool_r1::StreamingSha256::digest_reader(file)
+                        sakurapool_rust::StreamingSha256::digest_reader(file)
                             .map_err(|e| e.to_string())
                     });
                 response(result)
@@ -98,7 +98,7 @@ fn main() -> io::Result<()> {
 /// Loopback-only HTTP/1.1 range fetch with exact Content-Range validation and
 /// streaming SHA-256. Rejected targets never open a connection.
 fn fetch_range(url: &str, start: u64, end: u64, total: u64) -> Result<String, String> {
-    use sakurapool_r1::{parse_loopback_url, validate_content_range, StreamingSha256};
+    use sakurapool_rust::{parse_loopback_url, validate_content_range, StreamingSha256};
     use std::net::TcpStream;
     use std::time::Duration;
     let target = parse_loopback_url(url)?;

@@ -8,3 +8,5 @@ build/
 /MEMORY.md
 .bench-cache*/
 .bench-inst/
+rust/target/
+.rustup/

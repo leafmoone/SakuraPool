@@ -1,4 +1,4 @@
-"""Thin offline bridge from Python to the ``sakurapool-r1`` Rust worker.
+"""Thin offline bridge from Python to the ``sakurapool-worker`` Rust binary.
 
 Spawns the native worker process, exchanges NDJSON over stdin/stdout, and
 never touches the network. Failure surfaces are static; no credential values
@@ -16,8 +16,8 @@ from pathlib import Path
 
 from .budget import Reservation
 
-_WORKER_ENV = "SAKURAPPOOL_R1_WORKER"
-_WORKER_NAME = "sakurapool-r1-worker"
+_WORKER_ENV = "SAKURAPPOOL_RUST_WORKER"
+_WORKER_NAME = "sakurapool-worker"
 _TIMEOUT_S = 60.0
 _REJECTED = "worker rejected request"
 

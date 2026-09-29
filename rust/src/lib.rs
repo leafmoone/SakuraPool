@@ -270,7 +270,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     fn temp() -> PathBuf {
         std::env::temp_dir().join(format!(
-            "sakurapool-r1-{}",
+            "sakurapool-worker-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()

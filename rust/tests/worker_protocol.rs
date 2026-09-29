@@ -13,7 +13,7 @@ struct Session {
 
 impl Session {
     fn new() -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_sakurapool-r1-worker"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_sakurapool-worker"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -68,7 +68,7 @@ fn worker_handles_ndjson_range_and_lifecycle() {
 fn worker_hash_file_streams_sha256() {
     let data: Vec<u8> = (0..(1 << 17)).map(|i| (i % 251) as u8).collect();
     let path = std::env::temp_dir().join(format!(
-        "sakurapool-r1-hash-{}",
+        "sakurapool-worker-hash-{}",
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()

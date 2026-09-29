@@ -1,0 +1,6 @@
+[toolchain]
+# Verified toolchain for this repository (R1 completion repair, 2026-09-29).
+# GNU target: MSVC link.exe is unavailable on this host; MSYS2 ucrt64 ld is
+# the working linker. All cargo commands run with --locked against the
+# committed Cargo.lock.
+channel = "1.98.1-x86_64-pc-windows-gnu"

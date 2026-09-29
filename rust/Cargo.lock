@@ -93,7 +93,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sakurapool-r1"
+name = "sakurapool-rust"
 version = "0.1.0"
 dependencies = [
  "serde",
