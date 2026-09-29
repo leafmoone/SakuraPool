@@ -14,14 +14,10 @@ HTTP only. No external network, no real repository access.
 import base64
 import hashlib
 import json
-import os
-import sqlite3
 import tarfile
 import tempfile
-from contextlib import closing
 from io import BytesIO
 from pathlib import Path
-from posixpath import splitext
 
 import pytest
 from test_r1_loopback_loop import _WORKER_BINARY, WORKER_JOB_BUDGET, _serve, requires_worker
@@ -31,15 +27,13 @@ from sakurapool.runtime.compiler import compile_runtime
 from sakurapool.runtime.inventory import load_p2_inventory
 from sakurapool.runtime.query import RuntimeQuerySpec
 from sakurapool.runtime.snapshot import RuntimeSnapshot
-from sakurapool.storage.budget import DEFAULT_WORK_ROOT, MIB, BudgetLedger, Reservation
+from sakurapool.storage.budget import DEFAULT_WORK_ROOT, MIB, BudgetLedger
 from sakurapool.storage.remote_index import (
-    MAX_STAGE_PAGES,
-    OFFLINE_STAGE_ALLOWANCE,
-    StagedObject,
     open_completed_stage,
     write_staged_v4,
 )
 from sakurapool.storage.rust_bridge import RustWorker
+from sakurapool.storage.rust_index import build_stage_from_scan
 from sakurapool.storage.transport import BoundObject
 
 # 1x1 transparent PNG (68 bytes).
@@ -71,75 +65,6 @@ def work_root():
     # Offline budget roots and fixtures must live under the fixed P4 work root.
     with tempfile.TemporaryDirectory(prefix="r1-gate-e-", dir=DEFAULT_WORK_ROOT) as temp:
         yield Path(temp)
-
-
-def _build_stage(scan: dict, raw: bytes, bound: BoundObject,
-                 adapter: DatasetAdapter, stage_dir: Path,
-                 ledger: BudgetLedger) -> StagedObject:
-    """Populate a completed stage from the *Rust scan report*.
-
-    Mirrors ``stage_tar``'s finished-stage contract (schema, stamp, marker
-    ordering) but takes member extents/hashes from the audited Rust result
-    instead of re-streaming the TAR.  JSON payloads are taken from the raw
-    slices at the Rust-provided offsets.
-    """
-    rows = []
-    for member in scan["members"]:
-        if member["kind"] != "file":
-            continue  # dir entries are never staged
-        suffix = splitext(member["path"])[1].lower()
-        if suffix not in adapter.image_extensions and suffix != ".json":
-            continue
-        is_json = suffix == ".json"
-        payload = raw[member["offset"]: member["offset"] + member["size"]]
-        assert payload, "empty member payload"
-        if is_json:
-            json.loads(payload)  # audit: staged JSON must parse
-        rows.append((member["path"], "json" if is_json else "image",
-                     member["offset"], member["size"], member["sha256"],
-                     payload if is_json else None))
-    images = sum(1 for row in rows if row[1] == "image")
-    lease = ledger.reserve(Reservation(disk=OFFLINE_STAGE_ALLOWANCE))
-    try:
-        stage_dir.mkdir(exist_ok=False)
-        db_path = stage_dir / "members.sqlite"
-        with closing(sqlite3.connect(db_path)) as db:
-            db.execute("PRAGMA journal_mode=DELETE")
-            db.execute("PRAGMA page_size=4096")
-            if db.execute(f"PRAGMA max_page_count={MAX_STAGE_PAGES}").fetchone()[0] \
-                    > MAX_STAGE_PAGES:
-                raise AssertionError("staging SQLite page cap not enforceable")
-            db.execute("PRAGMA synchronous=FULL")
-            db.execute("CREATE TABLE members (name TEXT NOT NULL PRIMARY KEY,"
-                       "kind TEXT NOT NULL, offset_data INTEGER NOT NULL,"
-                       "size INTEGER NOT NULL, sha256 TEXT NOT NULL,"
-                       "json_payload BLOB)")
-            db.executemany("INSERT INTO members VALUES (?,?,?,?,?,?)", rows)
-            db.commit()
-        database_hash = hashlib.sha256(db_path.read_bytes()).hexdigest()
-        adapter_hash = hashlib.sha256(json.dumps(
-            adapter.to_dict(), sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
-        stamp = json.dumps({"sha256": scan["whole_sha256"], "size": bound.size,
-                            "members": len(rows), "potential_records": images,
-                            "database_sha256": database_hash,
-                            "adapter_sha256": adapter_hash,
-                            "strong_etag_sha256": hashlib.sha256(
-                                bound.strong_etag.encode("ascii")).hexdigest(),
-                            "revision": bound.immutable_revision},
-                           sort_keys=True).encode("ascii")
-        marker = stage_dir / "stage.complete"
-        with marker.open("xb") as handle:
-            handle.write(stamp)
-            handle.flush()
-            os.fsync(handle.fileno())
-        ledger.settle(lease)
-        return StagedObject(db_path, scan["whole_sha256"], bound.size,
-                            len(rows), images)
-    except BaseException:
-        ledger.settle(lease)
-        raise
-
 
 
 @requires_worker
@@ -191,8 +116,8 @@ def test_rust_scan_drives_p2_p3_rust_fetch(work_root: Path) -> None:
             # 3. Python adapter: stage the audited scan into the completed
             #    stage contract, then build the P2 durable v4 (no TAR read).
             bound = BoundObject(url, len(raw), strong_etag=ETAG)
-            stage = _build_stage(scan, raw, bound, adapter,
-                                 work_root / "stage", ledger)
+            stage = build_stage_from_scan(scan, raw, bound, adapter,
+                                           work_root / "stage", ledger)
             assert open_completed_stage(work_root / "stage", bound, adapter) == stage
             durable = ledger.root / "durable"
             summary = write_staged_v4(

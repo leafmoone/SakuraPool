@@ -48,6 +48,10 @@ def work_root():
 class _RangeHandler(BaseHTTPRequestHandler):
     payload: bytes
 
+    # Strict HTTP/1.1: the Rust worker client rejects non-HTTP/1.1 status
+    # lines (Gate 2 unified transport contract).
+    protocol_version = "HTTP/1.1"
+
     def log_message(self, *args: object) -> None:  # silence
         return None
 
