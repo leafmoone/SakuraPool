@@ -137,7 +137,7 @@ def test_handshake_reports_protocol_version_and_capabilities(worker_path):
     with RustWorker(worker_path, job_budget=WORKER_JOB_BUDGET) as worker:
         # The constructor already validated protocol_version agreement; the
         # ready line also reports the worker build and its capabilities.
-        assert worker.capabilities == ("hash_file", "fetch_range")
+        assert worker.capabilities == ("hash_file", "fetch_range", "scan_tar")
         assert worker.worker_version == "0.1.0"
         assert bridge.PROTOCOL_VERSION == 1
 
@@ -417,3 +417,75 @@ def test_gated_fetch_without_ledger_refuses(worker_path):
     with RustWorker(worker_path, job_budget=WORKER_JOB_BUDGET) as worker:
         with pytest.raises(TypeError):
             worker.fetch_range_gated("http://127.0.0.1:9/", 0, 10, 100)
+
+
+# ---------------------------------------------------------------------------
+# scan_tar: bounded sequential archive audit (offline synthetic archives)
+# ---------------------------------------------------------------------------
+
+def _make_scan_fixture(tmp_path):
+    import io as _io
+    import tarfile
+
+    data_a = os.urandom(1000)
+    data_b = os.urandom(2048)
+    buf = _io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.GNU_FORMAT) as tf:
+        dir_info = tarfile.TarInfo("sub/")
+        dir_info.type = tarfile.DIRTYPE
+        tf.addfile(dir_info)
+        for name, data in [("a.bin", data_a), ("sub/b.bin", data_b), ("sub/empty", b"")]:
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tf.addfile(info, _io.BytesIO(data))
+    raw = buf.getvalue()
+    tar_path = tmp_path / "scan.tar"
+    tar_path.write_bytes(raw)
+    return raw
+
+
+@NEEDS_WORKER
+def test_scan_tar_agrees_with_raw_bytes(worker_path, tmp_path):
+    raw = _make_scan_fixture(tmp_path)
+    with RustWorker(worker_path, job_budget=WORKER_JOB_BUDGET) as worker:
+        result = worker.request(
+            "scan_tar",
+            budget={"body": len(raw), "disk": 0, "inflight": len(raw), "attempts": 1},
+            payload={"path": str(tmp_path / "scan.tar")},
+        )
+    assert result["whole_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert result["size"] == len(raw)
+    assert result["trailing_bytes"] > 0
+    paths = [m["path"] for m in result["members"]]
+    assert "a.bin" in paths and "sub/b.bin" in paths and "sub/empty" in paths
+    assert "sub/" in paths
+    for member in result["members"]:
+        assert member["kind"] in ("file", "dir")
+        assert member["offset"] % 512 == 0
+        if member["kind"] == "file":
+            seg = raw[member["offset"]: member["offset"] + member["size"]]
+            assert hashlib.sha256(seg).hexdigest() == member["sha256"]
+
+
+@NEEDS_WORKER
+def test_scan_tar_rejections(worker_path, tmp_path):
+    raw = _make_scan_fixture(tmp_path)
+    budget = {"body": len(raw), "disk": 0, "inflight": len(raw), "attempts": 3}
+    with RustWorker(worker_path, job_budget=WORKER_JOB_BUDGET) as worker:
+        # Missing file.
+        with pytest.raises(RustWorkerError, match="worker rejected request"):
+            worker.request("scan_tar", budget=budget,
+                           payload={"path": str(tmp_path / "nope.tar")})
+        # Member budget exceeded (fixture has 4 members).
+        with pytest.raises(RustWorkerError, match="worker rejected request"):
+            worker.request("scan_tar", budget=budget,
+                           payload={"path": str(tmp_path / "scan.tar"), "max_members": 1})
+        # Byte budget exceeded.
+        with pytest.raises(RustWorkerError, match="worker rejected request"):
+            worker.request("scan_tar", budget=budget,
+                           payload={"path": str(tmp_path / "scan.tar"),
+                                    "max_bytes": len(raw) - 1})
+        # Unknown payload field is a protocol violation, worker survives.
+        with pytest.raises(RustWorkerError, match="worker rejected request"):
+            worker.request("scan_tar", budget=budget,
+                           payload={"path": str(tmp_path / "scan.tar"), "bogus": 1})

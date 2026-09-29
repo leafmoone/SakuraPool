@@ -11,14 +11,14 @@
 //! conditions and is drained (with a bound) by the supervisor.
 
 use sakurapool_rust::{
-    parse_loopback_url, validate_content_range, BudgetLimits, ByteRange, JobBudget,
-    StreamingSha256, MAX_LINE_BYTES, PROTOCOL_VERSION,
+    parse_loopback_url, scan_tar, validate_content_range, BudgetLimits, ByteRange, JobBudget,
+    ScanLimits, StreamingSha256, MAX_LINE_BYTES, PROTOCOL_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::io::{self, BufRead, Read, Write};
 
-const CAPABILITIES: [&str; 2] = ["hash_file", "fetch_range"];
+const CAPABILITIES: [&str; 3] = ["hash_file", "fetch_range", "scan_tar"];
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,6 +53,16 @@ struct FetchRangePayload {
     start: u64,
     end: u64,
     total: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScanTarPayload {
+    path: String,
+    #[serde(default)]
+    max_members: Option<u64>,
+    #[serde(default)]
+    max_bytes: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -162,7 +172,7 @@ fn main() -> io::Result<()> {
             if let Some(bytes) = outcome
                 .as_ref()
                 .ok()
-                .and_then(|result| result.get("bytes"))
+                .and_then(|result| result.get("bytes").or_else(|| result.get("size")))
                 .and_then(|value| value.as_u64())
             {
                 budget.commit_body(bytes);
@@ -224,6 +234,21 @@ fn dispatch(request: &Request) -> Result<serde_json::Value, &'static str> {
                 .map_err(|_| "protocol_violation")?;
             let value = fetch_range(&payload.url, payload.start, payload.end, payload.total)?;
             Ok(serde_json::json!({ "sha256": value.0, "bytes": value.1 }))
+        }
+        "scan_tar" => {
+            let payload: ScanTarPayload = serde_json::from_value(request.payload.clone())
+                .map_err(|_| "protocol_violation")?;
+            let mut limits = ScanLimits::default();
+            if let Some(value) = payload.max_members {
+                limits.max_members = value;
+            }
+            if let Some(value) = payload.max_bytes {
+                limits.max_bytes = value;
+            }
+            let scan = scan_tar(std::path::Path::new(&payload.path), &limits)?;
+            let scan: serde_json::Value =
+                serde_json::to_value(&scan).map_err(|_| "protocol_violation")?;
+            Ok(scan)
         }
         _ => Err("unknown_operation"),
     }

@@ -8,6 +8,9 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::{self, Read};
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// Version of the NDJSON control protocol spoken on stdin/stdout.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -188,6 +191,210 @@ impl StreamingSha256 {
         }
         Ok((hasher.finish(), total))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Sequential uncompressed TAR scanner (mature `tar` crate, no custom parsing)
+// ---------------------------------------------------------------------------
+
+/// Member kinds the scanner will emit. Everything else (links, sparse,
+/// devices, fifos, unknown) is rejected before any payload is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemberKind {
+    File,
+    Dir,
+}
+
+/// One archive member with its exact payload location in the raw file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TarMember {
+    pub path: String,
+    pub kind: MemberKind,
+    /// Byte offset of the payload start (directories: the offset of the
+    /// (empty) payload position, which equals the next entry's header start).
+    pub offset: u64,
+    /// Declared payload size in bytes (directories are 0).
+    pub size: u64,
+    /// Streaming SHA-256 of the payload, files only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+/// Result of a bounded sequential scan of one uncompressed archive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TarScan {
+    /// SHA-256 of the entire raw archive file.
+    pub whole_sha256: String,
+    /// Raw archive size in bytes.
+    pub size: u64,
+    pub members: Vec<TarMember>,
+    /// Bytes after the final entry's payload (the closing zero blocks plus
+    /// any padding). Always all-zero; nonzero tails are rejected upstream.
+    pub trailing_bytes: u64,
+}
+
+/// Hard bounds for a single scan; exceeding any of them is a clean rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScanLimits {
+    pub max_members: u64,
+    pub max_bytes: u64,
+}
+
+impl Default for ScanLimits {
+    fn default() -> Self {
+        Self {
+            max_members: 100_000,
+            max_bytes: 8 * 1024 * 1024 * 1024,
+        }
+    }
+}
+
+struct CountingReader {
+    inner: std::fs::File,
+    pos: Arc<AtomicU64>,
+}
+
+impl Read for CountingReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.pos.fetch_add(n as u64, Ordering::SeqCst);
+        Ok(n)
+    }
+}
+
+fn member_path<R: Read>(entry: &tar::Entry<'_, R>) -> Result<String, &'static str> {
+    // `path_bytes` is the lossless accessor; validate UTF-8 ourselves so the
+    // failure is platform-independent (Windows `Path` rejects 0xFF bytes).
+    let bytes = entry.path_bytes();
+    let text = match std::str::from_utf8(&bytes) {
+        Ok(text) => text.to_owned(),
+        Err(_) => return Err("non_utf8_member"),
+    };
+    if text.is_empty() {
+        return Err("unsafe_member_path");
+    }
+    // Tar member paths are POSIX; check the raw text directly (host OS path
+    // semantics would misclassify e.g. "/etc/x" on Windows).
+    if text.starts_with('/') {
+        return Err("unsafe_member_path");
+    }
+    for component in text.split('/') {
+        if component == ".." {
+            return Err("unsafe_member_path");
+        }
+    }
+    Ok(text)
+}
+
+/// Sequentially scan an uncompressed archive, computing the whole-file SHA
+/// and each member's exact payload offset/size/kind/SHA. Fail-closed on
+/// truncation, checksum errors, and any non-regular/non-directory member.
+pub fn scan_tar(path: &Path, limits: &ScanLimits) -> Result<TarScan, &'static str> {
+    let size = std::fs::metadata(path).map_err(|_| "io_error")?.len();
+    if size > limits.max_bytes {
+        return Err("limit_exceeded");
+    }
+    // Whole-file SHA over the raw bytes.
+    let file = std::fs::File::open(path).map_err(|_| "io_error")?;
+    let (whole_sha256, whole_len) = StreamingSha256::digest_reader(file).map_err(|_| "io_error")?;
+    if whole_len != size {
+        return Err("corrupt_archive");
+    }
+
+    let pos = Arc::new(AtomicU64::new(0));
+    let file = std::fs::File::open(path).map_err(|_| "io_error")?;
+    let reader = CountingReader {
+        inner: file,
+        pos: pos.clone(),
+    };
+    let mut archive = tar::Archive::new(reader);
+
+    let mut members: Vec<TarMember> = Vec::new();
+    {
+        let entries = archive.entries().map_err(|_| "corrupt_archive")?;
+        for entry in entries {
+            let entry = entry.map_err(|_| "corrupt_archive")?;
+            if (members.len() as u64) >= limits.max_members {
+                return Err("limit_exceeded");
+            }
+            let path = member_path(&entry)?;
+            let kind = entry.header().entry_type();
+            // After `entries.next()` the underlying reader is positioned exactly
+            // at the payload start (header + any extension headers consumed).
+            let offset = pos.load(Ordering::SeqCst);
+            match kind {
+                tar::EntryType::Regular => {
+                    let declared = entry.header().size().map_err(|_| "corrupt_archive")?;
+                    if declared > limits.max_bytes {
+                        return Err("limit_exceeded");
+                    }
+                    let mut hasher = StreamingSha256::new();
+                    let mut read: u64 = 0;
+                    let mut buffer = [0u8; 64 * 1024];
+                    let mut reader = entry;
+                    loop {
+                        let n = reader.read(&mut buffer).map_err(|_| "corrupt_archive")?;
+                        if n == 0 {
+                            break;
+                        }
+                        read += n as u64;
+                        if read > declared {
+                            return Err("corrupt_archive");
+                        }
+                        hasher.update(&buffer[..n]);
+                    }
+                    if read != declared {
+                        return Err("truncated_member");
+                    }
+                    members.push(TarMember {
+                        path,
+                        kind: MemberKind::File,
+                        offset,
+                        size: declared,
+                        sha256: Some(hasher.finish()),
+                    });
+                }
+                tar::EntryType::Directory => {
+                    members.push(TarMember {
+                        path,
+                        kind: MemberKind::Dir,
+                        offset,
+                        size: 0,
+                        sha256: None,
+                    });
+                }
+                // Links, sparse, char/block devices, fifos, and anything unknown.
+                _ => return Err("unsupported_member"),
+            }
+        }
+    }
+    let mut reader = archive.into_inner();
+    let mut trailing_bytes = 0u64;
+    let mut buffer = [0u8; 4096];
+    loop {
+        let n = reader.read(&mut buffer).map_err(|_| "corrupt_archive")?;
+        if n == 0 {
+            break;
+        }
+        if buffer[..n].iter().any(|byte| *byte != 0) {
+            return Err("invalid_tail");
+        }
+        trailing_bytes += n as u64;
+        if trailing_bytes > 64 * 1024 {
+            return Err("limit_exceeded");
+        }
+    }
+    // Position consistency: every byte of the file was accounted for.
+    if pos.load(Ordering::SeqCst) != size {
+        return Err("corrupt_archive");
+    }
+    Ok(TarScan {
+        whole_sha256,
+        size,
+        members,
+        trailing_bytes,
+    })
 }
 
 #[cfg(test)]
