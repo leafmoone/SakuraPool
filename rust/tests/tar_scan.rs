@@ -4,8 +4,11 @@
 //! headers (hard link / sparse / device / fifo / absolute path) that the
 //! writer API cannot produce. Nothing touches production data.
 
-use sakurapool_rust::{scan_tar, ScanLimits, TarScan};
+use sakurapool_rust::{scan_tar, scan_tar_file, scan_tar_reader, ScanLimits, TarScan};
 use sha2::Digest;
+use std::io::Read;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Minimal temp-dir helper (no external crate needed).
@@ -400,4 +403,180 @@ fn missing_file_is_io_error() {
     let dir = tmpdir::new();
     let missing = dir.path.join("no-such.tar");
     assert_eq!(scan_tar(&missing, &ScanLimits::default()), Err("io_error"));
+}
+
+// ---------------------------------------------------------------------------
+// Single-pass reader level: the scan must work over any `Read` - no seek,
+// no re-read - and agree field for field with the file scan.
+// ---------------------------------------------------------------------------
+
+/// Returns at most `chunk` bytes per call; implements `Read` only, so a
+/// scan through it is provably non-seekable and short-read driven.
+struct Chunked<R> {
+    inner: R,
+    chunk: usize,
+}
+
+impl<R: Read> Read for Chunked<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = buf.len().min(self.chunk);
+        self.inner.read(&mut buf[..n])
+    }
+}
+
+/// Counts every byte served, to prove the source is consumed exactly once.
+struct CountingSource<R> {
+    inner: R,
+    served: Arc<AtomicU64>,
+}
+
+impl<R: Read> Read for CountingSource<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if n > 0 {
+            self.served.fetch_add(n as u64, Ordering::SeqCst);
+        }
+        Ok(n)
+    }
+}
+
+fn basic_tar_bytes() -> Vec<u8> {
+    let a = vec![0xA5u8; 100];
+    let b: Vec<u8> = (0..1000).map(|i| (i % 251) as u8).collect();
+    let mut builder = tar::Builder::new(Vec::new());
+    append_file(&mut builder, "a.txt", &a);
+    append_dir(&mut builder, "sub");
+    append_file(&mut builder, "sub/b.bin", &b);
+    append_file(&mut builder, "sub/empty.txt", &[]);
+    builder.into_inner().unwrap()
+}
+
+#[test]
+fn reader_one_byte_stream_matches_file_scan() {
+    let dir = tmpdir::new();
+    let bytes = basic_tar_bytes();
+    let path = tmpdir::write_tar(&dir, "onebyte.tar", &bytes);
+    let expected = scan_tar_file(&path, &ScanLimits::default()).unwrap();
+
+    // A 1-byte read per call is the worst-case short-read source; the
+    // wrapper implements only `Read`, so no seek is even available.
+    let scan = scan_tar_reader(
+        Chunked {
+            inner: std::io::Cursor::new(bytes.clone()),
+            chunk: 1,
+        },
+        &ScanLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        scan, expected,
+        "1-byte stream must match file scan field for field"
+    );
+}
+
+#[test]
+fn reader_odd_short_chunks_match_file_scan() {
+    let dir = tmpdir::new();
+    let bytes = basic_tar_bytes();
+    let path = tmpdir::write_tar(&dir, "short.tar", &bytes);
+    let expected = scan_tar_file(&path, &ScanLimits::default()).unwrap();
+
+    // 7-byte chunks: odd, smaller than a tar block, unaligned.
+    let scan = scan_tar_reader(
+        Chunked {
+            inner: std::io::Cursor::new(bytes.clone()),
+            chunk: 7,
+        },
+        &ScanLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(scan, expected);
+    verify_members_against_raw(&bytes, &scan);
+}
+
+#[test]
+fn reader_is_single_pass_and_consumed_exactly() {
+    let bytes = basic_tar_bytes();
+    let served = Arc::new(AtomicU64::new(0));
+    // Shared cursor: after the scan the raw source must sit exactly at EOF
+    // with nothing left - a second pass would have had to re-read bytes.
+    let cursor = Arc::new(std::sync::Mutex::new(std::io::Cursor::new(bytes.clone())));
+    let reader = CountingSource {
+        inner: CursorThroughMutex {
+            cursor: cursor.clone(),
+        },
+        served: served.clone(),
+    };
+    let scan = scan_tar_reader(reader, &ScanLimits::default()).unwrap();
+    assert_eq!(scan.size as usize, bytes.len());
+    assert_eq!(
+        served.load(Ordering::SeqCst) as usize,
+        bytes.len(),
+        "exactly one pass"
+    );
+    let mut remaining = [0u8; 4096];
+    let leftover = cursor.lock().unwrap().read(&mut remaining).unwrap();
+    assert_eq!(leftover, 0, "source fully consumed, nothing to re-read");
+}
+
+/// `Read` adapter over an `Arc<Mutex<Cursor>>` so the test can inspect the
+/// shared cursor after the scan consumed the wrapper.
+struct CursorThroughMutex {
+    cursor: Arc<std::sync::Mutex<std::io::Cursor<Vec<u8>>>>,
+}
+
+impl Read for CursorThroughMutex {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.cursor.lock().unwrap().read(buf)
+    }
+}
+
+#[test]
+fn reader_truncated_stream_fails_closed() {
+    let bytes = basic_tar_bytes();
+    // Cut the stream mid-payload of the second member.
+    let cut = bytes.len() / 2;
+    let err = scan_tar_reader(
+        std::io::Cursor::new(bytes[..cut].to_vec()),
+        &ScanLimits::default(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, "corrupt_archive" | "truncated_member"),
+        "unexpected {err:?}"
+    );
+}
+
+#[test]
+fn reader_enforces_byte_limit_without_metadata() {
+    let bytes = basic_tar_bytes();
+    // A stream has no size up front; the bound must bite while bytes flow.
+    let err = scan_tar_reader(
+        std::io::Cursor::new(bytes.clone()),
+        &ScanLimits {
+            max_members: 100,
+            max_bytes: bytes.len() as u64 - 1,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err, "limit_exceeded");
+}
+
+#[test]
+fn reader_rejects_non_seekable_pipe_equivalent_source() {
+    // A one-shot source whose second full consumption is impossible: every
+    // read returns from a draining buffer and the scan must still succeed
+    // with correct digests (single pass, no implicit re-read of anything).
+    let bytes = basic_tar_bytes();
+    let scan = scan_tar_reader(
+        Chunked {
+            inner: std::io::Cursor::new(bytes.clone()),
+            chunk: 333,
+        },
+        &ScanLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(scan.whole_sha256, sha256_hex(&bytes));
+    assert_eq!(scan.size as usize, bytes.len());
+    verify_members_against_raw(&bytes, &scan);
 }

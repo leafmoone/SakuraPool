@@ -11,7 +11,7 @@
 //! conditions and is drained (with a bound) by the supervisor.
 
 use sakurapool_rust::{
-    parse_loopback_url, scan_tar, validate_content_range, BudgetLimits, ByteRange, JobBudget,
+    parse_loopback_url, scan_tar_file, validate_content_range, BudgetLimits, ByteRange, JobBudget,
     ScanLimits, StreamingSha256, MAX_LINE_BYTES, PROTOCOL_VERSION,
 };
 use serde::{Deserialize, Serialize};
@@ -245,7 +245,7 @@ fn dispatch(request: &Request) -> Result<serde_json::Value, &'static str> {
             if let Some(value) = payload.max_bytes {
                 limits.max_bytes = value;
             }
-            let scan = scan_tar(std::path::Path::new(&payload.path), &limits)?;
+            let scan = scan_tar_file(std::path::Path::new(&payload.path), &limits)?;
             let scan: serde_json::Value =
                 serde_json::to_value(&scan).map_err(|_| "protocol_violation")?;
             Ok(scan)

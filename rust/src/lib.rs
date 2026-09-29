@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::{self, Read};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Version of the NDJSON control protocol spoken on stdin/stdout.
@@ -250,16 +250,47 @@ impl Default for ScanLimits {
     }
 }
 
-struct CountingReader {
-    inner: std::fs::File,
-    pos: Arc<AtomicU64>,
+/// Reads any source exactly once, front to back, remembering how many
+/// bytes flowed (`bytes`) and the SHA-256 of every byte (`hasher`). When
+/// the cumulative count passes the limit the flag is set and the scan
+/// fails closed at its next checkpoint - no extra I/O is required.
+struct HashCountReader<R> {
+    inner: R,
+    hasher: StreamingSha256,
+    bytes: Arc<AtomicU64>,
+    max_bytes: u64,
+    over_limit: Arc<AtomicBool>,
 }
 
-impl Read for CountingReader {
+impl<R: Read> Read for HashCountReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let n = self.inner.read(buf)?;
-        self.pos.fetch_add(n as u64, Ordering::SeqCst);
+        if n > 0 {
+            let total = self.bytes.fetch_add(n as u64, Ordering::SeqCst) + n as u64;
+            self.hasher.update(&buf[..n]);
+            if total > self.max_bytes {
+                self.over_limit.store(true, Ordering::SeqCst);
+            }
+        }
         Ok(n)
+    }
+}
+
+impl<R> HashCountReader<R> {
+    fn new(inner: R, max_bytes: u64) -> (Self, Arc<AtomicU64>, Arc<AtomicBool>) {
+        let bytes = Arc::new(AtomicU64::new(0));
+        let over_limit = Arc::new(AtomicBool::new(false));
+        (
+            Self {
+                inner,
+                hasher: StreamingSha256::new(),
+                bytes: bytes.clone(),
+                max_bytes,
+                over_limit: over_limit.clone(),
+            },
+            bytes,
+            over_limit,
+        )
     }
 }
 
@@ -287,27 +318,16 @@ fn member_path<R: Read>(entry: &tar::Entry<'_, R>) -> Result<String, &'static st
     Ok(text)
 }
 
-/// Sequentially scan an uncompressed archive, computing the whole-file SHA
-/// and each member's exact payload offset/size/kind/SHA. Fail-closed on
-/// truncation, checksum errors, and any non-regular/non-directory member.
-pub fn scan_tar(path: &Path, limits: &ScanLimits) -> Result<TarScan, &'static str> {
-    let size = std::fs::metadata(path).map_err(|_| "io_error")?.len();
-    if size > limits.max_bytes {
-        return Err("limit_exceeded");
-    }
-    // Whole-file SHA over the raw bytes.
-    let file = std::fs::File::open(path).map_err(|_| "io_error")?;
-    let (whole_sha256, whole_len) = StreamingSha256::digest_reader(file).map_err(|_| "io_error")?;
-    if whole_len != size {
-        return Err("corrupt_archive");
-    }
-
-    let pos = Arc::new(AtomicU64::new(0));
-    let file = std::fs::File::open(path).map_err(|_| "io_error")?;
-    let reader = CountingReader {
-        inner: file,
-        pos: pos.clone(),
-    };
+/// Single-pass scan of an uncompressed archive from any byte source.
+///
+/// The source is consumed exactly once, front to back: the wrapper hashes
+/// every byte as it flows, so whole-file SHA and member offsets come from
+/// the same read. Non-seekable streams (pipes, sockets, 1-byte readers) are
+/// fine - nothing is ever re-read. Fail-closed on truncation, checksum
+/// errors, nonzero tails, any non-regular/non-directory member, and any
+/// bound exceeded (checked as bytes flow).
+pub fn scan_tar_reader<R: Read>(reader: R, limits: &ScanLimits) -> Result<TarScan, &'static str> {
+    let (reader, bytes, over_limit) = HashCountReader::new(reader, limits.max_bytes);
     let mut archive = tar::Archive::new(reader);
 
     let mut members: Vec<TarMember> = Vec::new();
@@ -320,16 +340,16 @@ pub fn scan_tar(path: &Path, limits: &ScanLimits) -> Result<TarScan, &'static st
             }
             let path = member_path(&entry)?;
             let kind = entry.header().entry_type();
-            // After `entries.next()` the underlying reader is positioned exactly
-            // at the payload start (header + any extension headers consumed).
-            let offset = pos.load(Ordering::SeqCst);
+            // After `entries.next()` the underlying reader has consumed exactly
+            // header + extension headers, so its byte count is the payload start.
+            let offset = bytes.load(Ordering::SeqCst);
             match kind {
                 tar::EntryType::Regular => {
                     let declared = entry.header().size().map_err(|_| "corrupt_archive")?;
                     if declared > limits.max_bytes {
                         return Err("limit_exceeded");
                     }
-                    let mut hasher = StreamingSha256::new();
+                    let mut member_hasher = StreamingSha256::new();
                     let mut read: u64 = 0;
                     let mut buffer = [0u8; 64 * 1024];
                     let mut reader = entry;
@@ -342,7 +362,10 @@ pub fn scan_tar(path: &Path, limits: &ScanLimits) -> Result<TarScan, &'static st
                         if read > declared {
                             return Err("corrupt_archive");
                         }
-                        hasher.update(&buffer[..n]);
+                        member_hasher.update(&buffer[..n]);
+                    }
+                    if over_limit.load(Ordering::SeqCst) {
+                        return Err("limit_exceeded");
                     }
                     if read != declared {
                         return Err("truncated_member");
@@ -352,7 +375,7 @@ pub fn scan_tar(path: &Path, limits: &ScanLimits) -> Result<TarScan, &'static st
                         kind: MemberKind::File,
                         offset,
                         size: declared,
-                        sha256: Some(hasher.finish()),
+                        sha256: Some(member_hasher.finish()),
                     });
                 }
                 tar::EntryType::Directory => {
@@ -367,13 +390,16 @@ pub fn scan_tar(path: &Path, limits: &ScanLimits) -> Result<TarScan, &'static st
                 // Links, sparse, char/block devices, fifos, and anything unknown.
                 _ => return Err("unsupported_member"),
             }
+            if over_limit.load(Ordering::SeqCst) {
+                return Err("limit_exceeded");
+            }
         }
     }
-    let mut reader = archive.into_inner();
+    let mut tail = archive.into_inner();
     let mut trailing_bytes = 0u64;
     let mut buffer = [0u8; 4096];
     loop {
-        let n = reader.read(&mut buffer).map_err(|_| "corrupt_archive")?;
+        let n = tail.read(&mut buffer).map_err(|_| "corrupt_archive")?;
         if n == 0 {
             break;
         }
@@ -385,16 +411,27 @@ pub fn scan_tar(path: &Path, limits: &ScanLimits) -> Result<TarScan, &'static st
             return Err("limit_exceeded");
         }
     }
-    // Position consistency: every byte of the file was accounted for.
-    if pos.load(Ordering::SeqCst) != size {
-        return Err("corrupt_archive");
+    if over_limit.load(Ordering::SeqCst) || trailing_bytes > limits.max_bytes {
+        return Err("limit_exceeded");
     }
+    let size = bytes.load(Ordering::SeqCst);
     Ok(TarScan {
-        whole_sha256,
+        whole_sha256: tail.hasher.finish(),
         size,
         members,
         trailing_bytes,
     })
+}
+
+/// Sequentially scan an uncompressed archive file (one pass).
+pub fn scan_tar_file(path: &Path, limits: &ScanLimits) -> Result<TarScan, &'static str> {
+    let file = std::fs::File::open(path).map_err(|_| "io_error")?;
+    scan_tar_reader(file, limits)
+}
+
+/// Compatibility alias for [scan_tar_file].
+pub fn scan_tar(path: &Path, limits: &ScanLimits) -> Result<TarScan, &'static str> {
+    scan_tar_file(path, limits)
 }
 
 #[cfg(test)]
