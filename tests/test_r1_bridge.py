@@ -12,6 +12,8 @@ import hashlib
 import http.server
 import json
 import os
+import socket
+import sys
 import tempfile
 import threading
 
@@ -108,6 +110,37 @@ def _serve(body, status=206):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server, f"http://127.0.0.1:{server.server_address[1]}/a.tar", thread
+
+
+def _stall_server():
+    """Loopback TCP server that accepts, swallows the request, then never
+    responds. Used to hang a worker mid-fetch so the bridge's receive
+    timeout is the thing that fires."""
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+
+    def accept_loop():
+        while True:
+            try:
+                conn, _addr = listener.accept()
+            except OSError:
+                break
+            # Swallow the request bytes, then hold the connection open with
+            # no response so a range fetch blocks in read.
+            try:
+                while True:
+                    data = conn.recv(65536)
+                    if not data:
+                        break
+            except OSError:
+                pass
+
+    thread = threading.Thread(target=accept_loop, daemon=True)
+    thread.start()
+    port = listener.getsockname()[1]
+    return listener, f"http://127.0.0.1:{port}/stall.bin", thread
 
 
 @pytest.fixture
@@ -301,6 +334,54 @@ def test_stderr_tail_is_bounded(worker_path):
         assert tail == b"e" * bridge._STDERR_TAIL_BYTES
     finally:
         worker.close()
+
+
+def test_stderr_drain_thread_keeps_last_64kib_on_real_pipe():
+    """Real pipe + drain thread + overflow: the tail keeps exactly the
+    last 64 KiB of mixed content and the drain never deadlocks."""
+    import subprocess as sp
+
+    expected = bytes(range(256)) * 400  # 100 KiB of distinct bytes
+    child = sp.Popen(
+        [sys.executable, "-c",
+         "import sys; sys.stderr.buffer.write(bytes(range(256))*400); sys.stderr.buffer.flush()"],
+        stderr=sp.PIPE,
+    )
+    worker = RustWorker.__new__(RustWorker)
+    worker._proc = child
+    worker._stderr_tail = bytearray()
+    worker._stderr_lock = threading.Lock()
+    drain = threading.Thread(target=worker._drain_stderr)
+    drain.start()
+    drain.join(timeout=10)
+    assert not drain.is_alive(), "stderr drain must not deadlock on overflow"
+    tail = worker.stderr_tail()
+    assert len(tail) == bridge._STDERR_TAIL_BYTES
+    assert tail == expected[-bridge._STDERR_TAIL_BYTES:]
+    child.wait(timeout=10)
+
+
+@NEEDS_WORKER
+def test_bridge_timeout_on_hung_worker_retains_lease(worker_path, ledger):
+    """A worker stuck mid-fetch never replies; the bridge receive timeout
+    fires (crash class) and the durable lease stays pending."""
+    listener, url, _thread = _stall_server()
+    try:
+        worker = RustWorker(worker_path, job_budget=WORKER_JOB_BUDGET,
+                            timeout_s=2.0)
+        body = 4096
+        with pytest.raises(RustWorkerError, match="timed out"):
+            worker.fetch_range_gated(url, 0, body - 1, body * 16,
+                                     ledger=ledger)
+        status = ledger.status()
+        assert status["attempts"] == 1
+        assert status["body"] == body
+        assert status["records"] == 0
+        # Reap the still-blocked worker.
+        worker.cancel()
+        assert worker.pid is None
+    finally:
+        listener.close()
 
 
 # ------------------------------------------------------------------
