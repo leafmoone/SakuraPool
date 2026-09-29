@@ -11,14 +11,14 @@
 //! conditions and is drained (with a bound) by the supervisor.
 
 use sakurapool_rust::{
-    http_request, scan_tar_file, BudgetLimits, ByteRange, HttpOp, HttpPolicy, JobBudget,
-    ScanLimits, StreamingSha256, MAX_LINE_BYTES, PROTOCOL_VERSION,
+    http_request, scan_http_tar, scan_tar_file, BudgetLimits, ByteRange, HttpOp, HttpPolicy,
+    JobBudget, ScanLimits, StreamingSha256, MAX_LINE_BYTES, PROTOCOL_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::io::{self, BufRead, Write};
 
-const CAPABILITIES: [&str; 3] = ["hash_file", "fetch_range", "scan_tar"];
+const CAPABILITIES: [&str; 4] = ["hash_file", "fetch_range", "scan_tar", "scan_http_tar"];
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,6 +59,16 @@ struct FetchRangePayload {
 #[serde(deny_unknown_fields)]
 struct ScanTarPayload {
     path: String,
+    #[serde(default)]
+    max_members: Option<u64>,
+    #[serde(default)]
+    max_bytes: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScanHttpTarPayload {
+    url: String,
     #[serde(default)]
     max_members: Option<u64>,
     #[serde(default)]
@@ -257,6 +267,21 @@ fn dispatch(request: &Request) -> Result<serde_json::Value, &'static str> {
                 limits.max_bytes = value;
             }
             let scan = scan_tar_file(std::path::Path::new(&payload.path), &limits)?;
+            let scan: serde_json::Value =
+                serde_json::to_value(&scan).map_err(|_| "protocol_violation")?;
+            Ok(scan)
+        }
+        "scan_http_tar" => {
+            let payload: ScanHttpTarPayload = serde_json::from_value(request.payload.clone())
+                .map_err(|_| "protocol_violation")?;
+            let mut limits = ScanLimits::default();
+            if let Some(value) = payload.max_members {
+                limits.max_members = value;
+            }
+            if let Some(value) = payload.max_bytes {
+                limits.max_bytes = value;
+            }
+            let scan = scan_http_tar(&payload.url, &limits, &HttpPolicy::default())?;
             let scan: serde_json::Value =
                 serde_json::to_value(&scan).map_err(|_| "protocol_violation")?;
             Ok(scan)

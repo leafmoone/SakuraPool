@@ -437,6 +437,24 @@ pub fn scan_tar(path: &Path, limits: &ScanLimits) -> Result<TarScan, &'static st
     scan_tar_file(path, limits)
 }
 
+/// Scan an uncompressed archive delivered over loopback HTTP.
+///
+/// The response body is streamed through the single-pass scanner with the
+/// scan's byte limit as the transport cap, so an oversized stream is
+/// rejected before it can exhaust memory. The result is field-for-field
+/// identical to [scan_tar_file] over the same bytes.
+pub fn scan_http_tar(
+    url: &str,
+    limits: &ScanLimits,
+    policy: &HttpPolicy,
+) -> Result<TarScan, &'static str> {
+    let response = http_request(&HttpOp::FullStream, url, limits.max_bytes, policy)?;
+    if response.body.len() as u64 > limits.max_bytes {
+        return Err("limit_exceeded");
+    }
+    scan_tar_reader(std::io::Cursor::new(response.body), limits)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

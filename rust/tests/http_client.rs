@@ -558,3 +558,131 @@ fn redirect_307_preserves_range_to_cdn() {
     assert_eq!(response.body, &DATA[5..15]);
     assert_eq!(response.hops, 1);
 }
+
+// ---------------------------------------------------------------------------
+// scan_http_tar: HTTP body must agree field-for-field with the file scan.
+// ---------------------------------------------------------------------------
+
+fn scan_tar_bytes() -> Vec<u8> {
+    let a = [0xA5u8; 100];
+    let b: Vec<u8> = (0..1000).map(|i| (i % 251) as u8).collect();
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut header = tar::Header::new_gnu();
+    header.set_size(a.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    builder
+        .append_data(&mut header, "a.txt", std::io::Cursor::new(a.as_slice()))
+        .unwrap();
+    let mut header = tar::Header::new_gnu();
+    header.set_path("sub").unwrap();
+    header.set_entry_type(tar::EntryType::Directory);
+    header.set_size(0);
+    header.set_mode(0o755);
+    header.set_cksum();
+    builder.append(&header, &b""[..]).unwrap();
+    let mut header = tar::Header::new_gnu();
+    header.set_size(b.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    builder
+        .append_data(&mut header, "sub/b.bin", std::io::Cursor::new(&b[..]))
+        .unwrap();
+    builder.into_inner().unwrap()
+}
+
+#[test]
+fn scan_http_tar_matches_file_scan_field_for_field() {
+    let dir = {
+        let id = std::process::id();
+        let path = std::env::temp_dir().join(format!("sakurapool-http-scan-{}", id));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    };
+    let bytes = scan_tar_bytes();
+    let file_path = dir.join("archive.tar");
+    std::fs::write(&file_path, &bytes).unwrap();
+    let file_scan =
+        sakurapool_rust::scan_tar_file(&file_path, &sakurapool_rust::ScanLimits::default())
+            .unwrap();
+
+    // Serve the bytes under a data endpoint (200 full + Range 206 + HEAD).
+    // Reuse the shared server by exposing the bytes through /data is not
+    // possible (DATA is fixed), so spin a dedicated minimal server.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let body = bytes.clone();
+    let serve = std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut request = String::new();
+            let mut chunk = [0u8; 4096];
+            while !request.contains("\r\n\r\n") {
+                match stream.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => request.push_str(std::str::from_utf8(&chunk[..n]).unwrap_or("")),
+                    Err(_) => break,
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(&body);
+            let _ = stream.flush();
+        }
+    });
+    let url = format!("http://127.0.0.1:{}/archive.tar", port);
+    let http_scan = sakurapool_rust::scan_http_tar(
+        &url,
+        &sakurapool_rust::ScanLimits::default(),
+        &HttpPolicy::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        http_scan, file_scan,
+        "HTTP scan and file scan must agree on every field"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = serve;
+}
+
+#[test]
+fn scan_http_tar_rejects_over_limit_stream() {
+    let bytes = scan_tar_bytes();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let body = bytes.clone();
+    let serve = std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut request = String::new();
+            let mut chunk = [0u8; 4096];
+            while !request.contains("\r\n\r\n") {
+                match stream.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => request.push_str(std::str::from_utf8(&chunk[..n]).unwrap_or("")),
+                    Err(_) => break,
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(&body);
+            let _ = stream.flush();
+        }
+    });
+    let url = format!("http://127.0.0.1:{}/archive.tar", port);
+    let err = sakurapool_rust::scan_http_tar(
+        &url,
+        &sakurapool_rust::ScanLimits {
+            max_members: 100,
+            max_bytes: bytes.len() as u64 - 1,
+        },
+        &HttpPolicy::default(),
+    )
+    .unwrap_err();
+    assert_eq!(err, "body_too_large");
+    let _ = serve;
+}

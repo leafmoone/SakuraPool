@@ -69,8 +69,12 @@ def ledger(work_root):
 
 
 class _RangeHandler(http.server.BaseHTTPRequestHandler):
+    """Loopback test endpoint speaking strict HTTP/1.1 (the worker client
+    rejects non-HTTP/1.1 status lines)."""
+
     payload: bytes
     status: int = 206
+    protocol_version = "HTTP/1.1"
 
     def log_message(self, *args):
         pass
@@ -80,6 +84,7 @@ class _RangeHandler(http.server.BaseHTTPRequestHandler):
         if type(self).status == 200:
             self.send_response(200)
             self.send_header("Content-Length", str(len(data)))
+            self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(data)
             return
@@ -165,7 +170,7 @@ def test_handshake_reports_protocol_version_and_capabilities(worker_path):
     with RustWorker(worker_path, job_budget=WORKER_JOB_BUDGET) as worker:
         # The constructor already validated protocol_version agreement; the
         # ready line also reports the worker build and its capabilities.
-        assert worker.capabilities == ("hash_file", "fetch_range", "scan_tar")
+        assert worker.capabilities == ("hash_file", "fetch_range", "scan_tar", "scan_http_tar")
         assert worker.worker_version == "0.1.0"
         assert bridge.PROTOCOL_VERSION == 1
 
@@ -604,3 +609,30 @@ def test_scan_tar_rejections(worker_path, tmp_path):
         with pytest.raises(RustWorkerError, match="worker rejected request"):
             worker.request("scan_tar", budget=budget,
                            payload={"path": str(tmp_path / "scan.tar"), "bogus": 1})
+
+@NEEDS_WORKER
+def test_scan_http_tar_matches_file_scan_field_for_field(worker_path, tmp_path):
+    """Rust HTTP scan and Rust file scan over the same bytes must agree on
+    every field (Gate 3). Fully offline: loopback HTTP, synthetic archive."""
+    raw = _make_scan_fixture(tmp_path)
+    server, url, _thread = _serve(raw, status=200)
+    try:
+        with RustWorker(worker_path, job_budget=WORKER_JOB_BUDGET) as worker:
+            budget = {"body": len(raw), "disk": 0, "inflight": len(raw), "attempts": 1}
+            http_result = worker.request(
+                "scan_http_tar", budget=budget, payload={"url": url})
+            file_result = worker.request(
+                "scan_tar", budget=budget,
+                payload={"path": str(tmp_path / "scan.tar")})
+            # Byte cap is enforced on the transport: one byte short of the
+            # archive, server still serving the full body.
+            with pytest.raises(RustWorkerError, match="worker rejected request"):
+                worker.request(
+                    "scan_http_tar", budget=budget,
+                    payload={"url": url, "max_bytes": len(raw) - 1})
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert http_result == file_result
+    assert http_result["whole_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert http_result["size"] == len(raw)
