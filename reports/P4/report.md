@@ -44,11 +44,24 @@
 - 端到端闭环 `tests/test_r1_loopback_loop.py`（全合成、loopback、工作根在 `DEFAULT_WORK_ROOT` 下）：`make_tar` 合成 128 KiB 图像 TAR → `indexer.scan` P2 durable v4（INPUT.json 声明 sha256 = 真实文件 sha256）→ `compile_runtime`+`RuntimeSnapshot` P3 查询/tag/location 解析 → loopback 服务该 TAR → `fetch_range_gated` 全量取回，返回哈希 = P2 声明哈希 = 本地文件哈希（三段字节一致）；随后验证：干净拒绝 → attempts 2/body 不变；kill worker 崩溃 → attempts 3、pending body +1024、inflight 保留（不退款）。
 - 实际验证（真实执行）：`pytest tests/test_r1_loopback_loop.py tests/test_r1_bridge.py -v` → **7 passed**（含闭环）、0 failed，10.50 s；`ruff check`/`ruff format --check` 新增/修改文件 exit 0。
 
-### R1 当前缺口（未完成，不伪报）
+### R1 docs 口径迁移阶段
 
-- Rust 侧校验尚未接入 Python transport 生命周期（bridge 现为独立能力，未改既有 transport/modelscope 路径）。
-- 4 GiB 预算语义改应用数据工作集口径的 docs 迁移未完成（`docs/PROJECT_RULES.md` 与本报告的口径表述待统一）。
-- wheel/fresh-process R1 来源验证、Python 全量回归在 R1 收尾阶段执行。
+- 4 GiB 口径统一为**应用数据工作集预算**（非物理盘界证明、非生产放行）：`docs/PROJECT_RULES.md` 新增 §10（预算语义 + R1 边界 + 工具链位置）；`remote_index.py`/`retrieval.py`/`package.py`/`cli_ops.py`/`cli.py` 的生产门禁消息与注释同步改为 `4 GiB working-set budget unproven` 口径，门禁行为不变（仍 `BLOCKED`，无测试断言旧字符串）。
+
+### R1 收尾：全量回归 + wheel/fresh-process 来源验证
+
+- Python 全量回归（系统 Python 3.14.5 + `PYTHONPATH=src`，P4 测试解释器；`requests` 缺失的各 `.venv*` 不能跑 P4 套件）：`python -m pytest tests/ -q` → **472 passed, 2 skipped**，0 failed，1415.54 s（23:35）。覆盖既有 427 基线 + 本 R1 新增 45 项断言链（6 bridge + 1 闭环 + P4 既有用例全过）。
+- 预存 lint 处置：`src/sakurapool/storage/location_gate.py:387` E501（111 > 100，R1 前置 P4 提交引入）以单行签名换行修复（纯排版）；修复后 `tests/test_p4_two_hop.py` 复跑 **83 passed**（63.26 s），`ruff check src tests` → **All checks passed**（exit 0）。既有文件的 `ruff format --check` 差异经 HEAD 对照确认为既有风格（项目惯例仅 `ruff check`），未做整文件格式化。
+- wheel（最终树，E501 修复后重建）：`python -m build --wheel` → `dist/sakurapool-0.1.0-py3-none-any.whl`（113,666 B）SHA-256 `81d189d2b716b8c586b81a1eafaeff0aceb044a7b3deb6f85b251331902579a9`；`build/`、`dist/` 已在 .gitignore。
+- fresh-process（仓库外 `D:\SakuraTool\SakuraPool-P4-work\r1-fresh-venv`，uv CPython 3.12，全新 venv）：`pip install --force-reinstall <wheel>` exit 0；`import sakurapool` 解析到 venv site-packages（非仓库 src）；不带 `PYTHONPATH=src` 运行 `pytest tests/test_r1_bridge.py tests/test_r1_loopback_loop.py -q` → **7 passed**，14.51 s；已装 `storage/location_gate.py` 与仓库 `src/.../location_gate.py` 逐字节一致（SHA-256 `d78310e625571426d22439d870a13f3f069e4426da94945f99fc7ec7410de5c7`）。
+- Rust 四命令终验（`CARGO_TARGET_DIR=D:\SakuraTool\SakuraPool-P4-work\rust-target`，仓库外）：`cargo fmt --check` exit 0；`cargo test` lib **5 passed** + integration **2 passed**、0 failed；`cargo clippy --all-targets` exit 0、0 warning；`cargo build --release` exit 0；worker 二进制 639,877 B、SHA-256 `eac066b4de00553dc9d2f06ab7bcb7e46ad490f487842d3ddc23f4d3f84c27f9`（重建后字节不变）。
+- 工具链位置核验（新进程，注册表合并 PATH）：`where cargo/rustc` → `C:\Users\PC\.cargo\bin\`（用户级标准 rustup 位置，非仓库子目录）；`rustc/cargo 1.98.1`；注册表 `HKCU\Environment\Path` 已持久含 `C:\Users\PC\.cargo\bin`；活动工具链 `stable-x86_64-pc-windows-gnu`（default，另装 msvc）。
+
+### R1 最终缺口（未完成，不伪报）与事件
+
+- 事件：既有未跟踪文件 `tests/test_p4_repository_configuration.py`（从未被 git 跟踪）于本会话期间消失；多源只读查找（工作树/Git 全部对象含 7 个 unreachable blob/`D:\SakuraTool` 备份与临时目录/系统回收站 122 条全量/worker 产物/事件日志）未找到原字节，判定 **UNRECOVERABLE**（唯一未覆盖：`D:\$Recycle.Bin` 单独枚举，INCOMPLETE 低概率通道）；用户已确认接受 UNRECOVERABLE，不重建、不伪造；详见 `reports/P4/r1-untracked-test-file-loss-search.md`。套件无漂移：全量回归 collect 474 = 丢失后 collect 474。
+- Rust 侧校验尚未接入 Python transport 生命周期（bridge 为独立能力，未改既有 transport/modelscope 生产路径；生产门禁仍 `BLOCKED`）。
+- 并发 `1/4/8` 矩阵未做（本单禁止独立 1M/5M benchmark 与真实仓库请求；loopback 单连接已验证）。
 - **阶段结论**：`P4_R1=WAITING_REVIEW`，`P4_COMPLETE=NO`，`MERGE_AUTHORIZED=NO`，`R2/P5=NO`。
 
 > 本文件第 1–6 节保留历史 P4 game dataset 认证口径，历史实现冻结为 `56f40c43d0a85943b633c38eab6a4175d53b434f`。当前 repository 运行时配置化实现已在 dev 新提交 `dfd5121af933ac5f63b66ed031ce46a569dcf469` 完成；当前 `konachan_full` 目标验证见下方“当前配置化 addendum”，不覆盖旧 game 证据。

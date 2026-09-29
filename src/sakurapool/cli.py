@@ -145,9 +145,9 @@ def _runtime_command(args: argparse.Namespace) -> int:
 
 
 def _scan_remote_blocked() -> int:
-    """Only scan/compile is unconditionally blocked by unproven disk bounds."""
+    """Only scan/compile is blocked until the working-set budget is proven."""
     print(json.dumps({"status": "BLOCKED", "command": "index scan-remote",
-                      "reason": "P4_PARTIAL: physical 4 GiB disk bound unproven"},
+                      "reason": "P4_PARTIAL: 4 GiB working-set budget unproven"},
                      sort_keys=True))
     print("remote scan/compile blocked before HTTP or artifact creation", file=sys.stderr)
     return 3

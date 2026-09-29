@@ -384,7 +384,8 @@ class _Missing:
 _MISSING = _Missing()
 
 
-def validate_two_hop_record(record: dict, *, expected_repository: "str | _Missing" = _MISSING) -> TwoHopRecord:
+def validate_two_hop_record(
+    record: dict, *, expected_repository: "str | _Missing" = _MISSING) -> TwoHopRecord:
     """Fail-closed reader-side validation; unknown/old/foreign profiles refuse.
 
     expected_repository (the RUNTIME configuration value) is REQUIRED: there

@@ -89,3 +89,10 @@ P4 开始时按另行下发的执行单取得实际文件清单、对象版本�
 - 根据 profiling 决定是否缓存解码后 bitmap；不能共享可变 bitmap 污染结果。
 - P4/P5 统一 ObjectRef／选择结果接口，不提前大改 P3。
 - 管理员远端扫描只计算必要校验，避免复制当前本地多次全 TAR hash 行为。
+
+## 10. P4 预算语义与 R1 边界（2026-09-29 起）
+
+- 固定工作根 `D:/SakuraTool/SakuraPool-P4-work` 的 **4 GiB（4,294,967,296 B）** 口径为**应用数据工作集预算**：预算账本对应用自身 allocation（双槽账本、stage/临时、SQLite journal、编译器产物、IPC/并发 payload）的授权上限，**不是**物理盘界证明，也**不等于**生产 fetch/scan 已可用。生产门禁在未证明该预算全链覆盖前维持 `BLOCKED`；不得把 4 GiB 预算自动放行远端下载。
+- Rust worker（`rust/` workspace，`sakurapool-r1`）只接受 loopback http 目标（127.0.0.1/localhost/::1）；预算在请求前持久预留（`reserve` → 请求 → 块内内存计数 → `consume_body`/`settle`），崩溃类失败租约留账不退款。
+- **R1 边界**：R1 交付物只允许离线验证（合成 fixture、loopback）；禁止任何 ModelScope/真实仓库请求、完整真实 TAR 扫描、远端数据上传、R2/P5 工作；`main` 分支不受 R1 影响。合成结果不冒称生产性能或生产可用性。
+- Rust 工具链安装于系统/用户标准位置（`C:\Users\PC\.cargo` / `C:\Users\PC\.rustup`，MSVC 目标不可用时采用官方 windows-gnu + MSYS2 ucrt64 链接器）；构建产物固定放仓库外 `CARGO_TARGET_DIR=D:\SakuraTool\SakuraPool-P4-work\rust-target`，仓库内不得出现 `rust/target`。

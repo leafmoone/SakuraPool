@@ -1,7 +1,8 @@
 """Small explicit P4 CLI boundary; offline fixtures never reach public hosts.
 
 The operator gate for *running* on ModelScope is external to this module.
-Production scan/compile remains blocked by the unproven physical disk bound.
+Production scan/compile remains blocked until the 4 GiB working-set budget
+is proven.
 """
 
 from __future__ import annotations
@@ -192,7 +193,7 @@ def fetch(package_root: Path, config_path: Path, record_id: str, output: Path,
           *, offline_fixture: bool = False) -> dict:
     """Never indexes: require an existing verified package and matching profile."""
     if not offline_fixture:
-        raise BudgetExceeded("P4 production fetch BLOCKED: unproven sample disk cap")
+        raise BudgetExceeded("P4 production fetch BLOCKED: 4 GiB working-set budget unproven")
     config, ledger = _profile(config_path, offline_fixture=True,
                               require_revision=True)
     package = load_package(package_root, allow_offline_loopback=ledger.offline_mode)

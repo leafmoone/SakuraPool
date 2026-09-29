@@ -1,7 +1,8 @@
 """P4 synthetic-fixture sequential TAR staging and P2 v4 seam.
 
-Production scan/build is BLOCKED until the physical 4 GiB cap is proven,
-including SQLite rollback journals, spools, compiler and temporary copies.
+Production scan/build is BLOCKED until the 4 GiB application data
+working-set budget is proven, including SQLite rollback journals, spools,
+compiler and temporary copies.
 Offline fixtures may exercise the parser, P2 writer and P3 compiler without
 claiming that a synthetic run proves the target-service or disk safety gate.
 """
@@ -25,7 +26,7 @@ from ..registry import DatasetAdapter
 from .budget import DEFAULT_WORK_ROOT, BudgetExceeded, BudgetLedger, Reservation
 from .transport import READ_CHUNK, BoundObject, GuardedTransport, RemoteIOError
 
-# Synthetic-fixture allowances only; NOT a proven physical disk bound.
+# Synthetic-fixture allowances only; NOT a proven working-set budget bound.
 # Production paths reject before creating files or making HTTP requests.
 OFFLINE_BUILD_ALLOWANCE = 1152 * (1 << 20)
 OFFLINE_FRAGMENT_CAP = 192 * (1 << 20)
@@ -40,7 +41,7 @@ OFFLINE_STAGE_ALLOWANCE = 1152 * (1 << 20)
 
 def _offline_only(ledger: BudgetLedger) -> None:
     if not isinstance(ledger, BudgetLedger) or not ledger.offline_mode:
-        raise BudgetExceeded("P4 remote scan/compile BLOCKED: unproven 4 GiB disk cap")
+        raise BudgetExceeded("P4 remote scan/compile BLOCKED: 4 GiB working-set budget unproven")
 
 
 @dataclass(frozen=True)
@@ -204,7 +205,8 @@ def write_staged_v4(ledger: BudgetLedger,
     contract = {"format_version": indexer.FORMAT_VERSION, "builder": indexer.BUILDER,
                 "adapter": adapter.to_dict(), "hash_images": True, "inputs": validators}
     # Offline allowance tests cross-process accounting but does not certify
-    # the physical maximum of SQLite journals, sort scratch or runtime files.
+    # the maximum of SQLite journals, sort scratch or runtime files inside
+    # the working-set budget.
     total = {"objects": 0, "samples": 0, "annotations": 0, "errors": 0}
     lease = ledger.reserve(Reservation(disk=OFFLINE_BUILD_ALLOWANCE,
                                        records=sum(s.potential_records for _, _, s in frozen)))
@@ -304,8 +306,8 @@ def stage_tar(transport: GuardedTransport, ledger: BudgetLedger,
               max_json_bytes: int = MAX_JSON_BYTES) -> StagedObject:
     """Single explicit full-object stream; caller must first verify binding.
 
-    Production rejects before any HTTP request: whole-root physical bounds
-    are not established. Synthetic fixtures retain an accounting allowance,
+    Production rejects before any HTTP request: the working-set budget is
+    not yet proven. Synthetic fixtures retain an accounting allowance,
     which is not an independently proven maximum for journal/temp growth.
     Caller chooses a fresh child under the offline test root. Existing output
     (including a completed stage) is never overwritten or silently reused.
@@ -334,7 +336,7 @@ def stage_tar(transport: GuardedTransport, ledger: BudgetLedger,
         raise FileExistsError("stage output already exists; never overwrite")
     if bound.size > 2 * (1 << 30):
         raise ValueError("remote TAR exceeds 2 GiB single-object limit")
-    # Offline accounting allowance, not a physical SQLite/journal bound.
+    # Offline accounting allowance, not a proven SQLite/journal bound.
     disk_lease = ledger.reserve(Reservation(disk=OFFLINE_STAGE_ALLOWANCE))
     try:
         output.mkdir(exist_ok=False)

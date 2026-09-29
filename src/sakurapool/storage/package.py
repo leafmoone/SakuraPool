@@ -493,7 +493,8 @@ def publish_local_package(root: Path, ledger: BudgetLedger, *, endpoint: str,
     offline; it does not resolve or fetch a target repo. No publication.
     """
     if not isinstance(ledger, BudgetLedger) or not ledger.offline_mode:
-        raise BudgetExceeded("P4 package production build BLOCKED: unproven full-chain disk cap")
+        raise BudgetExceeded(
+            "P4 package production build BLOCKED: 4 GiB working-set budget unproven")
     root = Path(root).absolute()
     if not root.is_relative_to(ledger.root) or not root.is_dir():
         raise ValueError("offline package output must exist under test work root")
@@ -618,7 +619,7 @@ def fetch_from_package(root: Path, record_id: str, output: Path,
 
     if (not isinstance(transport.ledger, BudgetLedger)
             or not transport.ledger.offline_mode):
-        raise BudgetExceeded("P4 production fetch BLOCKED: unproven sample disk cap")
+        raise BudgetExceeded("P4 production fetch BLOCKED: 4 GiB working-set budget unproven")
     if not Path(root).absolute().is_relative_to(transport.ledger.root):
         raise PackageCorrupt("package and transport budget roots differ")
     package = load_package(root, allow_offline_loopback=transport.ledger.offline_mode)

@@ -110,7 +110,7 @@ def fetch_bounded_samples(transport: GuardedTransport, ledger: BudgetLedger,
     if transport.ledger is not ledger:
         raise ValueError("retrieval transport and disk budget must be identical")
     if not isinstance(ledger, BudgetLedger) or not ledger.offline_mode:
-        raise BudgetExceeded("P4 production fetch BLOCKED: unproven sample disk cap")
+        raise BudgetExceeded("P4 production fetch BLOCKED: 4 GiB working-set budget unproven")
     if type(workers) is not int or not 1 <= workers <= 8:
         raise ValueError("worker count must be between 1 and 8")
     root = _real_output_root(output_root, ledger)
@@ -148,7 +148,7 @@ def fetch_bound_sample(transport: GuardedTransport, ledger: BudgetLedger,
     if transport.ledger is not ledger:
         raise ValueError("retrieval transport and disk budget must be identical")
     if not isinstance(ledger, BudgetLedger) or not ledger.offline_mode:
-        raise BudgetExceeded("P4 production fetch BLOCKED: unproven sample disk cap")
+        raise BudgetExceeded("P4 production fetch BLOCKED: 4 GiB working-set budget unproven")
     sample.validate(bound.size)
     output_root = _real_output_root(output_root, ledger)
     final = output_root / sample.record_id
