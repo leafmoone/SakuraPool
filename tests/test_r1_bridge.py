@@ -484,6 +484,47 @@ def test_restart_sees_durable_pending(worker_path, work_root, loopback_server):
         b.close()
 
 
+def test_python_crash_keeps_durable_lease_pending(work_root):
+    """A hard exit of the owning Python process while a lease is held must
+    not refund or corrupt the durable ledger: a fresh process opening the
+    same root sees the pending reservation exactly as left behind."""
+    import subprocess as sp
+
+    root = os.path.join(work_root, "ledger-crash")
+    os.mkdir(root)
+    code = (
+        "from sakurapool.storage.budget import BudgetLedger, Reservation;"
+        "import os;"
+        f"ledger = BudgetLedger({root!r}, _offline_test=True,"
+        " _test_limits={'body': 4*1024*1024, 'inflight': 8*1024*1024,"
+        " 'attempts': 5});"
+        "lease = ledger.reserve(Reservation(body=3000, disk=0, inflight=3000,"
+        " attempt=True));"
+        "os._exit(0)"  # hard exit: no settle, no atexit cleanup
+    )
+    child = sp.Popen([sys.executable, "-c", code],
+                     env={**os.environ, "PYTHONPATH": os.environ.get("PYTHONPATH", "src")},
+                     cwd=os.getcwd())
+    assert child.wait(timeout=120) == 0
+
+    limits = {"body": 4 * 1024 * 1024, "inflight": 8 * 1024 * 1024, "attempts": 5}
+    ledger = BudgetLedger(root, _offline_test=True, _test_limits=limits)
+    status = ledger.status()
+    # The reservation survives the crash, unrefunded and still pending.
+    assert status["attempts"] == 1
+    assert status["body"] == 3000
+    assert status["inflight"] >= 3000
+    # The surviving ledger stays usable within the remaining budget: a
+    # consume + settle cycle charges exactly the consumed body, leaving the
+    # crashed pending reservation untouched.
+    lease = ledger.reserve(Reservation(body=100, disk=0, inflight=100, attempt=True))
+    ledger.consume_body(lease, 100)
+    ledger.settle(lease)
+    status = ledger.status()
+    assert status["body"] == 3100
+    assert status["attempts"] == 2
+
+
 @NEEDS_WORKER
 def test_double_settle_rejected(worker_path, ledger):
     lease = ledger.reserve(Reservation(body=100, disk=0, inflight=200, attempt=True))
