@@ -288,12 +288,15 @@ def test_range_headers_reject_without_body_or_fallback(twohop, mode):
     assert ledger.status()["body"] == (0 if mode == "cdn-redirect" else 2)
     assert ledger.status()["inflight"] == 0
     diagnostic = transport.last_result["diagnostic"]
-    assert set(diagnostic) == {"phase", "http_status", "read_bytes", "accounting_complete"}
+    assert set(diagnostic) == {"phase", "http_status", "body_bytes_observed", "attempts",
+                               "accounting_complete", "content_length_present",
+                               "content_range_present", "etag_present", "etag_is_strong",
+                               "content_encoding_present"}
     assert diagnostic["phase"] == "cdn"
     assert diagnostic["http_status"] == (
         200 if mode == "200" else 302 if mode == "cdn-redirect" else 206
     )
-    assert diagnostic["read_bytes"] == 0
+    assert diagnostic["body_bytes_observed"] == 0
     assert diagnostic["accounting_complete"] == (mode == "cdn-redirect")
     public = json.dumps(transport.last_result)
     assert TOKEN not in public and "Signature=" not in public and state["cdn"] not in public
@@ -633,7 +636,7 @@ def test_worker_crash_does_not_refund_pending_body(twohop, monkeypatch):
             pass
 
     monkeypatch.setattr(production, "RustWorker", Crash)
-    with pytest.raises(RustWorkerError):
+    with pytest.raises(RemoteIOError, match="accounting uncertain"):
         with transport.transfer(obj, condition="observe"):
             pass
     assert ledger.status()["body"] == 2

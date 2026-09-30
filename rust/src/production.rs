@@ -45,6 +45,39 @@ pub struct Accounting {
     pub phase: &'static str,
     #[serde(skip)]
     pub http_status: Option<u16>,
+    #[serde(skip)]
+    pub content_length_present: bool,
+    #[serde(skip)]
+    pub content_range_present: bool,
+    #[serde(skip)]
+    pub etag_present: bool,
+    #[serde(skip)]
+    pub etag_is_strong: bool,
+    #[serde(skip)]
+    pub content_encoding_present: bool,
+}
+impl Accounting {
+    fn observe_headers(&mut self, response: &Response) {
+        self.http_status = Some(response.status().as_u16());
+        let h = response.headers();
+        self.content_length_present = h.contains_key("content-length");
+        self.content_range_present = h.contains_key("content-range");
+        self.etag_present = h.contains_key("etag");
+        self.etag_is_strong = h
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(validator);
+        self.content_encoding_present = h.contains_key("content-encoding");
+    }
+    pub fn diagnostic(&self) -> serde_json::Value {
+        serde_json::json!({"phase":self.phase,"http_status":self.http_status,
+            "attempts":self.attempts,"body_bytes_observed":self.body,
+            "accounting_complete":self.complete,
+            "content_length_present":self.content_length_present,
+            "content_range_present":self.content_range_present,
+            "etag_present":self.etag_present,"etag_is_strong":self.etag_is_strong,
+            "content_encoding_present":self.content_encoding_present})
+    }
 }
 pub struct Outcome {
     pub result: serde_json::Value,
@@ -356,7 +389,7 @@ fn transfer(t: &Transfer, a: &mut Accounting) -> Result<serde_json::Value, &'sta
     a.attempts += 1;
     a.complete = false;
     let r = req.send().map_err(|_| "origin_transport")?;
-    a.http_status = Some(r.status().as_u16());
+    a.observe_headers(&r);
     headers(&r)?;
     a.complete = single(r.headers(), "content-length")? == Some("0")
         && single(r.headers(), "transfer-encoding")?.is_none();
@@ -390,10 +423,15 @@ fn transfer(t: &Transfer, a: &mut Accounting) -> Result<serde_json::Value, &'sta
     }
     a.phase = "cdn";
     a.http_status = None;
+    a.content_length_present = false;
+    a.content_range_present = false;
+    a.etag_present = false;
+    a.etag_is_strong = false;
+    a.content_encoding_present = false;
     a.attempts += 1;
     a.complete = false;
     let mut r = req.send().map_err(|_| "cdn_transport")?;
-    a.http_status = Some(r.status().as_u16());
+    a.observe_headers(&r);
     headers(&r)?;
     a.complete = single(r.headers(), "content-length")? == Some("0")
         && single(r.headers(), "transfer-encoding")?.is_none();
@@ -446,6 +484,7 @@ fn transfer(t: &Transfer, a: &mut Accounting) -> Result<serde_json::Value, &'sta
         return Err("validator_mismatch");
     }
     a.complete = false;
+    a.phase = "body";
     if t.mode == "range" {
         let mut bytes = Vec::new();
         let mut chunk = [0u8; 65536];
@@ -470,6 +509,7 @@ fn transfer(t: &Transfer, a: &mut Accounting) -> Result<serde_json::Value, &'sta
             serde_json::json!({"bytes":a.body,"sha256":format!("{:x}",Sha256::digest(&bytes)),"etag":etag,"status":status,"cdn_host":target.host_str()}),
         );
     }
+    a.phase = "scan";
     let report = if t.mode == "remote-stream-scan" {
         let mut tee = CountTee {
             response: r,
@@ -529,6 +569,7 @@ fn transfer(t: &Transfer, a: &mut Accounting) -> Result<serde_json::Value, &'sta
 }
 pub fn run(t: Transfer) -> Outcome {
     let mut accounting = Accounting {
+        phase: "origin",
         complete: true,
         ..Accounting::default()
     };

@@ -320,9 +320,7 @@ fn dispatch(request: &Request) -> Result<serde_json::Value, &'static str> {
         }
         let outcome = sakurapool_rust::production::run(transfer);
         let mut value = outcome.result;
-        value["diagnostic"] = serde_json::json!({"phase":outcome.accounting.phase,
-            "http_status":outcome.accounting.http_status,"read_bytes":outcome.accounting.body,
-            "accounting_complete":outcome.accounting.complete});
+        value["diagnostic"] = outcome.accounting.diagnostic();
         value["accounting"] = serde_json::to_value(outcome.accounting).map_err(|_| "accounting")?;
         if let Some(error) = outcome.error {
             value["production_error"] = serde_json::json!(error);

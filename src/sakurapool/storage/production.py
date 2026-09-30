@@ -23,6 +23,28 @@ from .transport import RemoteIOError
 
 REPORT_CAP = 16 * (1 << 20)
 MAX_RANGE = 8 * (1 << 20)
+_DIAGNOSTIC_FLAGS = ("content_length_present", "content_range_present", "etag_present",
+                     "etag_is_strong", "content_encoding_present")
+_PUBLIC_ERROR_CODES = frozenset({"location_invalid", "location_encoding", "validator_mismatch",
+                                "cdn_status", "origin_status", "conditional_unsupported",
+                                "body_framing", "content_range", "body_length", "body_io",
+                                "scan_failed", "origin_transport", "cdn_transport"})
+
+
+def _safe_diagnostic(value, accounting):
+    keys = {"phase", "http_status", "attempts", "body_bytes_observed", "accounting_complete",
+            *_DIAGNOSTIC_FLAGS}
+    if not isinstance(value, dict) or set(value) != keys:
+        raise RemoteIOError("Rust production request rejected; diagnostic invalid")
+    if (value["phase"] not in ("origin", "cdn", "body", "scan") or
+            not (value["http_status"] is None or type(value["http_status"]) is int and
+                 100 <= value["http_status"] <= 599) or
+            any(type(value[k]) is not bool for k in (*_DIAGNOSTIC_FLAGS, "accounting_complete")) or
+            type(value["attempts"]) is not int or type(value["body_bytes_observed"]) is not int or
+            (value["attempts"], value["body_bytes_observed"], value["accounting_complete"]) !=
+            (accounting["attempts"], accounting["body"], accounting["complete"])):
+        raise RemoteIOError("Rust production request rejected; diagnostic invalid")
+    return dict(value)
 
 
 @dataclass(frozen=True)
@@ -195,6 +217,14 @@ class RustProductionTransport:
         return root
 
     def _call(self, obj, root, *, start=0, length=1, condition="match", mode="range"):
+        try:
+            return self._call_accounted(obj, root, start=start, length=length,
+                                        condition=condition, mode=mode)
+        except RustWorkerError:
+            # Timeout/death/malformed IPC preserve leases and never expose raw worker text.
+            raise RemoteIOError("Rust production request rejected; accounting uncertain") from None
+
+    def _call_accounted(self, obj, root, *, start=0, length=1, condition="match", mode="range"):
         obj.validate(test=self._test)
         if obj.origin != self.origin:
             raise RemoteIOError("origin binding mismatch")
@@ -266,12 +296,20 @@ class RustProductionTransport:
                 or type(accounting["complete"]) is not bool
             ):
                 raise RustWorkerError("production accounting invalid; leases pending")
-            self.last_result = dict(result)  # sanitized module result, never a URL/credential
             self.ledger.consume_body(lease1, accounting["body"])
             if accounting["complete"]:
                 self.ledger.settle(lease1)
                 self.ledger.settle(lease2)
-            if not msg.get("ok"):
+            self.last_result = {
+                "accounting": dict(accounting),
+                "diagnostic": _safe_diagnostic(result.get("diagnostic"), accounting),
+            }
+            if "production_error" in result:
+                code = result["production_error"]
+                self.last_result["production_error"] = (
+                    code if isinstance(code, str) and code in _PUBLIC_ERROR_CODES else "rejected")
+            if not msg.get("ok") or "production_error" in result:
+                # Account first even when ok=true: the envelope is not business success.
                 raise RemoteIOError("Rust production request rejected")
             if not accounting["complete"]:
                 raise RustWorkerError("production body uncertain; leases pending")
