@@ -6,7 +6,10 @@
 //! the Python durable ledger keeps the reservation pending).
 
 mod http;
-pub use http::{http_request, HttpOp, HttpPolicy, HttpResponse, HTTP_MAX_HEADER_BYTES};
+pub use http::{
+    http_request, HttpBody, HttpOp, HttpPolicy, HttpResponse, HTTP_MAX_HEADER_BYTES,
+    HTTP_MAX_RANGE_BYTES,
+};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -297,11 +300,12 @@ impl<R> HashCountReader<R> {
     }
 }
 
-fn member_path<R: Read>(entry: &tar::Entry<'_, R>) -> Result<String, &'static str> {
-    // `path_bytes` is the lossless accessor; validate UTF-8 ourselves so the
-    // failure is platform-independent (Windows `Path` rejects 0xFF bytes).
-    let bytes = entry.path_bytes();
-    let text = match std::str::from_utf8(&bytes) {
+/// Per GNU/PAX extension cap, checked on raw tar::Entry BEFORE payload allocation.
+pub const MAX_TAR_EXTENSION_BYTES: u64 = 64 * 1024;
+
+fn member_path(bytes: &[u8]) -> Result<String, &'static str> {
+    // Validate UTF-8 ourselves for platform-independent failures.
+    let text = match std::str::from_utf8(bytes) {
         Ok(text) => text.to_owned(),
         Err(_) => return Err("non_utf8_member"),
     };
@@ -334,18 +338,98 @@ pub fn scan_tar_reader<R: Read>(reader: R, limits: &ScanLimits) -> Result<TarSca
     let mut archive = tar::Archive::new(reader);
 
     let mut members: Vec<TarMember> = Vec::new();
+    let mut gnu_path: Option<Vec<u8>> = None;
+    let mut pax_path: Option<Vec<u8>> = None;
+    let mut pax_size: Option<u64> = None;
+    let mut have_pax = false;
+    let mut last_padded_end = 0u64;
     {
-        let entries = archive.entries().map_err(|_| "corrupt_archive")?;
+        // tar 0.4.46 has NO extension-size limit on its preprocessing iterator:
+        // it calls read_all for GNU/PAX. raw(true) exposes mature-parser entries
+        // so we can bound each extension BEFORE that allocation. Header/checksum,
+        // padding and PAX record syntax remain parsed by tar, not by us.
+        let entries = archive.entries().map_err(|_| "corrupt_archive")?.raw(true);
         for entry in entries {
-            let entry = entry.map_err(|_| "corrupt_archive")?;
+            let mut entry = entry.map_err(|_| "corrupt_archive")?;
             if (members.len() as u64) >= limits.max_members {
                 return Err("limit_exceeded");
             }
-            let path = member_path(&entry)?;
             let kind = entry.header().entry_type();
-            // After `entries.next()` the underlying reader has consumed exactly
-            // header + extension headers, so its byte count is the payload start.
-            let offset = bytes.load(Ordering::SeqCst);
+            if kind.is_gnu_longname() || kind.is_pax_local_extensions() {
+                if entry.size() > MAX_TAR_EXTENSION_BYTES {
+                    return Err("extension_too_large");
+                }
+                if kind.is_gnu_longname() {
+                    if gnu_path.is_some() {
+                        return Err("corrupt_archive");
+                    }
+                    let size = entry.size();
+                    let mut path = Vec::new();
+                    entry
+                        .read_to_end(&mut path)
+                        .map_err(|_| "corrupt_archive")?;
+                    if path.len() as u64 != size {
+                        return Err("corrupt_archive");
+                    }
+                    if path.last() == Some(&0) {
+                        path.pop();
+                    }
+                    gnu_path = Some(path);
+                } else {
+                    if have_pax {
+                        return Err("corrupt_archive");
+                    }
+                    have_pax = true;
+                    for extension in entry
+                        .pax_extensions()
+                        .map_err(|_| "corrupt_archive")?
+                        .ok_or("corrupt_archive")?
+                    {
+                        let extension = extension.map_err(|_| "corrupt_archive")?;
+                        let key = extension.key_bytes();
+                        if key.starts_with(b"GNU.sparse") || key == b"linkpath" {
+                            return Err("unsupported_member");
+                        }
+                        if key == b"path" {
+                            pax_path = Some(extension.value_bytes().to_vec());
+                        } else if key == b"size" {
+                            pax_size = Some(
+                                extension
+                                    .value()
+                                    .map_err(|_| "corrupt_archive")?
+                                    .parse::<u64>()
+                                    .map_err(|_| "corrupt_archive")?,
+                            );
+                        }
+                    }
+                }
+                continue;
+            }
+            if !matches!(kind, tar::EntryType::Regular | tar::EntryType::Directory) {
+                return Err("unsupported_member");
+            }
+            // raw() uses header geometry. Do not silently ignore conflicting PAX
+            // size overrides: those require a different framing contract, rejected.
+            if pax_size.is_some_and(|size| size != entry.size()) {
+                return Err("unsupported_pax_size");
+            }
+            let ordinary_path = entry.path_bytes();
+            let path = member_path(
+                gnu_path
+                    .as_deref()
+                    .or(pax_path.as_deref())
+                    .unwrap_or(&ordinary_path),
+            )?;
+            gnu_path = None;
+            pax_path = None;
+            pax_size = None;
+            have_pax = false;
+            let offset = entry.raw_file_position();
+            last_padded_end = offset
+                .checked_add(entry.size())
+                .and_then(|end| end.checked_add(511))
+                .map(|end| end & !511)
+                .ok_or("corrupt_archive")?;
             match kind {
                 tar::EntryType::Regular => {
                     let declared = entry.header().size().map_err(|_| "corrupt_archive")?;
@@ -382,6 +466,9 @@ pub fn scan_tar_reader<R: Read>(reader: R, limits: &ScanLimits) -> Result<TarSca
                     });
                 }
                 tar::EntryType::Directory => {
+                    if entry.size() != 0 {
+                        return Err("unsupported_member");
+                    }
                     members.push(TarMember {
                         path,
                         kind: MemberKind::Dir,
@@ -397,6 +484,14 @@ pub fn scan_tar_reader<R: Read>(reader: R, limits: &ScanLimits) -> Result<TarSca
                 return Err("limit_exceeded");
             }
         }
+    }
+    if gnu_path.is_some() || have_pax {
+        return Err("corrupt_archive"); // extension describing a missing future member
+    }
+    // raw iterator consumed the first zero block; plain aligned EOF is NOT a
+    // valid terminator. Require the second complete zero block in the tail.
+    if bytes.load(Ordering::SeqCst) != last_padded_end.saturating_add(512) {
+        return Err("invalid_tail");
     }
     let mut tail = archive.into_inner();
     let mut trailing_bytes = 0u64;
@@ -416,6 +511,9 @@ pub fn scan_tar_reader<R: Read>(reader: R, limits: &ScanLimits) -> Result<TarSca
     }
     if over_limit.load(Ordering::SeqCst) || trailing_bytes > limits.max_bytes {
         return Err("limit_exceeded");
+    }
+    if trailing_bytes < 512 {
+        return Err("invalid_tail");
     }
     let size = bytes.load(Ordering::SeqCst);
     Ok(TarScan {
@@ -448,11 +546,13 @@ pub fn scan_http_tar(
     limits: &ScanLimits,
     policy: &HttpPolicy,
 ) -> Result<TarScan, &'static str> {
-    let response = http_request(&HttpOp::FullStream, url, limits.max_bytes, policy)?;
-    if response.body.len() as u64 > limits.max_bytes {
-        return Err("limit_exceeded");
+    let mut response = http_request(&HttpOp::FullStream, url, limits.max_bytes, policy)?;
+    // Pass the live response reader directly to tar; never collect the TAR.
+    let result = scan_tar_reader(&mut response.body, limits);
+    match response.body.error_code() {
+        Some(code) => Err(code),
+        None => result,
     }
-    scan_tar_reader(std::io::Cursor::new(response.body), limits)
 }
 
 #[cfg(test)]

@@ -20,6 +20,7 @@ import json
 import queue
 import subprocess
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -28,6 +29,8 @@ from .budget import Reservation
 PROTOCOL_VERSION = 1
 MAX_LINE_BYTES = 64 * 1024
 _STDERR_TAIL_BYTES = 64 * 1024
+_STDOUT_QUEUE_LINES = 8
+_QUEUE_WAIT_S = 0.05
 _TIMEOUT_S = 60.0
 _REJECTED = "worker rejected request"
 _ZERO_BUDGET = {"body": 0, "disk": 0, "inflight": 0, "attempts": 0}
@@ -68,13 +71,21 @@ class RustWorker:
         self.timeout_s = timeout_s
         self.capabilities: tuple[str, ...] = ()
         self.worker_version: str = ""
+        normalized_budget = _normalize_budget(job_budget)
         self._proc = subprocess.Popen(
             [str(binary)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            bufsize=0,  # no BufferedReader/Writer lock held by a blocked pipe operation
         )
-        self._lines: queue.Queue[bytes] = queue.Queue()
+        self._lines: queue.Queue[bytes] = queue.Queue(maxsize=_STDOUT_QUEUE_LINES)
+        self._stop = threading.Event()
+        self._reader_done = threading.Event()
+        self._stdout_error: str | None = None
+        self._lifecycle_lock = threading.Lock()
+        self._send_lock = threading.Lock()
+        self._writing = threading.Event()
         self._stderr_tail = bytearray()
         self._stderr_lock = threading.Lock()
         self._alive = True
@@ -82,22 +93,52 @@ class RustWorker:
         self._stderr_reader = threading.Thread(target=self._drain_stderr, daemon=True)
         self._reader.start()
         self._stderr_reader.start()
-        self._handshake(_normalize_budget(job_budget))
+        try:
+            self._handshake(normalized_budget)
+        except BaseException:
+            self.cancel()  # constructor failures must not leak a child or pipe threads
+            raise
 
     # -- transport ------------------------------------------------------
 
     def _drain_stdout(self) -> None:
         assert self._proc is not None and self._proc.stdout is not None
-        for raw in self._proc.stdout:
-            self._lines.put(raw)
+        pipe = self._proc.stdout
+        try:
+            while True:
+                raw = pipe.readline(MAX_LINE_BYTES + 1)
+                if not raw:
+                    break
+                if self._stop.is_set():
+                    # Shutdown abandons queued delivery, but drains the pipe so a
+                    # finite writer can exit gracefully instead of deadlocking.
+                    continue
+                if len(raw) > MAX_LINE_BYTES:
+                    self._stdout_error = "worker response line too long"
+                    break
+                while not self._stop.is_set():
+                    try:
+                        self._lines.put(raw, timeout=_QUEUE_WAIT_S)
+                        break
+                    except queue.Full:
+                        continue  # real backpressure: do not read another line
+        except (OSError, ValueError):
+            if not self._stop.is_set():
+                self._stdout_error = "worker pipe failure"
+        finally:
+            self._reader_done.set()
 
     def _drain_stderr(self) -> None:
         assert self._proc is not None and self._proc.stderr is not None
-        while True:
-            chunk = self._proc.stderr.read(4096)
-            if not chunk:
-                break
-            self._append_stderr(chunk)
+        pipe = self._proc.stderr
+        try:
+            while True:
+                chunk = pipe.read(4096)
+                if not chunk:
+                    break
+                self._append_stderr(chunk)
+        except (OSError, ValueError):
+            pass  # a concurrently closing pipe has no more diagnostics
 
     def _append_stderr(self, chunk: bytes) -> None:
         with self._stderr_lock:
@@ -110,22 +151,50 @@ class RustWorker:
             return bytes(self._stderr_tail)
 
     def _send(self, line: bytes) -> None:
-        if not self._alive or self._proc is None or self._proc.stdin is None:
-            raise RustWorkerError("worker is closed")
         if len(line) > MAX_LINE_BYTES:
             raise RustWorkerError("worker request line too long")
-        try:
-            self._proc.stdin.write(line)
-            self._proc.stdin.flush()
-        except (OSError, ValueError) as exc:
-            self._alive = False
-            raise RustWorkerError("worker pipe failure") from exc
+        with self._send_lock:
+            with self._lifecycle_lock:
+                if not self._alive or self._proc is None or self._proc.stdin is None:
+                    raise RustWorkerError("worker is closed")
+                pipe = self._proc.stdin
+                self._writing.set()
+            try:
+                view = memoryview(line)
+                while view:
+                    count = pipe.write(view)
+                    if not count:
+                        raise OSError("short pipe write")
+                    view = view[count:]
+                pipe.flush()
+            except (OSError, ValueError) as exc:
+                self._alive = False
+                raise RustWorkerError("worker pipe failure") from exc
+            finally:
+                self._writing.clear()
 
     def _receive(self) -> dict:
-        try:
-            raw = self._lines.get(timeout=self.timeout_s)
-        except queue.Empty as exc:
-            raise RustWorkerError("worker timed out") from exc
+        deadline = time.monotonic() + self.timeout_s
+        while True:
+            if self._stop.is_set():
+                raise RustWorkerError("worker is closed")
+            try:
+                wait = min(_QUEUE_WAIT_S, max(0, deadline - time.monotonic()))
+                raw = self._lines.get(timeout=wait)
+                break
+            except queue.Empty:
+                if self._stop.is_set():
+                    raise RustWorkerError("worker is closed")
+                if self._reader_done.is_set():
+                    # Producer may have enqueued its final line between our
+                    # timeout and publishing done. Drain it before reporting EOF.
+                    try:
+                        raw = self._lines.get_nowait()
+                        break
+                    except queue.Empty:
+                        raise RustWorkerError(self._stdout_error or "worker exited") from None
+                if time.monotonic() >= deadline:
+                    raise RustWorkerError("worker timed out")
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError as exc:
@@ -263,47 +332,48 @@ class RustWorker:
         return self._proc.pid if self._proc is not None else None
 
     def cancel(self) -> None:
-        """Kill the worker and wait for it to exit (crash-class close)."""
-        if self._proc is None:
-            return
-        self._alive = False
-        try:
-            self._proc.kill()
-        except OSError:
-            pass
-        try:
-            self._proc.wait(timeout=self.timeout_s)
-        except subprocess.TimeoutExpired:
-            pass
-        self._drain_stderr_join()
-        self._proc = None
+        """Kill, reap, join BOTH pipe readers and close all handles."""
+        self._shutdown(kill=True)
 
     def close(self) -> None:
-        """Graceful close: close stdin, wait, then kill as a last resort."""
-        if self._proc is None:
-            return
-        self._alive = False
-        try:
-            if self._proc.stdin is not None:
-                self._proc.stdin.close()
-        except OSError:
-            pass
-        try:
-            self._proc.wait(timeout=self.timeout_s)
-        except subprocess.TimeoutExpired:
-            self._proc.kill()
-            try:
-                self._proc.wait(timeout=self.timeout_s)
-            except subprocess.TimeoutExpired:
-                pass
-        self._drain_stderr_join()
-        self._proc = None
+        """Stop queue delivery, drain pipes, close stdin, wait; kill on timeout."""
+        self._shutdown(kill=False)
 
-    def _drain_stderr_join(self) -> None:
-        try:
-            self._stderr_reader.join(timeout=self.timeout_s)
-        except RuntimeError:
-            pass
+    def _shutdown(self, *, kill: bool) -> None:
+        with self._lifecycle_lock:
+            proc = self._proc
+            if proc is None:
+                return
+            self._alive = False
+            self._stop.set()  # wakes a producer blocked on the bounded queue
+            # Closing a pipe while another thread is blocked in WriteFile can
+            # itself block forever on Windows. Kill+wait FIRST in that case;
+            # the pipe failure releases the writer before any handle is closed.
+            if kill or self._writing.is_set():
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                proc.wait(timeout=self.timeout_s)
+            if proc.stdin is not None:
+                try:
+                    proc.stdin.close()
+                except (OSError, ValueError):
+                    pass
+            try:
+                proc.wait(timeout=self.timeout_s)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                # Do not silently mark an unreaped process as closed.
+                proc.wait(timeout=self.timeout_s)
+            for reader in (self._reader, self._stderr_reader):
+                reader.join(timeout=self.timeout_s)
+            for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                if pipe is not None:
+                    pipe.close()
+            if self._reader.is_alive() or self._stderr_reader.is_alive():
+                raise RustWorkerError("worker pipe reader failed to exit")
+            self._proc = None
 
     def __enter__(self) -> RustWorker:
         return self

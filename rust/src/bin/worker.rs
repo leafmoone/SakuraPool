@@ -292,10 +292,15 @@ fn dispatch(request: &Request) -> Result<serde_json::Value, &'static str> {
                 },
                 &payload.url,
                 range.len(),
-                &HttpPolicy::default(),
+                &HttpPolicy {
+                    // Durable Python reservation permits ONE attempt only.
+                    // Retry must be separately reserved by the caller, never hidden.
+                    max_retries: 0,
+                    ..HttpPolicy::default()
+                },
             )?;
             let mut hasher = StreamingSha256::new();
-            hasher.update(&response.body);
+            hasher.update(response.body.bounded_bytes()?);
             Ok(serde_json::json!({ "sha256": hasher.finish(), "bytes": range.len() }))
         }
         "scan_tar" => {
@@ -323,7 +328,16 @@ fn dispatch(request: &Request) -> Result<serde_json::Value, &'static str> {
             if let Some(value) = payload.max_bytes {
                 limits.max_bytes = value;
             }
-            let scan = scan_http_tar(&payload.url, &limits, &HttpPolicy::default())?;
+            let scan = scan_http_tar(
+                &payload.url,
+                &limits,
+                &HttpPolicy {
+                    // Durable Python reservation permits ONE attempt only.
+                    // Retry must be separately reserved by the caller, never hidden.
+                    max_retries: 0,
+                    ..HttpPolicy::default()
+                },
+            )?;
             let scan: serde_json::Value =
                 serde_json::to_value(&scan).map_err(|_| "protocol_violation")?;
             Ok(scan)

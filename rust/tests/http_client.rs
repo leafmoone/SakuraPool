@@ -5,7 +5,7 @@
 //! The server below is a single-threaded std TCP listener with the minimal
 //! HTTP/1.1 surface the client speaks (identity, `Connection: close`).
 
-use sakurapool_rust::{http_request, ByteRange, HttpOp, HttpPolicy};
+use sakurapool_rust::{http_request, ByteRange, HttpBody, HttpOp, HttpPolicy};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -274,7 +274,7 @@ fn range_component_fetches_exact_206() {
     )
     .unwrap();
     assert_eq!(response.status, 206);
-    assert_eq!(response.body, &DATA[10..20]);
+    assert_eq!(response.body.bounded_bytes().unwrap(), &DATA[10..20]);
     assert_eq!(response.hops, 0);
 }
 
@@ -286,7 +286,7 @@ fn full_stream_component_fetches_200_to_eof() {
         stop: Arc::new(AtomicBool::new(false)),
     };
     let server = TestServer::new(state, 0);
-    let response = http_request(
+    let mut response = http_request(
         &HttpOp::FullStream,
         &server.url("/data"),
         DATA.len() as u64,
@@ -294,7 +294,10 @@ fn full_stream_component_fetches_200_to_eof() {
     )
     .unwrap();
     assert_eq!(response.status, 200);
-    assert_eq!(response.body, DATA.to_vec());
+    assert!(matches!(response.body, HttpBody::Stream(_)));
+    let mut collected = Vec::new(); // test-only observation of a tiny payload
+    response.body.read_to_end(&mut collected).unwrap();
+    assert_eq!(collected, DATA);
 }
 
 #[test]
@@ -307,7 +310,7 @@ fn probe_component_reports_total_size() {
     let server = TestServer::new(state, 0);
     let response = http_request(&HttpOp::Probe, &server.url("/data"), 0, &fast_policy()).unwrap();
     assert_eq!(response.status, 200);
-    assert_eq!(response.body, Vec::<u8>::new());
+    assert_eq!(response.body.bounded_bytes().unwrap(), &[]);
     let content_length = response
         .headers
         .iter()
@@ -344,7 +347,7 @@ fn redirect_origin_302_to_cdn_206_with_header_isolation() {
     )
     .unwrap();
     assert_eq!(response.status, 206);
-    assert_eq!(response.body, &DATA[..10]);
+    assert_eq!(response.body.bounded_bytes().unwrap(), &DATA[..10]);
     assert_eq!(response.hops, 1);
     assert!(
         response
@@ -391,7 +394,7 @@ fn retry_succeeds_after_transient_503s_and_exhausts_cleanly() {
     policy.retry_base_ms = 1;
 
     // Two 503s then success: succeeds on the third attempt.
-    let response = http_request(
+    let mut response = http_request(
         &HttpOp::FullStream,
         &server.url("/retry503"),
         DATA.len() as u64,
@@ -399,7 +402,10 @@ fn retry_succeeds_after_transient_503s_and_exhausts_cleanly() {
     )
     .unwrap();
     assert_eq!(response.status, 200);
-    assert_eq!(response.body, DATA.to_vec());
+    assert!(matches!(response.body, HttpBody::Stream(_)));
+    let mut collected = Vec::new(); // test-only observation of a tiny payload
+    response.body.read_to_end(&mut collected).unwrap();
+    assert_eq!(collected, DATA);
     assert_eq!(response.retries, 2);
     assert_eq!(server.hits("/retry503"), 3);
 
@@ -504,18 +510,19 @@ fn reject_class_response_lifecycle() {
         "unexpected_status"
     );
     assert_eq!(server.hits("/notfound"), 1);
-    // 200 that declared more bytes than it actually sent (early EOF).
-    assert_eq!(
-        http_request(
-            &HttpOp::FullStream,
-            &server.url("/shortbody"),
-            1024,
-            &policy
-        )
-        .unwrap_err(),
-        "body_mismatch"
-    );
-    // Probe without Content-Length is rejected.
+    // FullStream is live: a short body fails during Read, not before handoff.
+    let mut short = http_request(
+        &HttpOp::FullStream,
+        &server.url("/shortbody"),
+        1024,
+        &policy,
+    )
+    .unwrap();
+    let mut tiny = Vec::new();
+    assert!(short.body.read_to_end(&mut tiny).is_err());
+    assert_eq!(short.body.error_code(), Some("body_too_short"));
+    assert_eq!(server.hits("/shortbody"), 1); // no replay after stream handoff
+                                              // Probe without Content-Length is rejected.
     assert_eq!(
         http_request(&HttpOp::Probe, &server.url("/nosize"), 0, &policy).unwrap_err(),
         "probe_without_content_length"
@@ -555,7 +562,7 @@ fn redirect_307_preserves_range_to_cdn() {
     )
     .unwrap();
     assert_eq!(response.status, 206);
-    assert_eq!(response.body, &DATA[5..15]);
+    assert_eq!(response.body.bounded_bytes().unwrap(), &DATA[5..15]);
     assert_eq!(response.hops, 1);
 }
 
