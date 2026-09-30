@@ -59,7 +59,8 @@ def test_ok_true_error_cannot_be_business_success(twohop, monkeypatch, complete)
     with pytest.raises(RemoteIOError, match="rejected") as error:
         with transport.transfer(obj, condition="observe"):
             pytest.fail("rejected worker result reached consumer")
-    assert TOKEN not in str(error.value) and error.value.__cause__ is None
+    assert TOKEN not in str(error.value)
+    assert error.value.__cause__ is None and error.value.__context__ is None
     assert TOKEN not in json.dumps(transport.last_result)
     assert transport.last_result["diagnostic"]["http_status"] == 403
     assert ledger.status()["attempts"] == 2
@@ -102,7 +103,8 @@ def test_worker_unknown_failure_is_stable_and_never_refunds(twohop, monkeypatch,
     with pytest.raises(RemoteIOError, match="accounting uncertain") as error:
         with transport.transfer(obj, condition="observe"):
             pytest.fail("failed IPC reached consumer")
-    assert TOKEN not in str(error.value) and error.value.__cause__ is None
+    assert TOKEN not in str(error.value)
+    assert error.value.__cause__ is None and error.value.__context__ is None
     assert ledger.status()["body"] == 2
     assert ledger.status()["attempts"] == 2
     assert ledger.status()["inflight"] == 0

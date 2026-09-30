@@ -221,8 +221,9 @@ class RustProductionTransport:
             return self._call_accounted(obj, root, start=start, length=length,
                                         condition=condition, mode=mode)
         except RustWorkerError:
-            # Timeout/death/malformed IPC preserve leases and never expose raw worker text.
-            raise RemoteIOError("Rust production request rejected; accounting uncertain") from None
+            # Leave the handler before raising: no raw cause OR retained __context__.
+            pass
+        raise RemoteIOError("Rust production request rejected; accounting uncertain")
 
     def _call_accounted(self, obj, root, *, start=0, length=1, condition="match", mode="range"):
         obj.validate(test=self._test)
