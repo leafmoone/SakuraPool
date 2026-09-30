@@ -1,0 +1,158 @@
+START 2026-09-30T12:26:03+08:00
+PWD /d/SakuraTool/SakuraPool
+HEAD 66579d7f9e50575cefd17c6e56da87533af4bf5f
+HEAD_TREE 79474ee7d251a54c07d4f0bba53b7b032a6f0420
+CMD D:/SakuraTool/SakuraPool-Fix3-20260930a/python-env/Scripts/python.exe -m pytest tests/test_p4_token_bootstrap.py tests/test_r1_bridge.py tests/test_r1_stdout_backpressure.py tests/test_r1_worker_attempts.py -vv -rA --durations=10 
+CARGO_TARGET_DIR=D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target
+SAKURAPOOL_RUST_WORKER=D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target/release/sakurapool-worker.exe
+PYTHONPATH=<unset>
+============================= test session starts =============================
+platform win32 -- Python 3.13.15, pytest-8.3.4, pluggy-1.6.0 -- D:\SakuraTool\SakuraPool-Fix3-20260930a\python-env\Scripts\python.exe
+cachedir: .pytest_cache
+R1 worker: D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target/release/sakurapool-worker.exe (sha256:0b8bafc4f1388ad3)
+rootdir: D:\SakuraTool\SakuraPool
+configfile: pyproject.toml
+collecting ... collected 62 items
+
+tests/test_p4_token_bootstrap.py::test_isolated_runpy_executes_real_offline_cli_with_synthetic_token PASSED [  1%]
+tests/test_p4_token_bootstrap.py::test_invalid_synthetic_token_stops_before_cli_or_http[] PASSED [  3%]
+tests/test_p4_token_bootstrap.py::test_invalid_synthetic_token_stops_before_cli_or_http[name: secret] PASSED [  4%]
+tests/test_p4_token_bootstrap.py::test_invalid_synthetic_token_stops_before_cli_or_http[token with space] PASSED [  6%]
+tests/test_p4_token_bootstrap.py::test_invalid_synthetic_token_stops_before_cli_or_http[first\nsecond] PASSED [  8%]
+tests/test_p4_token_bootstrap.py::test_invalid_synthetic_token_stops_before_cli_or_http[{"token":"secret"}] PASSED [  9%]
+tests/test_p4_token_bootstrap.py::test_invalid_synthetic_token_stops_before_cli_or_http[KEY=VALUE] PASSED [ 11%]
+tests/test_p4_token_bootstrap.py::test_invalid_synthetic_token_stops_before_cli_or_http[abc\x00def] PASSED [ 12%]
+tests/test_p4_token_bootstrap.py::test_isolated_wrapper_never_prints_unknown_exit_or_interrupt[noninteger_exit] PASSED [ 14%]
+tests/test_p4_token_bootstrap.py::test_isolated_wrapper_never_prints_unknown_exit_or_interrupt[interrupt] PASSED [ 16%]
+tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[good] PASSED [ 17%]
+tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[revision] PASSED [ 19%]
+tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[repo] PASSED [ 20%]
+tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[endpoint] PASSED [ 22%]
+tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[trusted_hosts] PASSED [ 24%]
+tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[root] PASSED [ 25%]
+tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[bad_type] PASSED [ 27%]
+tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[bad_json] PASSED [ 29%]
+tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[oversized] PASSED [ 30%]
+tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[config_link] PASSED [ 32%]
+tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[output_link] PASSED [ 33%]
+tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[existing_output] PASSED [ 35%]
+tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[outside_output] PASSED [ 37%]
+tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[outside_config] PASSED [ 38%]
+tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[directory_config] PASSED [ 40%]
+tests/test_p4_token_bootstrap.py::test_synthetic_origin_token_never_flows_to_trusted_redirect PASSED [ 41%]
+tests/test_r1_bridge.py::test_handshake_reports_protocol_version_and_capabilities PASSED [ 43%]
+tests/test_r1_bridge.py::test_protocol_version_mismatch_is_fatal PASSED  [ 45%]
+tests/test_r1_bridge.py::test_explicit_binary_path_is_required_without_fallback PASSED [ 46%]
+tests/test_r1_bridge.py::test_oversized_line_rejected_and_worker_survives PASSED [ 48%]
+tests/test_r1_bridge.py::test_non_utf8_line_rejected_and_worker_survives PASSED [ 50%]
+tests/test_r1_bridge.py::test_unknown_fields_are_rejected PASSED         [ 51%]
+tests/test_r1_bridge.py::test_duplicate_request_ids_rejected PASSED      [ 53%]
+tests/test_r1_bridge.py::test_attempt_limit_exhaustion_refuses_next_reserve PASSED [ 54%]
+tests/test_r1_bridge.py::test_cancel_kills_and_waits PASSED              [ 56%]
+tests/test_r1_bridge.py::test_cancel_is_immediate_kill_and_wait PASSED   [ 58%]
+tests/test_r1_bridge.py::test_stderr_tail_is_bounded PASSED              [ 59%]
+tests/test_r1_bridge.py::test_stderr_drain_thread_keeps_last_64kib_on_real_pipe PASSED [ 61%]
+tests/test_r1_bridge.py::test_bridge_timeout_on_hung_worker_retains_lease PASSED [ 62%]
+tests/test_r1_bridge.py::test_gated_fetch_success_settles PASSED         [ 64%]
+tests/test_r1_bridge.py::test_gated_fetch_mid_range_settles PASSED       [ 66%]
+tests/test_r1_bridge.py::test_gated_fetch_clean_rejection_settles PASSED [ 67%]
+tests/test_r1_bridge.py::test_gated_crash_leaves_lease_pending PASSED    [ 69%]
+tests/test_r1_bridge.py::test_restart_sees_durable_pending PASSED        [ 70%]
+tests/test_r1_bridge.py::test_python_crash_keeps_durable_lease_pending PASSED [ 72%]
+tests/test_r1_bridge.py::test_double_settle_rejected PASSED              [ 74%]
+tests/test_r1_bridge.py::test_gated_fetch_without_ledger_refuses PASSED  [ 75%]
+tests/test_r1_bridge.py::test_scan_tar_agrees_with_raw_bytes PASSED      [ 77%]
+tests/test_r1_bridge.py::test_scan_tar_rejections PASSED                 [ 79%]
+tests/test_r1_bridge.py::test_scan_http_tar_matches_file_scan_field_for_field PASSED [ 80%]
+tests/test_r1_stdout_backpressure.py::test_slow_consumer_bounded_queue_preserves_order PASSED [ 82%]
+tests/test_r1_stdout_backpressure.py::test_shutdown_while_producer_blocked_on_full_queue[cancel] PASSED [ 83%]
+tests/test_r1_stdout_backpressure.py::test_shutdown_while_producer_blocked_on_full_queue[close] PASSED [ 85%]
+tests/test_r1_stdout_backpressure.py::test_cancel_unblocks_waiting_consumer PASSED [ 87%]
+tests/test_r1_stdout_backpressure.py::test_shutdown_releases_blocked_stdin_writer[close] PASSED [ 88%]
+tests/test_r1_stdout_backpressure.py::test_shutdown_releases_blocked_stdin_writer[cancel] PASSED [ 90%]
+tests/test_r1_stdout_backpressure.py::test_eof_race_delivers_final_queued_line PASSED [ 91%]
+tests/test_r1_stdout_backpressure.py::test_eof_reports_exit_without_waiting_for_long_timeout PASSED [ 93%]
+tests/test_r1_stdout_backpressure.py::test_oversized_stdout_line_is_bounded_and_cancel_reaps PASSED [ 95%]
+tests/test_r1_stdout_backpressure.py::test_failed_constructor_kills_waits_closes_pipes PASSED [ 96%]
+tests/test_r1_worker_attempts.py::test_worker_does_not_retry_503[fetch_range] PASSED [ 98%]
+tests/test_r1_worker_attempts.py::test_worker_does_not_retry_503[scan_http_tar] PASSED [100%]
+
+=================================== PASSES ====================================
+============================ slowest 10 durations =============================
+16.28s call     tests/test_r1_bridge.py::test_restart_sees_durable_pending
+13.99s call     tests/test_r1_bridge.py::test_python_crash_keeps_durable_lease_pending
+11.61s call     tests/test_r1_bridge.py::test_attempt_limit_exhaustion_refuses_next_reserve
+10.37s call     tests/test_p4_token_bootstrap.py::test_isolated_runpy_executes_real_offline_cli_with_synthetic_token
+6.69s call     tests/test_r1_bridge.py::test_gated_fetch_clean_rejection_settles
+6.66s call     tests/test_r1_bridge.py::test_gated_fetch_mid_range_settles
+6.51s call     tests/test_r1_bridge.py::test_gated_fetch_success_settles
+6.46s call     tests/test_r1_bridge.py::test_bridge_timeout_on_hung_worker_retains_lease
+4.78s setup    tests/test_p4_token_bootstrap.py::test_invalid_synthetic_token_stops_before_cli_or_http[KEY=VALUE]
+4.66s setup    tests/test_p4_token_bootstrap.py::test_invalid_synthetic_token_stops_before_cli_or_http[{"token":"secret"}]
+=========================== short test summary info ===========================
+PASSED tests/test_p4_token_bootstrap.py::test_isolated_runpy_executes_real_offline_cli_with_synthetic_token
+PASSED tests/test_p4_token_bootstrap.py::test_invalid_synthetic_token_stops_before_cli_or_http[]
+PASSED tests/test_p4_token_bootstrap.py::test_invalid_synthetic_token_stops_before_cli_or_http[name: secret]
+PASSED tests/test_p4_token_bootstrap.py::test_invalid_synthetic_token_stops_before_cli_or_http[token with space]
+PASSED tests/test_p4_token_bootstrap.py::test_invalid_synthetic_token_stops_before_cli_or_http[first\nsecond]
+PASSED tests/test_p4_token_bootstrap.py::test_invalid_synthetic_token_stops_before_cli_or_http[{"token":"secret"}]
+PASSED tests/test_p4_token_bootstrap.py::test_invalid_synthetic_token_stops_before_cli_or_http[KEY=VALUE]
+PASSED tests/test_p4_token_bootstrap.py::test_invalid_synthetic_token_stops_before_cli_or_http[abc\x00def]
+PASSED tests/test_p4_token_bootstrap.py::test_isolated_wrapper_never_prints_unknown_exit_or_interrupt[noninteger_exit]
+PASSED tests/test_p4_token_bootstrap.py::test_isolated_wrapper_never_prints_unknown_exit_or_interrupt[interrupt]
+PASSED tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[good]
+PASSED tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[revision]
+PASSED tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[repo]
+PASSED tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[endpoint]
+PASSED tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[trusted_hosts]
+PASSED tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[root]
+PASSED tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[bad_type]
+PASSED tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[bad_json]
+PASSED tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[oversized]
+PASSED tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[config_link]
+PASSED tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[output_link]
+PASSED tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[existing_output]
+PASSED tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[outside_output]
+PASSED tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[outside_config]
+PASSED tests/test_p4_token_bootstrap.py::test_production_main_guards_profile_before_loading_token[directory_config]
+PASSED tests/test_p4_token_bootstrap.py::test_synthetic_origin_token_never_flows_to_trusted_redirect
+PASSED tests/test_r1_bridge.py::test_handshake_reports_protocol_version_and_capabilities
+PASSED tests/test_r1_bridge.py::test_protocol_version_mismatch_is_fatal
+PASSED tests/test_r1_bridge.py::test_explicit_binary_path_is_required_without_fallback
+PASSED tests/test_r1_bridge.py::test_oversized_line_rejected_and_worker_survives
+PASSED tests/test_r1_bridge.py::test_non_utf8_line_rejected_and_worker_survives
+PASSED tests/test_r1_bridge.py::test_unknown_fields_are_rejected
+PASSED tests/test_r1_bridge.py::test_duplicate_request_ids_rejected
+PASSED tests/test_r1_bridge.py::test_attempt_limit_exhaustion_refuses_next_reserve
+PASSED tests/test_r1_bridge.py::test_cancel_kills_and_waits
+PASSED tests/test_r1_bridge.py::test_cancel_is_immediate_kill_and_wait
+PASSED tests/test_r1_bridge.py::test_stderr_tail_is_bounded
+PASSED tests/test_r1_bridge.py::test_stderr_drain_thread_keeps_last_64kib_on_real_pipe
+PASSED tests/test_r1_bridge.py::test_bridge_timeout_on_hung_worker_retains_lease
+PASSED tests/test_r1_bridge.py::test_gated_fetch_success_settles
+PASSED tests/test_r1_bridge.py::test_gated_fetch_mid_range_settles
+PASSED tests/test_r1_bridge.py::test_gated_fetch_clean_rejection_settles
+PASSED tests/test_r1_bridge.py::test_gated_crash_leaves_lease_pending
+PASSED tests/test_r1_bridge.py::test_restart_sees_durable_pending
+PASSED tests/test_r1_bridge.py::test_python_crash_keeps_durable_lease_pending
+PASSED tests/test_r1_bridge.py::test_double_settle_rejected
+PASSED tests/test_r1_bridge.py::test_gated_fetch_without_ledger_refuses
+PASSED tests/test_r1_bridge.py::test_scan_tar_agrees_with_raw_bytes
+PASSED tests/test_r1_bridge.py::test_scan_tar_rejections
+PASSED tests/test_r1_bridge.py::test_scan_http_tar_matches_file_scan_field_for_field
+PASSED tests/test_r1_stdout_backpressure.py::test_slow_consumer_bounded_queue_preserves_order
+PASSED tests/test_r1_stdout_backpressure.py::test_shutdown_while_producer_blocked_on_full_queue[cancel]
+PASSED tests/test_r1_stdout_backpressure.py::test_shutdown_while_producer_blocked_on_full_queue[close]
+PASSED tests/test_r1_stdout_backpressure.py::test_cancel_unblocks_waiting_consumer
+PASSED tests/test_r1_stdout_backpressure.py::test_shutdown_releases_blocked_stdin_writer[close]
+PASSED tests/test_r1_stdout_backpressure.py::test_shutdown_releases_blocked_stdin_writer[cancel]
+PASSED tests/test_r1_stdout_backpressure.py::test_eof_race_delivers_final_queued_line
+PASSED tests/test_r1_stdout_backpressure.py::test_eof_reports_exit_without_waiting_for_long_timeout
+PASSED tests/test_r1_stdout_backpressure.py::test_oversized_stdout_line_is_bounded_and_cancel_reaps
+PASSED tests/test_r1_stdout_backpressure.py::test_failed_constructor_kills_waits_closes_pipes
+PASSED tests/test_r1_worker_attempts.py::test_worker_does_not_retry_503[fetch_range]
+PASSED tests/test_r1_worker_attempts.py::test_worker_does_not_retry_503[scan_http_tar]
+======================= 62 passed in 177.19s (0:02:57) ========================
+
+EXIT_CODE=0
+END 2026-09-30T12:29:01+08:00

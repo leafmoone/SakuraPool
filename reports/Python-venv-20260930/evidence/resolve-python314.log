@@ -1,0 +1,17 @@
+START 2026-09-30T12:17:26+08:00
+PWD /d/SakuraTool/SakuraPool
+HEAD 66579d7f9e50575cefd17c6e56da87533af4bf5f
+HEAD_TREE 79474ee7d251a54c07d4f0bba53b7b032a6f0420
+CMD uv pip compile reports/Python-venv-20260930/evidence/pins.in --python-version 3.14 --python-platform x86_64-pc-windows-msvc --only-binary :all: 
+CARGO_TARGET_DIR=
+SAKURAPOOL_RUST_WORKER=
+PYTHONPATH=<unset>
+  × No solution found when resolving dependencies:
+  ╰─▶ Because pyarrow==18.1.0 has no usable wheels and you require
+      pyarrow==18.1.0, we can conclude that your requirements are
+      unsatisfiable.
+
+hint: Wheels are required for `pyarrow` because building from source is disabled for all packages (i.e., with `--no-build`)
+
+EXIT_CODE=1
+END 2026-09-30T12:17:28+08:00

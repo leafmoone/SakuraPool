@@ -1,0 +1,31 @@
+START 2026-09-30T12:32:40+08:00
+PWD /d/SakuraTool/SakuraPool
+HEAD 66579d7f9e50575cefd17c6e56da87533af4bf5f
+HEAD_TREE 79474ee7d251a54c07d4f0bba53b7b032a6f0420
+CMD D:/SakuraTool/SakuraPool-Fix3-20260930a/python-env/Scripts/python.exe reports/Python-venv-20260930/evidence/prune_venvs.py p4 
+CARGO_TARGET_DIR=
+SAKURAPOOL_RUST_WORKER=
+PYTHONPATH=<unset>
+No broken requirements found.
+PRE_DELETE_PROCESSES []
+PRE_DELETE_BATCH {"timestamp": "2026-09-30T12:32:45.350938+08:00", "batch": "p4", "keeper": "D:\\SakuraTool\\SakuraPool-Fix3-20260930a\\python-env", "audits": [{"path": "D:\\SakuraTool\\SakuraPool-P4-work\\.venv312", "root_junction_or_reparse": false, "descendant_junction_or_reparse": false, "cfg": "home = C:\\Users\\PC\\AppData\\Roaming\\uv\\python\\cpython-3.12-windows-x86_64-none\nimplementation = CPython\nuv = 0.12.5\nversion_info = 3.12\ninclude-system-site-packages = false\n", "logical_bytes": 175153735, "allocated_file_bytes": 175153735, "files": 2549}, {"path": "D:\\SakuraTool\\SakuraPool-P4-work\\p4-cert-56f40c4\\venv310", "root_junction_or_reparse": false, "descendant_junction_or_reparse": false, "cfg": "home = C:\\Users\\PC\\AppData\\Roaming\\uv\\python\\cpython-3.10-windows-x86_64-none\nimplementation = CPython\nuv = 0.12.5\nversion_info = 3.10\ninclude-system-site-packages = false\n", "logical_bytes": 171824437, "allocated_file_bytes": 171824437, "files": 2494}, {"path": "D:\\SakuraTool\\SakuraPool-P4-work\\p4-cert-56f40c4\\venv312", "root_junction_or_reparse": false, "descendant_junction_or_reparse": false, "cfg": "home = C:\\Users\\PC\\AppData\\Roaming\\uv\\python\\cpython-3.12-windows-x86_64-none\nimplementation = CPython\nuv = 0.12.5\nversion_info = 3.12\ninclude-system-site-packages = false\n", "logical_bytes": 170767266, "allocated_file_bytes": 170767266, "files": 2337}, {"path": "D:\\SakuraTool\\SakuraPool-P4-work\\p4-cert-56f40c4\\venv313", "root_junction_or_reparse": false, "descendant_junction_or_reparse": false, "cfg": "home = C:\\Users\\PC\\AppData\\Roaming\\uv\\python\\cpython-3.13-windows-x86_64-none\nimplementation = CPython\nuv = 0.12.5\nversion_info = 3.13\ninclude-system-site-packages = false\n", "logical_bytes": 170725286, "allocated_file_bytes": 170725286, "files": 2335}, {"path": "D:\\SakuraTool\\SakuraPool-P4-work\\p4-cert-7f8afbc\\venv312", "root_junction_or_reparse": false, "descendant_junction_or_reparse": false, "cfg": "home = C:\\Users\\PC\\AppData\\Roaming\\uv\\python\\cpython-3.12-windows-x86_64-none\nimplementation = CPython\nuv = 0.12.5\nversion_info = 3.12\ninclude-system-site-packages = false\n", "logical_bytes": 132091, "allocated_file_bytes": 132091, "files": 19}, {"path": "D:\\SakuraTool\\SakuraPool-P4-work\\r1-final-py312", "root_junction_or_reparse": false, "descendant_junction_or_reparse": false, "cfg": "home = C:\\Users\\PC\\AppData\\Roaming\\uv\\python\\cpython-3.12-windows-x86_64-none\nimplementation = CPython\nuv = 0.12.5\nversion_info = 3.12\ninclude-system-site-packages = false\n", "logical_bytes": 175413909, "allocated_file_bytes": 175413909, "files": 2596}, {"path": "D:\\SakuraTool\\SakuraPool-P4-work\\r1-final-wheel", "root_junction_or_reparse": false, "descendant_junction_or_reparse": false, "cfg": "home = C:\\Users\\PC\\AppData\\Roaming\\uv\\python\\cpython-3.12-windows-x86_64-none\nimplementation = CPython\nuv = 0.12.5\nversion_info = 3.12\ninclude-system-site-packages = false\n", "logical_bytes": 140940343, "allocated_file_bytes": 140940343, "files": 2359}, {"path": "D:\\SakuraTool\\SakuraPool-P4-work\\r1-fresh-venv", "root_junction_or_reparse": false, "descendant_junction_or_reparse": false, "cfg": "home = C:\\Users\\PC\\AppData\\Roaming\\uv\\python\\cpython-3.12-windows-x86_64-none\ninclude-system-site-packages = false\nversion = 3.12.13\nexecutable = C:\\Users\\PC\\AppData\\Roaming\\uv\\python\\cpython-3.12.13-windows-x86_64-none\\python.exe\ncommand = C:\\Users\\PC\\AppData\\Roaming\\uv\\python\\cpython-3.12-windows-x86_64-none\\python.exe -m venv D:\\SakuraTool\\SakuraPool-P4-work\\r1-fresh-venv\n", "logical_bytes": 163642187, "allocated_file_bytes": 163642187, "files": 4111}], "estimate": {"logical_bytes": 1168599254, "counted_allocated_file_bytes": 1168599254, "expected_releasable_file_extents_bytes": 658261360, "note": "NTFS extents estimate; excludes directory metadata/concurrent changes"}, "volume_free_bytes": 473292427264, "p4_budget_counted_bytes": 3102593024, "offline_twohop_count": 329}
+PRE_DELETE_PROCESSES []
+DELETED_CONFIRMED_VENV "D:\\SakuraTool\\SakuraPool-P4-work\\.venv312"
+PRE_DELETE_PROCESSES []
+DELETED_CONFIRMED_VENV "D:\\SakuraTool\\SakuraPool-P4-work\\p4-cert-56f40c4\\venv310"
+PRE_DELETE_PROCESSES []
+DELETED_CONFIRMED_VENV "D:\\SakuraTool\\SakuraPool-P4-work\\p4-cert-56f40c4\\venv312"
+PRE_DELETE_PROCESSES []
+DELETED_CONFIRMED_VENV "D:\\SakuraTool\\SakuraPool-P4-work\\p4-cert-56f40c4\\venv313"
+PRE_DELETE_PROCESSES []
+DELETED_CONFIRMED_VENV "D:\\SakuraTool\\SakuraPool-P4-work\\p4-cert-7f8afbc\\venv312"
+PRE_DELETE_PROCESSES []
+DELETED_CONFIRMED_VENV "D:\\SakuraTool\\SakuraPool-P4-work\\r1-final-py312"
+PRE_DELETE_PROCESSES []
+DELETED_CONFIRMED_VENV "D:\\SakuraTool\\SakuraPool-P4-work\\r1-final-wheel"
+PRE_DELETE_PROCESSES []
+DELETED_CONFIRMED_VENV "D:\\SakuraTool\\SakuraPool-P4-work\\r1-fresh-venv"
+POST_DELETE_BATCH {"batch": "p4", "deleted_paths": ["D:\\SakuraTool\\SakuraPool-P4-work\\.venv312", "D:\\SakuraTool\\SakuraPool-P4-work\\p4-cert-56f40c4\\venv310", "D:\\SakuraTool\\SakuraPool-P4-work\\p4-cert-56f40c4\\venv312", "D:\\SakuraTool\\SakuraPool-P4-work\\p4-cert-56f40c4\\venv313", "D:\\SakuraTool\\SakuraPool-P4-work\\p4-cert-7f8afbc\\venv312", "D:\\SakuraTool\\SakuraPool-P4-work\\r1-final-py312", "D:\\SakuraTool\\SakuraPool-P4-work\\r1-final-wheel", "D:\\SakuraTool\\SakuraPool-P4-work\\r1-fresh-venv"], "volume_free_bytes": 473974026240, "volume_free_delta_bytes": 681598976, "p4_budget_counted_bytes": 1888645120, "offline_twohop_count": 329, "offline_twohop_names_unchanged": true}
+
+EXIT_CODE=0
+END 2026-09-30T12:32:52+08:00

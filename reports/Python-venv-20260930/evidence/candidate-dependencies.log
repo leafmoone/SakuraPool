@@ -1,0 +1,16 @@
+START 2026-09-30T12:25:27+08:00
+PWD /d/SakuraTool/SakuraPool
+HEAD 66579d7f9e50575cefd17c6e56da87533af4bf5f
+HEAD_TREE 79474ee7d251a54c07d4f0bba53b7b032a6f0420
+CMD D:/SakuraTool/SakuraPool-Fix3-20260930a/python-env/Scripts/python.exe -I -c import\ sys\,importlib.metadata\ as\ m\;\ import\ pyarrow\,numpy\,pyroaring\,pytest\,requests\,modelscope_hub\;\ from\ sakurapool.storage.rust_bridge\ import\ RustWorkerClient\;\ print\(sys.version\)\;\ print\(sys.executable\)\;\ print\(\"PREFIX\"\,sys.prefix\,\"BASE\"\,sys.base_prefix\)\;\ print\(\"DIRECT\"\,m.distribution\(\"sakurapool\"\).read_text\(\"direct_url.json\"\)\)\;\ print\(\{n:m.version\(n\)\ for\ n\ in\ \[\"sakurapool\"\,\"pyarrow\"\,\"numpy\"\,\"pyroaring\"\,\"pytest\"\,\"ruff\"\,\"build\"\,\"requests\"\,\"modelscope-hub\"\,\"pip\"\,\"setuptools\"\]\}\)\;\ print\(\"IMPORT_BRIDGE_OK\"\) 
+CARGO_TARGET_DIR=D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target
+SAKURAPOOL_RUST_WORKER=D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target/release/sakurapool-worker.exe
+PYTHONPATH=<unset>
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    import sys,importlib.metadata as m; import pyarrow,numpy,pyroaring,pytest,requests,modelscope_hub; from sakurapool.storage.rust_bridge import RustWorkerClient; print(sys.version); print(sys.executable); print("PREFIX",sys.prefix,"BASE",sys.base_prefix); print("DIRECT",m.distribution("sakurapool").read_text("direct_url.json")); print({n:m.version(n) for n in ["sakurapool","pyarrow","numpy","pyroaring","pytest","ruff","build","requests","modelscope-hub","pip","setuptools"]}); print("IMPORT_BRIDGE_OK")
+                                                                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ImportError: cannot import name 'RustWorkerClient' from 'sakurapool.storage.rust_bridge' (D:\SakuraTool\SakuraPool\src\sakurapool\storage\rust_bridge.py)
+
+EXIT_CODE=1
+END 2026-09-30T12:25:32+08:00

@@ -1,0 +1,23 @@
+START 2026-09-30T12:59:58+08:00
+PWD /d/SakuraTool/SakuraPool
+HEAD 278b59831aba82da19bb533763e86b68ac6c2a55
+HEAD_TREE 06dd1bba427d40849f3af4cab1a06c3fad6162e9
+CMD uv pip install --python D:/SakuraTool/SakuraPool-Fix3-20260930a/python-env/Scripts/python.exe --reinstall-package sakurapool -e .\[dev\,remote\] 
+CARGO_TARGET_DIR=D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target
+SAKURAPOOL_RUST_WORKER=D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target/release/sakurapool-worker.exe
+PYTHONPATH=<unset>
+Using Python 3.13.15 environment at: D:\SakuraTool\SakuraPool-Fix3-20260930a\python-env
+Resolved 23 packages in 15ms
+   Building sakurapool @ file:///D:/SakuraTool/SakuraPool
+      Built sakurapool @ file:///D:/SakuraTool/SakuraPool
+Prepared 1 package in 1.17s
+Uninstalled 1 package in 5ms
+warning: Failed to hardlink files; falling back to full copy. This may lead to degraded performance.
+         If the cache and target directories are on different filesystems, hardlinking may not be supported.
+         If this is intentional, set `export UV_LINK_MODE=copy` or use `--link-mode=copy` to suppress this warning.
+Installed 1 package in 89ms
+ - sakurapool==0.1.0 (from file:///D:/SakuraTool/SakuraPool-Fix3-20260930a/python-wheel/sakurapool-0.1.0-py3-none-any.whl)
+ + sakurapool==0.1.0 (from file:///D:/SakuraTool/SakuraPool)
+
+EXIT_CODE=0
+END 2026-09-30T13:00:00+08:00
