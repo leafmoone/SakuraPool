@@ -87,7 +87,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="sakurapool-p2-clean-") as directory:
         clean = Path(directory)
         venv = clean / "venv"
-        code = run("venv", ["uv", "venv", "--python", "3.12", str(venv)])
+        code = run("venv", ["uv", "venv", "--python", sys.executable, str(venv)])
         python = venv / "Scripts" / "python.exe" if os.name == "nt" else venv / "bin" / "python"
         wheel = wheel_dir / "sakurapool-0.1.0-py3-none-any.whl"
         if code == 0:

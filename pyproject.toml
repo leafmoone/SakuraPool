@@ -7,7 +7,7 @@ name = "sakurapool"
 version = "0.1.0"
 description = "Small-data reference query and model contracts for SakuraPool"
 readme = "README.md"
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.10"
 dependencies = ["pyarrow==18.1.0", "numpy==2.2.6", "pyroaring==1.1.0"]
 
 [project.optional-dependencies]

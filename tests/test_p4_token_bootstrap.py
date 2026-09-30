@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,7 @@ from test_p4_transport import Handler
 from test_p4_transport import http_and_budget as _synthetic_http
 
 BRIDGE = Path(__file__).resolve().parents[1] / "tools" / "p4_token_bootstrap.py"
-PYTHON = Path("D:/SakuraTool/SakuraPool-P4-work/.venv312/Scripts/python.exe")
+PYTHON = Path(sys.executable)
 REPO = Path(__file__).resolve().parents[1]
 
 

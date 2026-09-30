@@ -97,6 +97,12 @@ P4 开始时按另行下发的执行单取得实际文件清单、对象版本�
 - **R1 边界**：R1 交付物只允许离线验证（合成 fixture、loopback）；禁止任何 ModelScope/真实仓库请求、完整真实 TAR 扫描、远端数据上传、R2/P5 工作；`main` 分支不受 R1 影响。合成结果不冒称生产性能或生产可用性。
 - Rust 工具链安装于系统/用户标准位置（`C:\Users\PC\.cargo` / `C:\Users\PC\.rustup`，MSVC 目标不可用时采用官方 windows-gnu + MSYS2 ucrt64 链接器）；构建产物固定放仓库外 `CARGO_TARGET_DIR=D:\SakuraTool\SakuraPool-P4-work\rust-target`，仓库内不得出现 `rust/target`。本轮 Final Fix3 经 root 明确批准的构建环境例外：新 target 为 `D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target`，新 venv 同在该新根；通过显式 `CARGO_TARGET_DIR` / `SAKURAPOOL_RUST_WORKER` 绑定。旧 target 与 P4 work root 均保留、不移动、不清理；工具依赖/target/venv 与应用数据工作集分开计量。数据工作根、4 GiB 数据预算及累计账本契约不变。
 
+## Python 环境选择与本轮 venv 整理（2026-09-30）
+
+- 当前元数据仅保留代码/依赖所需下限 Python 3.10，不设人为上限，不强制 3.12。选择最新实际通过 pinned 依赖安装和验证的稳定解释器；没有兼容 wheel 或未通过测试不能仅因版本号最高而称兼容，不盲升级钉版依赖。
+- 当前唯一环境候选为 `D:/SakuraTool/SakuraPool-Fix3-20260930a/python-env`；仅在独立验证通过后登记为保留环境。现行子进程用调用者的 `sys.executable`，不引用历史 `.venv312`。历史 Fix3 证据的解释器路径保持原样，仅表示当次认证。
+- 用户最新授权仅允许删除经 `pyvenv.cfg`、目录归属、reparse/junction、活动进程与释放量盘点确认的本项目冗余 venv；保留环境可用前不得删最后可用环境。此例外不允许删 target、数据、ledger、证据、未知目录、其他项目环境或全局 Python/Rust，也不允许清理历史 offline-twohop、修改数据根/上限或重置累计账本。
+
 ## 11. 索引构建调度规则（2026-09-30 起）
 
 - **管理员独立调度**：索引构建调度只存在于管理员链路，作为独立任务单元运行（自己的授权、预算与租约）；不依赖、不阻塞、不借用用户查询链路的资源或会话。用户链路只消费已发布索引，不触发任何扫描。

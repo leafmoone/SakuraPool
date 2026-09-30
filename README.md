@@ -24,11 +24,18 @@ object-version binding, component boundaries and dev/main review requirements.
 
 ## Installation and CLI
 
-The declared supported runtime is Python 3.10–3.13 with pinned PyArrow 18.1.0.
-Python 3.14 is explicitly excluded: Arrow 18.1.0 has no matching wheel. The host's
-Python 3.14 / Arrow 25 test run is diagnostic only, not certification of these pins.
-Use a compatible Python and normal dependency resolution; never transplant Arrow
-into a venv or use `--no-deps` to claim an installation passed.
+Python 3.10 or newer is required by the code and dependency minimums; there is no
+project-imposed upper version bound or mandatory Python 3.12 certification policy.
+Use the newest stable interpreter that actually installs and passes verification
+with the pinned dependencies, not simply the highest version number. On Windows
+x86-64, the current PyArrow 18.1.0 / NumPy 2.2.6 pins provide CPython 3.13 wheels
+but not 3.14 wheels. Removing the metadata upper bound does not certify 3.14 or
+permit silently upgrading those pins, transplanting Arrow, or using `--no-deps`.
+
+The current single-project-environment selection and independent certification
+are recorded in `reports/Python-venv-20260930/`; historical Fix3 Python 3.12 logs
+remain unchanged and do not certify this later contract. Verification subprocesses
+use the invoking interpreter (`sys.executable`) rather than a retired venv path.
 
 ```console
 python -m pip install -e '.[dev]'

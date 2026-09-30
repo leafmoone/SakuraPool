@@ -3,7 +3,8 @@
 Never print credential bytes or arbitrary exception messages. This entry point
 performs no network itself. Real invocation requires separate batch approval;
 unit tests pass a synthetic token path to _run_cli, not the fixed secret file.
-Windows pinned Python 3.12 crashes on os.execve: use runpy in this child only.
+A historical Windows os.execve crash requires this in-process runpy bridge;
+invoke it with the currently verified interpreter, not a fixed Python version.
 """
 
 from __future__ import annotations
