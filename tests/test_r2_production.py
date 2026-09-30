@@ -232,7 +232,11 @@ def test_rust_auth_stripping_conditional_proof_and_real_bytes(twohop):
     assert ledger.condition_proof(proof_key(verified, test=True))
     assert len(state["calls"]) == 6
     for hop, headers in state["calls"]:
-        assert {k.lower(): v for k, v in headers.items()}["range"] == "bytes=0-0"
+        public_headers = {k.lower(): v for k, v in headers.items()}
+        assert public_headers["range"] == "bytes=0-0"
+        assert public_headers["user-agent"] == "SakuraMoon/1"
+        assert public_headers["accept"] == "application/json, application/octet-stream"
+        assert public_headers["accept-encoding"] == "identity"
         if hop == "cdn":
             assert not any(k.lower() in ("authorization", "cookie", "referer") for k in headers)
         else:

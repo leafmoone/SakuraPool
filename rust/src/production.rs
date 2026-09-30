@@ -222,7 +222,16 @@ fn origin(t: &Transfer) -> Result<Url, &'static str> {
     Ok(u)
 }
 fn client() -> Result<Client, &'static str> {
+    // SakuraMoon _headers applies these public headers to origin AND redirected CDN.
+    // Static compatibility only; credentials still attach exclusively to origin.
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        reqwest::header::ACCEPT,
+        HeaderValue::from_static("application/json, application/octet-stream"),
+    );
     Client::builder()
+        .user_agent("SakuraMoon/1")
+        .default_headers(headers)
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
