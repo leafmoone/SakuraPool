@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import stat
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
@@ -24,7 +26,7 @@ from .. import indexer
 from ..runtime.compiler import HAS_METADATA
 from ..runtime.inventory import load_p2_inventory
 from ..runtime.snapshot import RuntimeSnapshot
-from .budget import DEFAULT_WORK_ROOT, BudgetExceeded, BudgetLedger, Reservation
+from .budget import DEFAULT_WORK_ROOT, BudgetExceeded, BudgetLedger, Reservation, is_reparse
 from .location_gate import RepositoryConfigError, parse_repository
 from .retrieval import AuditedSample, Extent, fetch_bound_sample
 from .transport import BoundObject, GuardedTransport, condition_binding_key
@@ -485,18 +487,25 @@ def load_package(root: Path, *, allow_offline_loopback: bool = False) -> Package
 
 
 def publish_local_package(root: Path, ledger: BudgetLedger, *, endpoint: str,
-                          data_revision: str, bindings: list[Binding]) -> Path:
+                          data_revision: str, bindings: list[Binding],
+                          production_transport=None) -> Path:
     """Publish one local-only canary manifest after existing v4/P3/audit verify.
 
     Caller owns proof that each binding's conditional capability was tested
     once against the corresponding remote object. This function is strictly
     offline; it does not resolve or fetch a target repo. No publication.
     """
-    if not isinstance(ledger, BudgetLedger) or not ledger.offline_mode:
-        raise BudgetExceeded(
-            "P4 package production build BLOCKED: 4 GiB working-set budget unproven")
+    from .modelscope import ModelScopeDataset
+    from .production import RustProductionTransport
+
+    if (not isinstance(ledger, BudgetLedger) or (not ledger.offline_mode and not (
+            isinstance(production_transport, RustProductionTransport)
+            and production_transport.production_profile
+            and production_transport.ledger is ledger))):
+        raise BudgetExceeded("production package BLOCKED: Rust profile and budget required")
     root = Path(root).absolute()
-    if not root.is_relative_to(ledger.root) or not root.is_dir():
+    if (".." in root.parts or not root.is_relative_to(ledger.root) or not root.is_dir()
+            or any(p.is_symlink() or is_reparse(p) for p in (root, *root.parents))):
         raise ValueError("offline package output must exist under test work root")
     if (root / "index-package.json").exists():
         raise FileExistsError("index-package.json already exists")
@@ -520,6 +529,11 @@ def publish_local_package(root: Path, ledger: BudgetLedger, *, endpoint: str,
         key = condition_binding_key(endpoint=endpoint, repository=_REPO,
                                     revision=data_revision, path=binding.path,
                                     size=binding.size, strong_etag=binding.strong_etag)
+        if production_transport is not None:
+            provider = ModelScopeDataset(production_transport, endpoint, _REPO)
+            bound = BoundObject(provider.download_url(data_revision, binding.path), binding.size,
+                                data_revision, binding.strong_etag, repository=_REPO)
+            key = production_transport.condition_key(bound)
         if (not binding.conditional_verified
                 or ledger.condition_proof(key) != binding.condition_probe_sha256):
             raise PackageCorrupt("missing app-owned exact conditional proof")
@@ -600,6 +614,69 @@ def publish_local_package(root: Path, ledger: BudgetLedger, *, endpoint: str,
     return root / "index-package.json"
 
 
+@contextmanager
+def admitted_package(root: Path, ledger: BudgetLedger):
+    """Conservative small-package production admission, retained across fetch.
+
+    Walk lstat-only before parsing; bound package bytes plus JSON/Parquet expansion.
+    This does not change the frozen package schema or certify arbitrary large indexes.
+    """
+    root = Path(root).absolute()
+    if (".." in root.parts or not root.is_relative_to(ledger.root) or not root.is_dir()
+            or any(is_reparse(p) for p in (root, *root.parents))):
+        raise PackageCorrupt("package budget path invalid")
+    paths, pending, total, visited = [], [root], 0, 0
+    while pending:
+        directory = pending.pop()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                visited += 1
+                path = Path(entry.path)
+                info = path.lstat()
+                if is_reparse(path):
+                    raise PackageCorrupt("package links forbidden")
+                if stat.S_ISDIR(info.st_mode):
+                    pending.append(path)
+                elif stat.S_ISREG(info.st_mode):
+                    paths.append(path)
+                    total += info.st_size
+                else:
+                    raise PackageCorrupt("package special files forbidden")
+                if visited > 4096 or total > (1 << 20):
+                    raise BudgetExceeded("production package BLOCKED: small canary only")
+    memory = (64 << 20) + 128*total
+    lease = ledger.reserve(Reservation(inflight=memory))
+    try:
+        # Compressed fragments must not expand beyond the reserved decoded budget.
+        expanded = 0
+        for path in paths:
+            if path.suffix != ".parquet":
+                continue
+            with path.open("rb") as stream:
+                if path.stat().st_size < 12:
+                    raise PackageCorrupt("short package Parquet")
+                stream.seek(-8, 2)
+                footer = stream.read(8)
+                if footer[4:] != b"PAR1" or int.from_bytes(footer[:4], "little") > (1 << 20):
+                    raise PackageCorrupt("package Parquet footer exceeds bounded size")
+            metadata = pq.ParquetFile(path).metadata
+            if metadata.num_rows > 100_000:
+                raise BudgetExceeded("production package row bound exceeds canary")
+            for row in range(metadata.num_row_groups):
+                group = metadata.row_group(row)
+                for col in range(group.num_columns):
+                    size = group.column(col).total_uncompressed_size
+                    if size < 0:
+                        raise PackageCorrupt("unrecognized package expansion")
+                    expanded += size
+                    if 4*expanded+64*total+(64 << 20) > memory:
+                        raise BudgetExceeded("package decoded working set exceeds admission")
+        package = load_package(root, allow_offline_loopback=ledger.offline_mode)
+        yield package
+    finally:
+        ledger.settle(lease)
+
+
 def fetch_from_package(root: Path, record_id: str, output: Path,
                        transport: GuardedTransport, *, merged: bool = True) -> Path:
     """Fresh-process package + complete runtime verification, never TAR cache.
@@ -615,14 +692,25 @@ def fetch_from_package(root: Path, record_id: str, output: Path,
     already-frozen value so the same sealed identity flows into BoundObject,
     not a repository configuration surface.
     """
-    from .modelscope import ModelScopeDataset
+    from .production import RustProductionTransport
 
     if (not isinstance(transport.ledger, BudgetLedger)
-            or not transport.ledger.offline_mode):
-        raise BudgetExceeded("P4 production fetch BLOCKED: 4 GiB working-set budget unproven")
+            or (not transport.ledger.offline_mode and not (
+                isinstance(transport, RustProductionTransport) and transport.production_profile))):
+        raise BudgetExceeded("production fetch BLOCKED: explicit Rust profile and budget required")
     if not Path(root).absolute().is_relative_to(transport.ledger.root):
         raise PackageCorrupt("package and transport budget roots differ")
+    if isinstance(transport, RustProductionTransport):
+        with admitted_package(root, transport.ledger) as package:
+            return _fetch_loaded_package(package, record_id, output, transport, merged=merged)
     package = load_package(root, allow_offline_loopback=transport.ledger.offline_mode)
+    return _fetch_loaded_package(package, record_id, output, transport, merged=merged)
+
+
+def _fetch_loaded_package(package, record_id, output, transport, *, merged=True):
+    """Internal call while an admitted package's inflight lease is still held."""
+    from .modelscope import ModelScopeDataset
+
     # The package schema is frozen to its producer contract; parse again here
     # before provider/bound-object construction so malformed runtime identity
     # cannot cross this boundary. This is defensive validation, not migration.

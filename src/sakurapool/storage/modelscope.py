@@ -110,7 +110,67 @@ class ModelScopeDataset:
         if not isinstance(decoded, dict) or "Data" not in decoded:
             raise RemoteIOError("unrecognized provider response; cannot claim completeness",
                                 code="provider_shape", phase=phase)
+        if (decoded.get("Code", 200) != 200 or decoded.get("Success") is False):
+            raise RemoteIOError("provider metadata unsuccessful",
+                                code="provider_rejection", phase=phase)
         return decoded["Data"]
+
+    def legacy_hub_id(self) -> int:
+        """Resolve SDK legacy numeric ID only after exact owner/name validation."""
+        info = self._data(self.base, phase="provider_repository_shape")
+        if (not isinstance(info, dict)
+                or info.get("Namespace") != self.repository_id.owner
+                or info.get("Name") != self.repository_id.name
+                or type(info.get("Id")) is not int or not 0 < info["Id"] < 1 << 63
+                or type(info.get("Type")) is not int or info["Type"] != 4):
+            raise RemoteIOError("provider legacy repository identity differs")
+        self._legacy_verified_id = info["Id"]
+        return info["Id"]
+
+    def legacy_tree_page(self, hub_id: int, revision: str, *, root: str,
+                         page: int = 1, page_size: int = 20) -> tuple[list[ListedFile], bool]:
+        """Bounded SDK legacy tree; master only discovers candidates, never proves binding."""
+        if (type(hub_id) is not int or hub_id != getattr(self, "_legacy_verified_id", None)
+                or not 0 < hub_id < 1 << 63
+                or not isinstance(revision, str)
+                or (revision != "master" and not _SHA.fullmatch(revision))
+                or type(page) is not int or not 1 <= page <= MAX_PAGES
+                or type(page_size) is not int or not 1 <= page_size <= PAGE_SIZE
+                or not isinstance(root, str) or (root != "/" and not _is_canonical_path(root))):
+            raise ValueError("legacy tree scope invalid")
+        query = urlencode({"Revision": revision, "Root": root, "Recursive": "True",
+                           "PageNumber": page, "PageSize": page_size})
+        info = self._data(f"{self.endpoint}/api/v1/datasets/{hub_id}/repo/tree?{query}",
+                          phase="provider_tree_shape")
+        files = info.get("Files") if isinstance(info, dict) else None
+        if not isinstance(files, list) or len(files) > page_size:
+            raise RemoteIOError("unrecognized legacy tree page")
+        result = []
+        seen = set()
+        for entry in files:
+            if not isinstance(entry, dict):
+                raise RemoteIOError("malformed legacy tree entry")
+            if entry.get("Type") not in ("blob", "file"):
+                if entry.get("Type") in ("tree", "directory"):
+                    continue
+                raise RemoteIOError("unrecognized legacy tree entry type")
+            path, size, candidate = entry.get("Path"), entry.get("Size"), entry.get("Revision")
+            if (not isinstance(path, str) or not _is_canonical_path(path)
+                    or len(path)>512 or path in seen
+                    or (root != "/" and not path.startswith(root.rstrip("/")+"/"))
+                    or type(size) is not int or not 0 <= size <= 1 << 50
+                    or not isinstance(candidate, str) or not _SHA.fullmatch(candidate)
+                    or (revision != "master" and candidate != revision)):
+                raise RemoteIOError("legacy tree object identity invalid")
+            seen.add(path)
+            sha = entry.get("Sha256")
+            if sha is not None and (not isinstance(sha, str)
+                                    or re.fullmatch(r"[0-9a-f]{64}", sha) is None):
+                raise RemoteIOError("legacy tree digest malformed")
+            result.append(ListedFile(path, size, sha, False, candidate))
+        total = info.get("TotalCount", info.get("Total"))
+        complete = (page == 1 and type(total) is int and total == len(files))
+        return result, complete
 
     def revisions(self) -> list[str]:
         """List commit-id-shaped candidates; syntax does NOT verify immutability."""
@@ -135,16 +195,19 @@ class ModelScopeDataset:
                     result.add(value)
         return sorted(result)
 
-    def list_files(self, revision: str) -> tuple[list[ListedFile], bool]:
+    def list_files(self, revision: str, *, max_pages: int = MAX_PAGES
+                   ) -> tuple[list[ListedFile], bool]:
         """Bounded repo/tree pagination; completeness needs consistent Total."""
         if not isinstance(revision, str) or not _SHA.fullmatch(revision):
             raise ValueError("directory listing requires a commit-ID-shaped revision")
+        if type(max_pages) is not int or not 1 <= max_pages <= MAX_PAGES:
+            raise ValueError("tree page bound invalid")
         found: dict[str, ListedFile] = {}
         seen_paths: set[str] = set()  # trees and blobs across every page
         seen_entries = 0
         declared_total: int | None = None
         total_profile: bool | None = None
-        for page in range(1, MAX_PAGES + 1):
+        for page in range(1, max_pages + 1):
             params = urlencode({"Revision": revision, "Recursive": "True",
                                 "PageNumber": page, "PageSize": PAGE_SIZE})
             data = self._data(self.base + "/repo/tree?" + params,

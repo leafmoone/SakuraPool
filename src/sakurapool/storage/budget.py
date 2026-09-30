@@ -18,6 +18,18 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+
+def is_reparse(path: Path) -> bool:
+    """No-follow link/junction check, including supported Python 3.10/3.11."""
+    try:
+        info = Path(path).lstat()
+    except FileNotFoundError:
+        return False
+    return stat.S_ISLNK(info.st_mode) or bool(
+        getattr(info, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
 DEFAULT_WORK_ROOT = Path("D:/SakuraTool/SakuraPool-P4-work")
 MIB = 1 << 20
 GIB = 1 << 30

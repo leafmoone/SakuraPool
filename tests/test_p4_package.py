@@ -516,11 +516,13 @@ def test_production_fetch_four_entrypoints_block_before_network_or_output(
         lambda: fetch_bounded_samples(client, ledger, bound, [sample], tmp_path),
         lambda: fetch_from_package(tmp_path / "no-package", sample.record_id,
                                    tmp_path, client),
-        lambda: cli_fetch(tmp_path / "no-package", tmp_path / "no-config",
-                          sample.record_id, tmp_path),
     ):
         with pytest.raises(BudgetExceeded, match="BLOCKED"):
             call()
+    # R2 removes the perpetual CLI offline-only gate, but missing package still
+    # refuses before config/token loading or implicit network/indexing.
+    with pytest.raises(ValueError, match="package unavailable"):
+        cli_fetch(tmp_path / "no-package", tmp_path / "no-config", sample.record_id, tmp_path)
     assert list(tmp_path.iterdir()) == []
 
 

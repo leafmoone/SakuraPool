@@ -23,7 +23,7 @@ from posixpath import splitext
 from typing import Any, Mapping
 
 from sakurapool.registry import DatasetAdapter
-from sakurapool.storage.budget import BudgetLedger, Reservation
+from sakurapool.storage.budget import BudgetLedger, Reservation, is_reparse
 from sakurapool.storage.remote_index import (
     MAX_STAGE_PAGES,
     OFFLINE_STAGE_ALLOWANCE,
@@ -40,11 +40,45 @@ class RustScanAuditError(ValueError):
     """The Rust scan report failed audit against the raw bytes."""
 
 
-def _audit_scan(scan: Mapping[str, Any], raw: bytes) -> None:
+class FileArchive:
+    """Bounded file-backed audit source, not a whole-TAR memory buffer."""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        if not self.path.is_file() or self.path.is_symlink() or is_reparse(self.path):
+            raise RustScanAuditError("owned archive file required")
+        self.size = self.path.stat().st_size
+
+    def __len__(self):
+        return self.size
+
+    def __getitem__(self, span):
+        start, end, _ = span.indices(self.size)
+        if end-start > MAX_JSON_PAYLOAD_BYTES:
+            raise RustScanAuditError("audit extent exceeds bounded JSON read")
+        with self.path.open("rb") as f:
+            f.seek(start)
+            data = f.read(end-start)
+            if len(data) != end-start:
+                raise RustScanAuditError("archive truncated during audit")
+            return data
+
+
+def _digest(raw, start, size):
+    digest = hashlib.sha256()
+    while size:
+        n = min(size, 65536)
+        digest.update(raw[start:start+n])
+        start += n
+        size -= n
+    return digest.hexdigest()
+
+
+def _audit_scan(scan: Mapping[str, Any], raw: bytes | FileArchive) -> None:
     """Fail-closed audit of the Rust report against the raw object bytes."""
     if int(scan["size"]) != len(raw):
         raise RustScanAuditError("scan size disagrees with raw object size")
-    if scan["whole_sha256"] != hashlib.sha256(raw).hexdigest():
+    if scan["whole_sha256"] != _digest(raw, 0, len(raw)):
         raise RustScanAuditError("scan whole_sha256 disagrees with raw object")
     seen: set[str] = set()
     for member in scan["members"]:
@@ -61,14 +95,14 @@ def _audit_scan(scan: Mapping[str, Any], raw: bytes) -> None:
         if size <= 0 or start + size > len(raw):
             raise RustScanAuditError(f"member extent out of bounds: {name!r}")
         # Independent per-member hash at the Rust-provided extent.
-        digest = hashlib.sha256(raw[start : start + size]).hexdigest()
+        digest = _digest(raw, start, size)
         if digest != member["sha256"]:
             raise RustScanAuditError(f"member sha256 mismatch: {name!r}")
 
 
 def _member_rows(
     scan: Mapping[str, Any],
-    raw: bytes,
+    raw: bytes | FileArchive,
     adapter: DatasetAdapter,
 ) -> list[tuple[str, str, int, int, str, bytes | None]]:
     rows: list[tuple[str, str, int, int, str, bytes | None]] = []
@@ -81,14 +115,15 @@ def _member_rows(
         is_json = suffix == ".json"
         start = int(member["offset"])
         size = int(member["size"])
-        payload = raw[start : start + size]
-        if not payload:
+        payload = None
+        if size <= 0:
             raise RustScanAuditError(f"empty member payload: {member['path']!r}")
         if is_json:
-            if len(payload) > MAX_JSON_PAYLOAD_BYTES:
+            if size > MAX_JSON_PAYLOAD_BYTES:
                 raise RustScanAuditError(
                     f"json payload exceeds {MAX_JSON_PAYLOAD_BYTES} bytes: {member['path']!r}"
                 )
+            payload = raw[start : start + size]
             json.loads(payload)  # staged JSON must parse
         rows.append(
             (
@@ -105,11 +140,12 @@ def _member_rows(
 
 def build_stage_from_scan(
     scan: Mapping[str, Any],
-    raw: bytes,
+    raw: bytes | FileArchive,
     bound: BoundObject,
     adapter: DatasetAdapter,
     stage_dir: Path,
     ledger: BudgetLedger,
+    *, _stage_lease: str | None = None,
 ) -> StagedObject:
     """Populate a completed stage from an audited *Rust scan report*.
 
@@ -118,10 +154,15 @@ def build_stage_from_scan(
     of re-streaming the TAR.  JSON payloads are taken from the raw slices
     at the Rust-provided offsets.
     """
-    _audit_scan(scan, raw)
-    rows = _member_rows(scan, raw, adapter)
-    images = sum(1 for row in rows if row[1] == "image")
-    lease = ledger.reserve(Reservation(disk=OFFLINE_STAGE_ALLOWANCE))
+    try:
+        _audit_scan(scan, raw)
+        rows = _member_rows(scan, raw, adapter)
+        images = sum(1 for row in rows if row[1] == "image")
+    except BaseException:
+        if _stage_lease is not None:
+            ledger.settle(_stage_lease)
+        raise
+    lease = _stage_lease or ledger.reserve(Reservation(disk=OFFLINE_STAGE_ALLOWANCE))
     try:
         stage_dir.mkdir(exist_ok=False)
         db_path = stage_dir / "members.sqlite"
@@ -142,7 +183,7 @@ def build_stage_from_scan(
             )
             db.executemany("INSERT INTO members VALUES (?,?,?,?,?,?)", rows)
             db.commit()
-        database_hash = hashlib.sha256(db_path.read_bytes()).hexdigest()
+        database_hash = _digest(FileArchive(db_path), 0, db_path.stat().st_size)
         adapter_hash = hashlib.sha256(
             json.dumps(adapter.to_dict(), sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()

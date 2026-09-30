@@ -310,7 +310,7 @@ fn probe_component_reports_total_size() {
     let server = TestServer::new(state, 0);
     let response = http_request(&HttpOp::Probe, &server.url("/data"), 0, &fast_policy()).unwrap();
     assert_eq!(response.status, 200);
-    assert_eq!(response.body.bounded_bytes().unwrap(), &[]);
+    assert!(response.body.bounded_bytes().unwrap().is_empty());
     let content_length = response
         .headers
         .iter()

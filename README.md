@@ -22,6 +22,13 @@ The later P4 integration target is `leafmoone/game_cg_5M`; naming it grants no
 access, full scan or write permission. See the rules for bounded canary planning,
 object-version binding, component boundaries and dev/main review requirements.
 
+P4-R2 adds an explicit Rust production transport and two administrator pipeline
+interfaces; see [R2 transport](docs/R2_TRANSPORT.md) for configuration, gates and
+whole-TAR spool/memory limits. The minimal live capability batch stopped BLOCKED;
+these interfaces do not certify real production Range, immutable version binding
+or a ready production index. Ordinary fetch still requires a verified local package
+and must not implicitly scan. No real full-TAR download or large-repo build was run.
+
 ## Installation and CLI
 
 Python 3.10 or newer is required by the code and dependency minimums; there is no

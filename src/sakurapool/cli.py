@@ -147,7 +147,7 @@ def _runtime_command(args: argparse.Namespace) -> int:
 def _scan_remote_blocked() -> int:
     """Only scan/compile is blocked until the working-set budget is proven."""
     print(json.dumps({"status": "BLOCKED", "command": "index scan-remote",
-                      "reason": "P4_PARTIAL: 4 GiB working-set budget unproven"},
+                      "reason": "explicit production mode/profile/binding/working set required"},
                      sort_keys=True))
     print("remote scan/compile blocked before HTTP or artifact creation", file=sys.stderr)
     return 3
@@ -236,7 +236,10 @@ def main(argv: list[str] | None = None) -> int:
     scan_remote = index_subparsers.add_parser("scan-remote", help="gated P4 scan")
     scan_remote.add_argument("--config", type=Path, required=True)
     scan_remote.add_argument("--plan", type=Path, required=True)
-    scan_remote.add_argument("--output-package", type=Path, required=True)
+    scan_remote.add_argument("--output-package", type=Path, required=True,
+                             help="fresh P2 directory; runtime/package scheduled separately")
+    scan_remote.add_argument("--mode", choices=("download-then-scan", "remote-stream-scan"),
+                             help="explicit administrator production pipeline")
     args = parser.parse_args(argv)
     if (args.command == "runtime" and args.runtime_command == "compile"
             and not args.index_dirs and not args.paths):
@@ -269,7 +272,18 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(result, sort_keys=True))
             return 0
         if args.command == "index" and args.index_command == "scan-remote":
-            return _scan_remote_blocked()
+            if not args.mode:
+                return _scan_remote_blocked()
+            try:
+                from .storage.production_cli import scan as production_scan
+
+                result = production_scan(args.config, args.plan, args.output_package, args.mode)
+                print(json.dumps(result, sort_keys=True))
+                return 0
+            except Exception:
+                # No URL, token, response text or raw exception can reach the public boundary.
+                print(json.dumps({"status": "BLOCKED", "error": "production build gate failed"}))
+                return 3
         if args.command == "runtime":
             if args.runtime_command == "compile":
                 if args.index_dirs and args.paths[:-1]:

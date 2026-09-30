@@ -16,7 +16,7 @@ import stat
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .budget import DEFAULT_WORK_ROOT, BudgetExceeded, BudgetLedger, Reservation, _cluster_bytes
+from .budget import DEFAULT_WORK_ROOT, BudgetLedger, Reservation, _cluster_bytes
 from .location_gate import RepositoryConfigError, parse_repository
 from .modelscope import ModelScopeDataset
 from .package import fetch_from_package, load_package
@@ -193,7 +193,9 @@ def fetch(package_root: Path, config_path: Path, record_id: str, output: Path,
           *, offline_fixture: bool = False) -> dict:
     """Never indexes: require an existing verified package and matching profile."""
     if not offline_fixture:
-        raise BudgetExceeded("P4 production fetch BLOCKED: 4 GiB working-set budget unproven")
+        from .production_cli import fetch as production_fetch
+
+        return production_fetch(config_path, package_root, record_id, output)
     config, ledger = _profile(config_path, offline_fixture=True,
                               require_revision=True)
     package = load_package(package_root, allow_offline_loopback=ledger.offline_mode)

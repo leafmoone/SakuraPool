@@ -182,10 +182,26 @@ fn main() -> io::Result<()> {
             Err("budget_exceeded")
         } else {
             budget.commit_attempt();
+            if request.payload.get("production").is_some() {
+                // Conservatively charge the two-hop bound, even if origin stops early.
+                budget.commit_attempt();
+            }
             let outcome = dispatch(&request);
+            if let Some(accounting) = outcome.as_ref().ok().and_then(|v| v.get("accounting")) {
+                let charge = if accounting.get("complete").and_then(|v| v.as_bool()) == Some(true) {
+                    accounting
+                        .get("body")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(request.budget.body)
+                } else {
+                    request.budget.body
+                };
+                budget.commit_body(charge);
+            }
             if let Some(bytes) = outcome
                 .as_ref()
                 .ok()
+                .filter(|result| result.get("accounting").is_none())
                 .and_then(|result| result.get("bytes").or_else(|| result.get("size")))
                 .and_then(|value| value.as_u64())
             {
@@ -273,6 +289,46 @@ fn parse_inbound(line: Vec<u8>) -> Result<Inbound, &'static str> {
 }
 
 fn dispatch(request: &Request) -> Result<serde_json::Value, &'static str> {
+    if let Some(payload) = request.payload.get("production") {
+        if !matches!(request.operation.as_str(), "fetch_range" | "scan_http_tar") {
+            return Err("production_operation");
+        }
+        let transfer: sakurapool_rust::production::Transfer =
+            serde_json::from_value(payload.clone()).map_err(|_| "bad_production_payload")?;
+        let bytes = if transfer.mode == "range" {
+            transfer.length
+        } else {
+            transfer.object.object_size
+        };
+        let required_disk = bytes.saturating_add(if transfer.mode == "range" {
+            0
+        } else {
+            16 * 1024 * 1024
+        });
+        let required_memory = if transfer.mode == "range" {
+            bytes.saturating_mul(4).saturating_add(65536)
+        } else {
+            bytes.saturating_mul(64).saturating_add(4 * 1024 * 1024)
+        };
+        if request.budget.body < bytes.saturating_add(1)
+            || request.budget.attempts < 2
+            || request.budget.disk < required_disk
+            || request.budget.inflight < required_memory
+            || ((request.operation == "fetch_range") != (transfer.mode == "range"))
+        {
+            return Err("production_budget");
+        }
+        let outcome = sakurapool_rust::production::run(transfer);
+        let mut value = outcome.result;
+        value["diagnostic"] = serde_json::json!({"phase":outcome.accounting.phase,
+            "http_status":outcome.accounting.http_status,"read_bytes":outcome.accounting.body,
+            "accounting_complete":outcome.accounting.complete});
+        value["accounting"] = serde_json::to_value(outcome.accounting).map_err(|_| "accounting")?;
+        if let Some(error) = outcome.error {
+            value["production_error"] = serde_json::json!(error);
+        }
+        return Ok(value);
+    }
     match request.operation.as_str() {
         "hash_file" => {
             let payload: HashFilePayload = serde_json::from_value(request.payload.clone())
@@ -352,12 +408,17 @@ fn respond(
     outcome: Result<serde_json::Value, &'static str>,
 ) {
     let message = match outcome {
-        Ok(result) => Outbound::Response {
-            request_id: request_id.to_owned(),
-            ok: true,
-            result: Some(result),
-            error: None,
-        },
+        Ok(result) => {
+            let error = result.get("production_error").and_then(|v| v.as_str());
+            // Only module static codes, never a provider URL, are reflected.
+            let code = error.map(|_| "production_rejected");
+            Outbound::Response {
+                request_id: request_id.to_owned(),
+                ok: code.is_none(),
+                result: Some(result),
+                error: code,
+            }
+        }
         Err(error) => Outbound::Response {
             request_id: request_id.to_owned(),
             ok: false,

@@ -23,7 +23,7 @@ from pathlib import Path, PurePosixPath
 from .. import indexer
 from ..records import canonical_object_id
 from ..registry import DatasetAdapter
-from .budget import DEFAULT_WORK_ROOT, BudgetExceeded, BudgetLedger, Reservation
+from .budget import DEFAULT_WORK_ROOT, BudgetExceeded, BudgetLedger, Reservation, is_reparse
 from .transport import READ_CHUNK, BoundObject, GuardedTransport, RemoteIOError
 
 # Synthetic-fixture allowances only; NOT a proven working-set budget bound.
@@ -164,20 +164,36 @@ def open_completed_stage(output: Path, bound: BoundObject,
 def write_staged_v4(ledger: BudgetLedger,
                     frozen: list[tuple[str, BoundObject, StagedObject]],
                     output: Path, adapter: DatasetAdapter,
-                    *, audit_output: Path | None = None) -> dict[str, int]:
+                    *, audit_output: Path | None = None,
+                    production_transport=None, _build_lease=None) -> dict[str, int]:
     """Build real P2 durable v4 from *all completed* frozen objects.
 
     No TAR read or network request. P2 scanner pairing/metadata/record writer
     and COMMIT contract are reused. Every object is verified *before* INPUT;
     the only release path is the local P3 compiler operating on this v4 root.
     """
-    _offline_only(ledger)
+    if not isinstance(ledger, BudgetLedger):
+        raise BudgetExceeded("production build BLOCKED: durable budget ledger required")
+    if not ledger.offline_mode:
+        from .production import RustProductionTransport
+
+        if (not isinstance(production_transport, RustProductionTransport)
+                or not production_transport.production_profile
+                or production_transport.ledger is not ledger):
+            raise BudgetExceeded("production build BLOCKED: explicit Rust profile required")
+        for _rel, bound, _stage in frozen:
+            if ledger.condition_proof(production_transport.condition_key(bound)) is None:
+                raise RemoteIOError("production build lacks verified object binding")
+    else:
+        _offline_only(ledger)
     if not 1 <= len(frozen) <= 3:
         raise ValueError("canary v4 build requires 1..3 completed objects")
     output = Path(output).absolute()
-    if not output.is_relative_to(ledger.root) or output.exists() or output.is_symlink():
+    if (".." in output.parts or not output.is_relative_to(ledger.root)
+            or output.exists() or output.is_symlink()):
         raise ValueError("durable output must be fresh under work root")
-    if not output.parent.is_dir() or output.parent.is_symlink():
+    if (not output.parent.is_dir() or output.parent.is_symlink()
+            or any(p.is_symlink() or is_reparse(p) for p in output.parents)):
         raise ValueError("durable parent must exist without symlink")
     if audit_output is not None:
         audit_output = Path(audit_output).absolute()
@@ -208,7 +224,7 @@ def write_staged_v4(ledger: BudgetLedger,
     # the maximum of SQLite journals, sort scratch or runtime files inside
     # the working-set budget.
     total = {"objects": 0, "samples": 0, "annotations": 0, "errors": 0}
-    lease = ledger.reserve(Reservation(disk=OFFLINE_BUILD_ALLOWANCE,
+    lease = _build_lease or ledger.reserve(Reservation(disk=OFFLINE_BUILD_ALLOWANCE,
                                        records=sum(s.potential_records for _, _, s in frozen)))
     audit_stream = None
     audit_bytes = 0

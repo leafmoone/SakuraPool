@@ -109,8 +109,11 @@ def fetch_bounded_samples(transport: GuardedTransport, ledger: BudgetLedger,
     """
     if transport.ledger is not ledger:
         raise ValueError("retrieval transport and disk budget must be identical")
-    if not isinstance(ledger, BudgetLedger) or not ledger.offline_mode:
-        raise BudgetExceeded("P4 production fetch BLOCKED: 4 GiB working-set budget unproven")
+    from .production import RustProductionTransport
+
+    if (not isinstance(ledger, BudgetLedger) or (not ledger.offline_mode and not (
+            isinstance(transport, RustProductionTransport) and transport.production_profile))):
+        raise BudgetExceeded("production fetch BLOCKED: explicit Rust profile and budget required")
     if type(workers) is not int or not 1 <= workers <= 8:
         raise ValueError("worker count must be between 1 and 8")
     root = _real_output_root(output_root, ledger)
@@ -147,8 +150,11 @@ def fetch_bound_sample(transport: GuardedTransport, ledger: BudgetLedger,
     """
     if transport.ledger is not ledger:
         raise ValueError("retrieval transport and disk budget must be identical")
-    if not isinstance(ledger, BudgetLedger) or not ledger.offline_mode:
-        raise BudgetExceeded("P4 production fetch BLOCKED: 4 GiB working-set budget unproven")
+    from .production import RustProductionTransport
+
+    if (not isinstance(ledger, BudgetLedger) or (not ledger.offline_mode and not (
+            isinstance(transport, RustProductionTransport) and transport.production_profile))):
+        raise BudgetExceeded("production fetch BLOCKED: explicit Rust profile and budget required")
     sample.validate(bound.size)
     output_root = _real_output_root(output_root, ledger)
     final = output_root / sample.record_id
@@ -158,8 +164,9 @@ def fetch_bound_sample(transport: GuardedTransport, ledger: BudgetLedger,
     selected = [image] + ([meta] if meta else [])
     start = min(item.offset for item in selected)
     end = max(item.offset + item.size for item in selected)
+    merge_limit = min(MAX_MERGE, getattr(transport, "max_range_bytes", MAX_MERGE))
     merge_possible = (merged and meta is not None and meta.size > 0
-                      and end - start <= MAX_MERGE
+                      and end - start <= merge_limit
                       and end - start - image.size - meta.size <= MAX_GAP
                       and (image.offset + image.size <= meta.offset
                            or meta.offset + meta.size <= image.offset))
