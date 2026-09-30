@@ -1,0 +1,17 @@
+........................................................................ [ 10%]
+............................................s........................... [ 21%]
+...............................................................s........ [ 32%]
+........................................................................ [ 42%]
+........................................................................ [ 53%]
+........................................................................ [ 64%]
+........................................................................ [ 74%]
+........................................................................ [ 85%]
+........................................................................ [ 96%]
+....s.....................                                               [100%]
+=========================== short test summary info ===========================
+SKIPPED [1] tests\test_local_partition_builder.py:337: symlink creation unavailable: [WinError 1314] 客户端没有所需的特权。: 'C:\\Users\\PC\\AppData\\Local\\Temp\\pytest-of-PC\\pytest-237\\test_lock_symlink_is_rejected0\\user-lock-target' -> 'C:\\Users\\PC\\AppData\\Local\\Temp\\pytest-of-PC\\pytest-237\\test_lock_symlink_is_rejected0\\.durable.local-builder.lock'
+SKIPPED [1] tests\test_p4_package.py:179: host lacks symlink privilege: OSError
+SKIPPED [1] tests\test_runtime_remediation.py:787: this OS/user cannot create file symlinks
+671 passed, 3 skipped in 2243.72s (0:37:23)
+
+FINAL_PYTHON_EXIT=0 WALL_SECONDS=2245
