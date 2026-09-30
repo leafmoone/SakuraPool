@@ -41,7 +41,8 @@ def validate_build_metadata(value: dict[str, Any]) -> None:
             raise ValueError(f"invalid {key}")
     if not isinstance(value["rust_worker_version"], str) or not value["rust_worker_version"]:
         raise ValueError("missing worker version")
-    if (value["runtime_format_version"] != RUNTIME_FORMAT_VERSION or
+    # P2 provenance records the build-time runtime, not the current reader format.
+    if (value["runtime_format_version"] not in (1, RUNTIME_FORMAT_VERSION) or
             value["durable_format_version"] != indexer.FORMAT_VERSION or
             value["adapter_contract_version"] != "nested_json_v1"):
         raise ValueError("unsupported build format provenance")

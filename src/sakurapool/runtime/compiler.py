@@ -269,7 +269,7 @@ def _stage2(inventory: P2Inventory, staging: Path, chunk_size: int) -> None:
         namespaces: list[str] = []
         ns_ids: dict[str, int] = {}
         tag_ids: dict[tuple[int, str], int] = {}
-        categories: dict[tuple[int, str], set[str]] = {}
+        categories: set[tuple[int, str]] = set()
         namespace_known: dict[int, BitMap] = {}
         chunk: dict[int, BitMap] = {}
         part_no = 0
@@ -329,10 +329,7 @@ def _stage2(inventory: P2Inventory, staging: Path, chunk_size: int) -> None:
                         tag_id = len(tag_ids)
                         tag_ids[key] = tag_id
                     if category is not None:
-                        categories.setdefault(key, set()).add(category)
-                        if len(categories[key]) > 1:
-                            _fail(f"TAG_CATEGORY_CONFLICT: "
-                                  f"{namespaces[ns_id]}/{value}")
+                        categories.add((tag_id, category))
                     current = chunk.get(tag_id)
                     if current is None:
                         chunk[tag_id] = BitMap((rid,))
@@ -345,18 +342,13 @@ def _stage2(inventory: P2Inventory, staging: Path, chunk_size: int) -> None:
         db.execute("DROP TABLE IF EXISTS ann_obj")
         if chunk:
             flush()
-        for (ns_id, value), cats in categories.items():
-            if len(cats) > 1:
-                _fail(f"TAG_CATEGORY_CONFLICT: {namespaces[ns_id]}/{value}")
         staging.joinpath("TAG-IDS.json").write_text(
             json.dumps([[tag_id, ns_id, value]
                         for (ns_id, value), tag_id in sorted(
                             tag_ids.items(), key=lambda kv: kv[1])]),
             encoding="utf-8")
         staging.joinpath("CATEGORIES.json").write_text(
-            json.dumps({f"{ns_id}\x00{value}": next(iter(cats))
-                        for (ns_id, value), cats in categories.items()
-                        if len(cats) == 1}, sort_keys=True),
+            json.dumps(sorted(categories)),
             encoding="utf-8")
         ns_known_path = staging / "ns-known.sqlite"
         if ns_known_path.exists():
@@ -370,7 +362,7 @@ def _stage2(inventory: P2Inventory, staging: Path, chunk_size: int) -> None:
         ns_db.commit()
         ns_db.close()
         staging.joinpath("STAGE2-COUNTS.json").write_text(
-            json.dumps({"memberships": processed, "namespaces": namespaces,
+            json.dumps({"tag_occurrences": processed, "namespaces": namespaces,
                         "tags": len(tag_ids)}), encoding="utf-8")
         db.close()
         parts.close()
@@ -436,10 +428,16 @@ def _catalog(inventory: P2Inventory, staging: Path, snap_id: str) -> int:
                 tag_id INTEGER PRIMARY KEY,
                 namespace_id INTEGER NOT NULL,
                 value TEXT NOT NULL,
-                category TEXT,
                 cardinality INTEGER NOT NULL DEFAULT 0,
                 UNIQUE (namespace_id, value)
             );
+            CREATE TABLE tag_categories (
+                tag_id INTEGER NOT NULL REFERENCES tags(tag_id),
+                category TEXT NOT NULL,
+                PRIMARY KEY (tag_id, category)
+            );
+            CREATE INDEX tag_categories_category_tag
+                ON tag_categories(category, tag_id);
             CREATE TABLE namespaces (
                 namespace_id INTEGER PRIMARY KEY, namespace TEXT NOT NULL UNIQUE);
             """
@@ -513,15 +511,17 @@ def _catalog(inventory: P2Inventory, staging: Path, snap_id: str) -> int:
         for ns_id, name in enumerate(stage2["namespaces"]):
             cat.execute("INSERT INTO namespaces VALUES (?,?)", (ns_id, name))
 
-        categories = json.loads(
-            staging.joinpath("CATEGORIES.json").read_text(encoding="utf-8"))
         for tag_id, ns_id, value in json.loads(
                 staging.joinpath("TAG-IDS.json").read_text(encoding="utf-8")):
             cat.execute(
-                "INSERT INTO tags (tag_id, namespace_id, value, category) "
-                "VALUES (?,?,?,?)",
-                (tag_id, ns_id, value,
-                 categories.get(f"{ns_id}\x00{value}")))
+                "INSERT INTO tags (tag_id, namespace_id, value) VALUES (?,?,?)",
+                (tag_id, ns_id, value))
+        for tag_id, category in json.loads(
+                staging.joinpath("CATEGORIES.json").read_text(encoding="utf-8")):
+            if cat.execute("SELECT 1 FROM tags WHERE tag_id = ?",
+                           (tag_id,)).fetchone() is None:
+                _fail(f"category references unknown tag_id: {tag_id}")
+            cat.execute("INSERT INTO tag_categories VALUES (?,?)", (tag_id, category))
         cat.commit()
         db.close()
         cat.close()
@@ -970,7 +970,7 @@ def _verify_stage2(staging: Path) -> bool:
         return (isinstance(ids, list)
                 and (staging / "bitmap_parts.sqlite").exists()
                 and (staging / "ns-known.sqlite").exists()
-                and isinstance(counts["memberships"], int))
+                and isinstance(counts["tag_occurrences"], int))
     except (OSError, json.JSONDecodeError, KeyError):
         return False
 

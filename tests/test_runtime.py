@@ -373,37 +373,6 @@ def test_dual_compile_determinism(tmp_path):
         assert value == first
 
 
-def test_tag_category_resolution_and_conflict(tmp_path):
-    from synthetic_p2 import ObjectSpec, SampleSpec, build_p2_directory
-
-    import sakurapool.runtime.compiler as compiler
-
-    def build(name, samples):
-        idx = tmp_path / name
-        build_p2_directory(
-            idx, dataset="ds", source="src",
-            objects=[ObjectSpec("a.tar", samples)],
-            created_at="2025-01-01T00:00:00+00:00")
-        return compiler.compile_runtime(load_p2_inventory(idx),
-                                        tmp_path / f"rt-{name}")
-
-    # all null -> NULL
-    build("cat-null", [SampleSpec("1.jpg", "1", [("t", None)]),
-                       SampleSpec("2.jpg", "2", [("t", None)])])
-    # one non-null wins over nulls
-    build("cat-one", [SampleSpec("1.jpg", "1", [("t", None)]),
-                      SampleSpec("2.jpg", "2", [("t", "male")])])
-    # different non-null values -> compile failure
-    with pytest.raises(CorruptInputError, match="TAG_CATEGORY_CONFLICT"):
-        build("cat-conflict", [SampleSpec("1.jpg", "1", [("t", "male")]),
-                               SampleSpec("2.jpg", "2", [("t", "female")])])
-    import sqlite3
-    catalog = tmp_path / "rt-cat-one" / "snapshots"
-    catalog = next(catalog.iterdir()) / "catalog.sqlite"
-    con = sqlite3.connect(str(catalog))
-    assert con.execute("SELECT category FROM tags").fetchone()[0] == "male"
-    con.close()
-
 
 def test_multi_origin_union_and_namespace_split(tmp_path):
     """§18/§44: same tag across origins unions; namespace is not source."""
