@@ -27,6 +27,17 @@ def test_adapter_mismatch_rejected(tmp_path):
         combine_inventories([a, b])
 
 
+def test_same_path_changed_content_rejected(tmp_path, monkeypatch):
+    import synthetic_p2
+
+    a = make(tmp_path / "a", "a.tar")
+    monkeypatch.setattr(synthetic_p2, "_input_digest", lambda rel, seed: "f" * 64)
+    b = make(tmp_path / "b", "a.tar")
+    assert a.objects[0].object_id != b.objects[0].object_id
+    with pytest.raises(CorruptInputError, match="duplicate object_path"):
+        combine_inventories([a, b])
+
+
 def test_duplicate_physical_object_rejected(tmp_path):
     a = make(tmp_path / "a", "a.tar")
     b = make(tmp_path / "b", "a.tar")
