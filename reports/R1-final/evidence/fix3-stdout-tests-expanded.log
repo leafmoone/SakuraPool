@@ -1,0 +1,43 @@
+START 2026-09-30T10:31:29+08:00
+PWD /d/SakuraTool/SakuraPool
+HEAD b7c1bd19463cc08e02aaaab37e90c9b696245531
+HEAD_TREE d13e8bb51ce590aebd8d8a4f2ce5ba24ffd19744
+CMD D:/SakuraTool/SakuraPool-Fix3-20260930a/py312/Scripts/python.exe -m pytest tests/test_r1_stdout_backpressure.py -vv -rA 
+CARGO_TARGET_DIR=D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target
+SAKURAPOOL_RUST_WORKER=D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target/debug/sakurapool-worker.exe
+PYTHONPATH=<unset>
+============================= test session starts =============================
+platform win32 -- Python 3.12.13, pytest-8.3.4, pluggy-1.6.0 -- D:\SakuraTool\SakuraPool-Fix3-20260930a\py312\Scripts\python.exe
+cachedir: .pytest_cache
+R1 worker: D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target/debug/sakurapool-worker.exe (sha256:3017df0bc3efc950)
+rootdir: D:\SakuraTool\SakuraPool
+configfile: pyproject.toml
+collecting ... collected 10 items
+
+tests/test_r1_stdout_backpressure.py::test_slow_consumer_bounded_queue_preserves_order PASSED [ 10%]
+tests/test_r1_stdout_backpressure.py::test_shutdown_while_producer_blocked_on_full_queue[cancel] PASSED [ 20%]
+tests/test_r1_stdout_backpressure.py::test_shutdown_while_producer_blocked_on_full_queue[close] PASSED [ 30%]
+tests/test_r1_stdout_backpressure.py::test_cancel_unblocks_waiting_consumer PASSED [ 40%]
+tests/test_r1_stdout_backpressure.py::test_shutdown_releases_blocked_stdin_writer[close] PASSED [ 50%]
+tests/test_r1_stdout_backpressure.py::test_shutdown_releases_blocked_stdin_writer[cancel] PASSED [ 60%]
+tests/test_r1_stdout_backpressure.py::test_eof_race_delivers_final_queued_line PASSED [ 70%]
+tests/test_r1_stdout_backpressure.py::test_eof_reports_exit_without_waiting_for_long_timeout PASSED [ 80%]
+tests/test_r1_stdout_backpressure.py::test_oversized_stdout_line_is_bounded_and_cancel_reaps PASSED [ 90%]
+tests/test_r1_stdout_backpressure.py::test_failed_constructor_kills_waits_closes_pipes PASSED [100%]
+
+=================================== PASSES ====================================
+=========================== short test summary info ===========================
+PASSED tests/test_r1_stdout_backpressure.py::test_slow_consumer_bounded_queue_preserves_order
+PASSED tests/test_r1_stdout_backpressure.py::test_shutdown_while_producer_blocked_on_full_queue[cancel]
+PASSED tests/test_r1_stdout_backpressure.py::test_shutdown_while_producer_blocked_on_full_queue[close]
+PASSED tests/test_r1_stdout_backpressure.py::test_cancel_unblocks_waiting_consumer
+PASSED tests/test_r1_stdout_backpressure.py::test_shutdown_releases_blocked_stdin_writer[close]
+PASSED tests/test_r1_stdout_backpressure.py::test_shutdown_releases_blocked_stdin_writer[cancel]
+PASSED tests/test_r1_stdout_backpressure.py::test_eof_race_delivers_final_queued_line
+PASSED tests/test_r1_stdout_backpressure.py::test_eof_reports_exit_without_waiting_for_long_timeout
+PASSED tests/test_r1_stdout_backpressure.py::test_oversized_stdout_line_is_bounded_and_cancel_reaps
+PASSED tests/test_r1_stdout_backpressure.py::test_failed_constructor_kills_waits_closes_pipes
+============================= 10 passed in 4.34s ==============================
+
+EXIT_CODE=0
+END 2026-09-30T10:31:34+08:00

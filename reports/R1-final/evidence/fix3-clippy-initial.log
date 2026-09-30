@@ -1,0 +1,40 @@
+START 2026-09-30T10:23:59+08:00
+PWD /d/SakuraTool/SakuraPool/rust
+HEAD b7c1bd19463cc08e02aaaab37e90c9b696245531
+HEAD_TREE d13e8bb51ce590aebd8d8a4f2ce5ba24ffd19744
+CMD cargo clippy --all-targets --locked -- -D warnings 
+CARGO_TARGET_DIR=D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target
+SAKURAPOOL_RUST_WORKER=
+PYTHONPATH=<unset>
+    Checking ring v0.17.14
+    Checking hyper v1.11.1
+    Checking tower v0.5.3
+    Checking serde v1.0.229
+    Checking zerofrom v0.1.8
+    Checking serde_json v1.0.151
+    Checking yoke v0.8.3
+    Checking zerovec v0.11.8
+    Checking zerotrie v0.2.5
+    Checking serde_urlencoded v0.7.1
+    Checking hyper-util v0.1.21
+    Checking tinystr v0.8.4
+    Checking potential_utf v0.1.6
+    Checking icu_collections v2.3.0
+    Checking icu_locale_core v2.3.0
+    Checking rustls-webpki v0.103.15
+    Checking rustls v0.23.45
+    Checking icu_provider v2.3.1
+    Checking icu_normalizer v2.3.0
+    Checking icu_properties v2.3.0
+    Checking idna_adapter v1.2.2
+    Checking idna v1.1.0
+    Checking url v2.5.8
+    Checking tower-http v0.6.11
+    Checking tokio-rustls v0.26.6
+    Checking hyper-rustls v0.27.10
+    Checking reqwest v0.12.28
+    Checking sakurapool-rust v0.1.0 (D:\SakuraTool\SakuraPool\rust)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.28s
+
+EXIT_CODE=0
+END 2026-09-30T10:24:06+08:00

@@ -1,0 +1,15 @@
+START 2026-09-30T11:50:49+08:00
+PWD /d/SakuraTool/SakuraPool
+HEAD 51ea23a4367cb8f069e930c5ab1882a0a00c8423
+HEAD_TREE f0680c67652afc6cb04a236169ecc37bd425aa2d
+CMD D:/SakuraTool/SakuraPool-Fix3-20260930a/wheel312/Scripts/python.exe -c import\ sakurapool\,zipfile\,hashlib\,json\;\ from\ pathlib\ import\ Path\;\ import\ importlib.metadata\ as\ md\;\ package=Path\(sakurapool.__file__\).resolve\(\).parent\;\ wheel=Path\(\"D:/SakuraTool/SakuraPool-Fix3-20260930a/wheels/sakurapool-0.1.0-py3-none-any.whl\"\)\;\ count=0\;\ print\(\"INSTALLED_PACKAGE=\"+str\(package\)\)\;\ print\(\"DIRECT_URL=\"+md.distribution\(\"sakurapool\"\).read_text\(\"direct_url.json\"\)\)\;\ archive=zipfile.ZipFile\(wheel\)\;\ names=\[n\ for\ n\ in\ archive.namelist\(\)\ if\ n.startswith\(\"sakurapool/\"\)\ and\ n.endswith\(\".py\"\)\]\;\ pairs=\[\(n\,archive.read\(n\)\,package.parent.joinpath\(n\).read_bytes\(\)\)\ for\ n\ in\ names\]\;\ assert\ all\(a==b\ for\ n\,a\,b\ in\ pairs\)\;\ print\(\"EXACT_WHEEL_INSTALLED_BYTES\ files=\"+str\(len\(pairs\)\)+\"\ identical=True\ \(no\ newline\ normalization\)\"\)\;\ print\(\"WHEEL_SHA256=\"+hashlib.sha256\(wheel.read_bytes\(\)\).hexdigest\(\)\) 
+CARGO_TARGET_DIR=D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target
+SAKURAPOOL_RUST_WORKER=D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target/release/sakurapool-worker.exe
+PYTHONPATH=<unset>
+INSTALLED_PACKAGE=D:\SakuraTool\SakuraPool-Fix3-20260930a\wheel312\Lib\site-packages\sakurapool
+DIRECT_URL={"url":"file:///D:/SakuraTool/SakuraPool-Fix3-20260930a/wheels/sakurapool-0.1.0-py3-none-any.whl","archive_info":{}}
+EXACT_WHEEL_INSTALLED_BYTES files=28 identical=True (no newline normalization)
+WHEEL_SHA256=71b5f86f6df952d18bc9590b4728562bb9388bd9c66c57fca6a17ca1e8cd5262
+
+EXIT_CODE=0
+END 2026-09-30T11:50:50+08:00

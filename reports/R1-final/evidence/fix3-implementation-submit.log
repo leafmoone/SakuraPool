@@ -1,0 +1,35 @@
+START 2026-09-30T10:46:02+08:00
+PWD /d/SakuraTool/SakuraPool
+HEAD b7c1bd19463cc08e02aaaab37e90c9b696245531
+HEAD_TREE d13e8bb51ce590aebd8d8a4f2ce5ba24ffd19744
+CMD bash -c set\ -e\;\ git\ diff\ --cached\ --name-status\;\ git\ diff\ --cached\ --check\;\ git\ commit\ -m\ \"fix\(r1\):\ stream\ reqwest\ responses\ and\ bound\ bridge\ stdout\"\ -m\ \"-\ Use\ reqwest\ blocking\ with\ explicit\ rustls\,\ no\ proxy\ or\ auto\ redirect/retry\;\ stream\ FullStream\ Read\ directly\ into\ tar.\"\ -m\ \"-\ Bound\ raw\ GNU/PAX\ metadata\ before\ allocation\ and\ require\ closing\ blocks\;\ preserve\ legal\ long\ paths\ and\ fail\ closed\ on\ conflicting\ PAX\ sizes.\"\ -m\ \"-\ Backpressure\ stdout\ with\ bounded\ framing\ and\ queue\;\ reap\ blocked\ writers\ and\ join\ both\ pipe\ readers\;\ test\ EOF\ and\ shutdown\ races.\"\ -m\ \"-\ Disable\ worker\ hidden\ retries\;\ retain\ library\ explicit\ retry\ tests\ and\ authorize\ isolated\ new\ tool\ environment\ without\ changing\ data\ budgets.\"\ -m\ \"Co-Authored-By:\ KohakuTerrarium\ \<noreply@kohaku-lab.org\>\"\;\ git\ push\ origin\ dev\;\ git\ rev-parse\ HEAD\ HEAD\^\{tree\}\;\ git\ ls-remote\ origin\ refs/heads/dev\ refs/heads/main 
+CARGO_TARGET_DIR=
+SAKURAPOOL_RUST_WORKER=
+PYTHONPATH=<unset>
+M	docs/PROJECT_RULES.md
+M	rust/Cargo.lock
+M	rust/Cargo.toml
+M	rust/src/bin/worker.rs
+M	rust/src/http.rs
+M	rust/src/lib.rs
+M	rust/tests/http_client.rs
+A	rust/tests/http_stream.rs
+A	rust/tests/tar_stream_bounds.rs
+M	src/sakurapool/storage/rust_bridge.py
+A	tests/test_r1_stdout_backpressure.py
+A	tests/test_r1_worker_attempts.py
+[dev 51ea23a] fix(r1): stream reqwest responses and bound bridge stdout
+ 12 files changed, 2446 insertions(+), 502 deletions(-)
+ create mode 100644 rust/tests/http_stream.rs
+ create mode 100644 rust/tests/tar_stream_bounds.rs
+ create mode 100644 tests/test_r1_stdout_backpressure.py
+ create mode 100644 tests/test_r1_worker_attempts.py
+To https://github.com/leafmoone/SakuraPool.git
+   b7c1bd1..51ea23a  dev -> dev
+51ea23a4367cb8f069e930c5ab1882a0a00c8423
+f0680c67652afc6cb04a236169ecc37bd425aa2d
+51ea23a4367cb8f069e930c5ab1882a0a00c8423	refs/heads/dev
+edc72fbaaddc4dc8f9865ddfa576b737c7b15f5a	refs/heads/main
+
+EXIT_CODE=0
+END 2026-09-30T10:46:10+08:00

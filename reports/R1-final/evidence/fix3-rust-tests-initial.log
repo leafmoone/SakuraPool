@@ -1,0 +1,202 @@
+START 2026-09-30T10:22:19+08:00
+PWD /d/SakuraTool/SakuraPool/rust
+HEAD b7c1bd19463cc08e02aaaab37e90c9b696245531
+HEAD_TREE d13e8bb51ce590aebd8d8a4f2ce5ba24ffd19744
+CMD cargo test --locked 
+CARGO_TARGET_DIR=D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target
+SAKURAPOOL_RUST_WORKER=
+PYTHONPATH=<unset>
+   Compiling stable_deref_trait v1.2.1
+   Compiling windows-link v0.2.1
+   Compiling bytes v1.12.1
+   Compiling pin-project-lite v0.2.17
+   Compiling itoa v1.0.18
+   Compiling futures-core v0.3.34
+   Compiling cfg-if v1.0.5
+   Compiling litemap v0.8.3
+   Compiling smallvec v1.16.2
+   Compiling writeable v0.6.4
+   Compiling utf8_iter v1.0.4
+   Compiling futures-sink v0.3.34
+   Compiling ring v0.17.14
+   Compiling percent-encoding v2.3.2
+   Compiling synstructure v0.14.0
+   Compiling zerovec-derive v0.11.6
+   Compiling displaydoc v0.2.7
+   Compiling windows-sys v0.61.2
+   Compiling once_cell v1.21.4
+   Compiling memchr v2.8.3
+   Compiling zeroize v1.9.0
+   Compiling getrandom v0.2.17
+   Compiling icu_properties_data v2.3.0
+   Compiling icu_normalizer_data v2.3.0
+   Compiling untrusted v0.9.0
+   Compiling futures-io v0.3.34
+   Compiling futures-task v0.3.34
+   Compiling slab v0.4.12
+   Compiling rustls-pki-types v1.15.1
+   Compiling try-lock v0.2.5
+   Compiling typenum v1.20.1
+   Compiling tower-service v0.3.3
+   Compiling httparse v1.10.1
+   Compiling serde_core v1.0.229
+   Compiling tracing-core v0.1.36
+   Compiling http v1.5.0
+   Compiling form_urlencoded v1.2.2
+   Compiling want v0.3.1
+   Compiling zerofrom-derive v0.1.8
+   Compiling yoke-derive v0.8.3
+   Compiling futures-util v0.3.34
+   Compiling futures-channel v0.3.34
+   Compiling atomic-waker v1.1.2
+   Compiling subtle v2.6.1
+   Compiling tracing v0.1.44
+   Compiling libc v0.2.189
+   Compiling sync_wrapper v1.0.2
+   Compiling serde_derive v1.0.229
+   Compiling ipnet v2.12.2
+   Compiling base64 v0.23.1
+   Compiling generic-array v0.14.7
+   Compiling tower-layer v0.3.3
+   Compiling webpki-roots v1.0.9
+   Compiling bitflags v2.13.2
+   Compiling ryu v1.0.23
+   Compiling zmij v1.0.23
+   Compiling http-body v1.1.0
+   Compiling filetime v0.2.29
+   Compiling cpufeatures v0.2.17
+   Compiling log v0.4.34
+   Compiling http-body-util v0.1.5
+   Compiling base64 v0.22.1
+   Compiling tar v0.4.46
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling zerofrom v0.1.8
+   Compiling digest v0.10.7
+   Compiling yoke v0.8.3
+   Compiling sha2 v0.10.9
+   Compiling zerovec v0.11.8
+   Compiling zerotrie v0.2.5
+   Compiling tinystr v0.8.4
+   Compiling potential_utf v0.1.6
+   Compiling socket2 v0.6.5
+   Compiling mio v1.2.3
+   Compiling serde_json v1.0.151
+   Compiling icu_collections v2.3.0
+   Compiling icu_locale_core v2.3.0
+   Compiling tokio v1.53.1
+   Compiling serde v1.0.229
+   Compiling icu_provider v2.3.1
+   Compiling icu_normalizer v2.3.0
+   Compiling icu_properties v2.3.0
+   Compiling rustls v0.23.45
+   Compiling serde_urlencoded v0.7.1
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling url v2.5.8
+   Compiling rustls-webpki v0.103.15
+   Compiling hyper v1.11.1
+   Compiling tower v0.5.3
+   Compiling tower-http v0.6.11
+   Compiling hyper-util v0.1.21
+   Compiling tokio-rustls v0.26.6
+   Compiling hyper-rustls v0.27.10
+   Compiling reqwest v0.12.28
+   Compiling sakurapool-rust v0.1.0 (D:\SakuraTool\SakuraPool\rust)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 29.36s
+     Running unittests src\lib.rs (D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target\debug\deps\sakurapool_rust-59847dacc39bfdf0.exe)
+
+running 6 tests
+test tests::budget_admits_within_limits_and_rejects_overbudget ... ok
+test http::tests::transient_classification_is_closed ... ok
+test tests::range_is_exact ... ok
+test tests::loopback_url_rejects_everything_but_loopback_http ... ok
+test tests::hash_is_streaming ... ok
+test http::tests::location_resolution_keeps_loopback_and_rejects_garbage ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\worker.rs (D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target\debug\deps\sakurapool_worker-c2aad9e25d71ba01.exe)
+
+running 6 tests
+test line_reader_tests::crlf_and_chunked_lines_are_read_in_full ... ok
+test line_reader_tests::eof_flushes_partial_line_then_reports_close ... ok
+test line_reader_tests::malformed_lines_report_codes_without_oversized_buffer ... ok
+test line_reader_tests::line_at_exact_limit_is_accepted_one_over_is_rejected ... ok
+test line_reader_tests::oversized_line_is_rejected_early_and_remainder_drained ... ok
+test line_reader_tests::oversized_line_without_newline_uses_no_unbounded_memory ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests\http_client.rs (D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target\debug\deps\http_client-4d0685ab43c016e7.exe)
+
+running 10 tests
+test probe_component_reports_total_size ... ok
+test scan_http_tar_rejects_over_limit_stream ... ok
+test redirect_origin_302_to_cdn_206_with_header_isolation ... ok
+test range_component_fetches_exact_206 ... ok
+test reject_class_non_loopback_https_and_missing_location ... ok
+test full_stream_component_fetches_200_to_eof ... ok
+test scan_http_tar_matches_file_scan_field_for_field ... ok
+test redirect_307_preserves_range_to_cdn ... ok
+test reject_class_response_lifecycle ... ok
+test retry_succeeds_after_transient_503s_and_exhausts_cleanly ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests\http_stream.rs (D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target\debug\deps\http_stream-d4c4a501fe665cd9.exe)
+
+running 4 tests
+test unknown_length_chunked_stream_enforces_cap_during_read ... ok
+test full_stream_returns_before_server_releases_any_body ... ok
+test scanner_rejects_unsafe_first_header_before_remainder_arrives ... ok
+test sixteen_mib_member_flows_in_fixed_chunks_without_whole_tar_vec ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests\tar_scan.rs (D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target\debug\deps\tar_scan-ac871a920d1c56ab.exe)
+
+running 13 tests
+test reader_enforces_byte_limit_without_metadata ... ok
+test reader_truncated_stream_fails_closed ... ok
+test reader_is_single_pass_and_consumed_exactly ... ok
+test reader_rejects_non_seekable_pipe_equivalent_source ... ok
+test missing_file_is_io_error ... ok
+test enforces_member_and_byte_limits ... ok
+test reader_odd_short_chunks_match_file_scan ... ok
+test scans_basic_archive_with_dirs_and_empty_file ... ok
+test reader_one_byte_stream_matches_file_scan ... ok
+test scans_gnu_long_name_and_pax_long_name ... ok
+test rejects_truncation_checksum_and_bad_tail ... ok
+test rejects_unsafe_and_non_utf8_member_paths ... ok
+test rejects_symlink_hardlink_device_and_fifo_members ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests\worker_protocol.rs (D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target\debug\deps\worker_protocol-3f2d09972850ee8d.exe)
+
+running 12 tests
+test unknown_operations_are_rejected ... ok
+test duplicate_request_ids_are_rejected ... ok
+test handshake_reports_version_and_capabilities ... ok
+test in_memory_budget_rejects_overbudget_after_exhaustion ... ok
+test unknown_fields_are_rejected_as_protocol_violations ... ok
+test first_message_must_be_hello ... ok
+test oversized_and_non_utf8_lines_are_rejected_without_killing_the_worker ... ok
+test version_mismatch_terminates_the_worker ... ok
+test hash_file_streams_sha256 ... ok
+test fetch_range_rejects_200_responses_and_non_loopback_targets ... ok
+test budget_counters_reset_on_restart_but_never_persist ... ok
+test fetch_range_validates_206_and_streaming_sha ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.56s
+
+   Doc-tests sakurapool_rust
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+EXIT_CODE=0
+END 2026-09-30T10:22:51+08:00

@@ -1,0 +1,135 @@
+START 2026-09-30T10:41:21+08:00
+PWD /d/SakuraTool/SakuraPool
+HEAD b7c1bd19463cc08e02aaaab37e90c9b696245531
+HEAD_TREE d13e8bb51ce590aebd8d8a4f2ce5ba24ffd19744
+CMD D:/SakuraTool/SakuraPool-Fix3-20260930a/py312/Scripts/python.exe -m pytest tests/test_r1_bridge.py tests/test_r1_stdout_backpressure.py tests/test_r1_worker_attempts.py tests/test_r1_loopback_loop.py tests/test_r1_gate_e_e2e.py tests/test_r1_env_gate.py tests/test_rust_index_audit.py -vv -rA 
+CARGO_TARGET_DIR=
+SAKURAPOOL_RUST_WORKER=D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target/release/sakurapool-worker.exe
+PYTHONPATH=<unset>
+============================= test session starts =============================
+platform win32 -- Python 3.12.13, pytest-8.3.4, pluggy-1.6.0 -- D:\SakuraTool\SakuraPool-Fix3-20260930a\py312\Scripts\python.exe
+cachedir: .pytest_cache
+R1 worker: D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target/release/sakurapool-worker.exe (sha256:0b8bafc4f1388ad3)
+rootdir: D:\SakuraTool\SakuraPool
+configfile: pyproject.toml
+collecting ... collected 56 items
+
+tests/test_r1_bridge.py::test_handshake_reports_protocol_version_and_capabilities PASSED [  1%]
+tests/test_r1_bridge.py::test_protocol_version_mismatch_is_fatal PASSED  [  3%]
+tests/test_r1_bridge.py::test_explicit_binary_path_is_required_without_fallback PASSED [  5%]
+tests/test_r1_bridge.py::test_oversized_line_rejected_and_worker_survives PASSED [  7%]
+tests/test_r1_bridge.py::test_non_utf8_line_rejected_and_worker_survives PASSED [  8%]
+tests/test_r1_bridge.py::test_unknown_fields_are_rejected PASSED         [ 10%]
+tests/test_r1_bridge.py::test_duplicate_request_ids_rejected PASSED      [ 12%]
+tests/test_r1_bridge.py::test_attempt_limit_exhaustion_refuses_next_reserve PASSED [ 14%]
+tests/test_r1_bridge.py::test_cancel_kills_and_waits PASSED              [ 16%]
+tests/test_r1_bridge.py::test_cancel_is_immediate_kill_and_wait PASSED   [ 17%]
+tests/test_r1_bridge.py::test_stderr_tail_is_bounded PASSED              [ 19%]
+tests/test_r1_bridge.py::test_stderr_drain_thread_keeps_last_64kib_on_real_pipe PASSED [ 21%]
+tests/test_r1_bridge.py::test_bridge_timeout_on_hung_worker_retains_lease PASSED [ 23%]
+tests/test_r1_bridge.py::test_gated_fetch_success_settles PASSED         [ 25%]
+tests/test_r1_bridge.py::test_gated_fetch_mid_range_settles PASSED       [ 26%]
+tests/test_r1_bridge.py::test_gated_fetch_clean_rejection_settles PASSED [ 28%]
+tests/test_r1_bridge.py::test_gated_crash_leaves_lease_pending PASSED    [ 30%]
+tests/test_r1_bridge.py::test_restart_sees_durable_pending PASSED        [ 32%]
+tests/test_r1_bridge.py::test_python_crash_keeps_durable_lease_pending PASSED [ 33%]
+tests/test_r1_bridge.py::test_double_settle_rejected PASSED              [ 35%]
+tests/test_r1_bridge.py::test_gated_fetch_without_ledger_refuses PASSED  [ 37%]
+tests/test_r1_bridge.py::test_scan_tar_agrees_with_raw_bytes PASSED      [ 39%]
+tests/test_r1_bridge.py::test_scan_tar_rejections PASSED                 [ 41%]
+tests/test_r1_bridge.py::test_scan_http_tar_matches_file_scan_field_for_field PASSED [ 42%]
+tests/test_r1_stdout_backpressure.py::test_slow_consumer_bounded_queue_preserves_order PASSED [ 44%]
+tests/test_r1_stdout_backpressure.py::test_shutdown_while_producer_blocked_on_full_queue[cancel] PASSED [ 46%]
+tests/test_r1_stdout_backpressure.py::test_shutdown_while_producer_blocked_on_full_queue[close] PASSED [ 48%]
+tests/test_r1_stdout_backpressure.py::test_cancel_unblocks_waiting_consumer PASSED [ 50%]
+tests/test_r1_stdout_backpressure.py::test_shutdown_releases_blocked_stdin_writer[close] PASSED [ 51%]
+tests/test_r1_stdout_backpressure.py::test_shutdown_releases_blocked_stdin_writer[cancel] PASSED [ 53%]
+tests/test_r1_stdout_backpressure.py::test_eof_race_delivers_final_queued_line PASSED [ 55%]
+tests/test_r1_stdout_backpressure.py::test_eof_reports_exit_without_waiting_for_long_timeout PASSED [ 57%]
+tests/test_r1_stdout_backpressure.py::test_oversized_stdout_line_is_bounded_and_cancel_reaps PASSED [ 58%]
+tests/test_r1_stdout_backpressure.py::test_failed_constructor_kills_waits_closes_pipes PASSED [ 60%]
+tests/test_r1_worker_attempts.py::test_worker_does_not_retry_503[fetch_range] PASSED [ 62%]
+tests/test_r1_worker_attempts.py::test_worker_does_not_retry_503[scan_http_tar] PASSED [ 64%]
+tests/test_r1_loopback_loop.py::test_scan_p2_p3_rust_fetch_bytes_agree PASSED [ 66%]
+tests/test_r1_gate_e_e2e.py::test_rust_scan_drives_p2_p3_rust_fetch PASSED [ 67%]
+tests/test_r1_env_gate.py::test_worker_resolver_explicit_env_is_authoritative PASSED [ 69%]
+tests/test_r1_env_gate.py::test_worker_resolver_fallback_only_returns_existing_files PASSED [ 71%]
+tests/test_r1_env_gate.py::test_r1_suite_skips_and_reports_without_worker PASSED [ 73%]
+tests/test_r1_env_gate.py::test_p4_work_root_is_outside_the_repository PASSED [ 75%]
+tests/test_r1_env_gate.py::test_r1_servers_bind_loopback_only PASSED     [ 76%]
+tests/test_r1_env_gate.py::test_r1_test_sources_reference_no_external_hosts PASSED [ 78%]
+tests/test_r1_env_gate.py::test_r1_work_root_fixtures_are_created_under_p4_root PASSED [ 80%]
+tests/test_rust_index_audit.py::test_size_mismatch_rejected PASSED       [ 82%]
+tests/test_rust_index_audit.py::test_whole_sha_mismatch_rejected PASSED  [ 83%]
+tests/test_rust_index_audit.py::test_duplicate_member_path_rejected PASSED [ 85%]
+tests/test_rust_index_audit.py::test_unaligned_extent_rejected PASSED    [ 87%]
+tests/test_rust_index_audit.py::test_extent_out_of_bounds_rejected PASSED [ 89%]
+tests/test_rust_index_audit.py::test_member_sha_mismatch_rejected PASSED [ 91%]
+tests/test_rust_index_audit.py::test_empty_member_payload_rejected PASSED [ 92%]
+tests/test_rust_index_audit.py::test_unparsable_json_rejected PASSED     [ 94%]
+tests/test_rust_index_audit.py::test_oversized_json_rejected PASSED      [ 96%]
+tests/test_rust_index_audit.py::test_valid_report_stages_and_marker_is_exact PASSED [ 98%]
+tests/test_rust_index_audit.py::test_failed_audit_leaves_no_marker_and_settles_lease PASSED [100%]
+
+=================================== PASSES ====================================
+=========================== short test summary info ===========================
+PASSED tests/test_r1_bridge.py::test_handshake_reports_protocol_version_and_capabilities
+PASSED tests/test_r1_bridge.py::test_protocol_version_mismatch_is_fatal
+PASSED tests/test_r1_bridge.py::test_explicit_binary_path_is_required_without_fallback
+PASSED tests/test_r1_bridge.py::test_oversized_line_rejected_and_worker_survives
+PASSED tests/test_r1_bridge.py::test_non_utf8_line_rejected_and_worker_survives
+PASSED tests/test_r1_bridge.py::test_unknown_fields_are_rejected
+PASSED tests/test_r1_bridge.py::test_duplicate_request_ids_rejected
+PASSED tests/test_r1_bridge.py::test_attempt_limit_exhaustion_refuses_next_reserve
+PASSED tests/test_r1_bridge.py::test_cancel_kills_and_waits
+PASSED tests/test_r1_bridge.py::test_cancel_is_immediate_kill_and_wait
+PASSED tests/test_r1_bridge.py::test_stderr_tail_is_bounded
+PASSED tests/test_r1_bridge.py::test_stderr_drain_thread_keeps_last_64kib_on_real_pipe
+PASSED tests/test_r1_bridge.py::test_bridge_timeout_on_hung_worker_retains_lease
+PASSED tests/test_r1_bridge.py::test_gated_fetch_success_settles
+PASSED tests/test_r1_bridge.py::test_gated_fetch_mid_range_settles
+PASSED tests/test_r1_bridge.py::test_gated_fetch_clean_rejection_settles
+PASSED tests/test_r1_bridge.py::test_gated_crash_leaves_lease_pending
+PASSED tests/test_r1_bridge.py::test_restart_sees_durable_pending
+PASSED tests/test_r1_bridge.py::test_python_crash_keeps_durable_lease_pending
+PASSED tests/test_r1_bridge.py::test_double_settle_rejected
+PASSED tests/test_r1_bridge.py::test_gated_fetch_without_ledger_refuses
+PASSED tests/test_r1_bridge.py::test_scan_tar_agrees_with_raw_bytes
+PASSED tests/test_r1_bridge.py::test_scan_tar_rejections
+PASSED tests/test_r1_bridge.py::test_scan_http_tar_matches_file_scan_field_for_field
+PASSED tests/test_r1_stdout_backpressure.py::test_slow_consumer_bounded_queue_preserves_order
+PASSED tests/test_r1_stdout_backpressure.py::test_shutdown_while_producer_blocked_on_full_queue[cancel]
+PASSED tests/test_r1_stdout_backpressure.py::test_shutdown_while_producer_blocked_on_full_queue[close]
+PASSED tests/test_r1_stdout_backpressure.py::test_cancel_unblocks_waiting_consumer
+PASSED tests/test_r1_stdout_backpressure.py::test_shutdown_releases_blocked_stdin_writer[close]
+PASSED tests/test_r1_stdout_backpressure.py::test_shutdown_releases_blocked_stdin_writer[cancel]
+PASSED tests/test_r1_stdout_backpressure.py::test_eof_race_delivers_final_queued_line
+PASSED tests/test_r1_stdout_backpressure.py::test_eof_reports_exit_without_waiting_for_long_timeout
+PASSED tests/test_r1_stdout_backpressure.py::test_oversized_stdout_line_is_bounded_and_cancel_reaps
+PASSED tests/test_r1_stdout_backpressure.py::test_failed_constructor_kills_waits_closes_pipes
+PASSED tests/test_r1_worker_attempts.py::test_worker_does_not_retry_503[fetch_range]
+PASSED tests/test_r1_worker_attempts.py::test_worker_does_not_retry_503[scan_http_tar]
+PASSED tests/test_r1_loopback_loop.py::test_scan_p2_p3_rust_fetch_bytes_agree
+PASSED tests/test_r1_gate_e_e2e.py::test_rust_scan_drives_p2_p3_rust_fetch
+PASSED tests/test_r1_env_gate.py::test_worker_resolver_explicit_env_is_authoritative
+PASSED tests/test_r1_env_gate.py::test_worker_resolver_fallback_only_returns_existing_files
+PASSED tests/test_r1_env_gate.py::test_r1_suite_skips_and_reports_without_worker
+PASSED tests/test_r1_env_gate.py::test_p4_work_root_is_outside_the_repository
+PASSED tests/test_r1_env_gate.py::test_r1_servers_bind_loopback_only
+PASSED tests/test_r1_env_gate.py::test_r1_test_sources_reference_no_external_hosts
+PASSED tests/test_r1_env_gate.py::test_r1_work_root_fixtures_are_created_under_p4_root
+PASSED tests/test_rust_index_audit.py::test_size_mismatch_rejected
+PASSED tests/test_rust_index_audit.py::test_whole_sha_mismatch_rejected
+PASSED tests/test_rust_index_audit.py::test_duplicate_member_path_rejected
+PASSED tests/test_rust_index_audit.py::test_unaligned_extent_rejected
+PASSED tests/test_rust_index_audit.py::test_extent_out_of_bounds_rejected
+PASSED tests/test_rust_index_audit.py::test_member_sha_mismatch_rejected
+PASSED tests/test_rust_index_audit.py::test_empty_member_payload_rejected
+PASSED tests/test_rust_index_audit.py::test_unparsable_json_rejected
+PASSED tests/test_rust_index_audit.py::test_oversized_json_rejected
+PASSED tests/test_rust_index_audit.py::test_valid_report_stages_and_marker_is_exact
+PASSED tests/test_rust_index_audit.py::test_failed_audit_leaves_no_marker_and_settles_lease
+======================= 56 passed in 237.50s (0:03:57) ========================
+
+EXIT_CODE=0
+END 2026-09-30T10:45:19+08:00

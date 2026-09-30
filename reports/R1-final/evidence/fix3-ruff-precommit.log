@@ -1,0 +1,31 @@
+START 2026-09-30T10:40:54+08:00
+PWD /d/SakuraTool/SakuraPool
+HEAD b7c1bd19463cc08e02aaaab37e90c9b696245531
+HEAD_TREE d13e8bb51ce590aebd8d8a4f2ce5ba24ffd19744
+CMD D:/SakuraTool/SakuraPool-Fix3-20260930a/py312/Scripts/python.exe -m ruff check . 
+CARGO_TARGET_DIR=D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target
+SAKURAPOOL_RUST_WORKER=D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target/release/sakurapool-worker.exe
+PYTHONPATH=<unset>
+reports\R1-final\evidence\fix3_collection_order.py:36:101: E501 Line too long (106 > 100)
+   |
+34 |     if not identical:
+35 |         raise pytest.UsageError("Final Fix3 nodeid multiset changed")
+36 |     print(f"\nFIX3_COLLECTION original={len(original)} ordered={len(ordered)} multiset_equal={identical}")
+   |                                                                                                     ^^^^^^ E501
+37 |     print(f"FIX3_COLLECTION_AUDIT={output}")
+   |
+
+reports\R1-final\evidence\fix3_wheel_loop.py:142:101: E501 Line too long (104 > 100)
+    |
+140 |             print(f"LEDGER={json.dumps(ledger.status(), sort_keys=True)}")
+141 |             assert len(hits) == 2 and hits[0]["range"] is None
+142 |             assert hits[1]["range"] == f"bytes={loc['image_offset']}-{loc['image_offset'] + len(png)-1}"
+    |                                                                                                     ^^^^ E501
+143 |             print(f"HTTP_REQUESTS={json.dumps(hits, sort_keys=True)}")
+144 |     finally:
+    |
+
+Found 2 errors.
+
+EXIT_CODE=1
+END 2026-09-30T10:40:55+08:00

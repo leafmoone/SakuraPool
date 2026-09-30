@@ -1,0 +1,12 @@
+START 2026-09-30T11:42:51+08:00
+PWD /d/SakuraTool/SakuraPool
+HEAD 51ea23a4367cb8f069e930c5ab1882a0a00c8423
+HEAD_TREE f0680c67652afc6cb04a236169ecc37bd425aa2d
+CMD D:/SakuraTool/SakuraPool-Fix3-20260930a/py312/Scripts/python.exe -m ruff check . 
+CARGO_TARGET_DIR=D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target
+SAKURAPOOL_RUST_WORKER=D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target/release/sakurapool-worker.exe
+PYTHONPATH=<unset>
+All checks passed!
+
+EXIT_CODE=0
+END 2026-09-30T11:42:51+08:00

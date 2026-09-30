@@ -1,0 +1,22 @@
+START 2026-09-30T11:41:51+08:00
+PWD /d/SakuraTool/SakuraPool
+HEAD 51ea23a4367cb8f069e930c5ab1882a0a00c8423
+HEAD_TREE f0680c67652afc6cb04a236169ecc37bd425aa2d
+CMD D:/SakuraTool/SakuraPool-Fix3-20260930a/py312/Scripts/python.exe -m ruff check . 
+CARGO_TARGET_DIR=D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target
+SAKURAPOOL_RUST_WORKER=D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target/release/sakurapool-worker.exe
+PYTHONPATH=<unset>
+reports\R1-final\evidence\fix3_verify_binding.py:50:101: E501 Line too long (103 > 100)
+   |
+48 |     wheel = Path("D:/SakuraTool/SakuraPool-Fix3-20260930a/wheels/"
+49 |                  "sakurapool-0.1.0-py3-none-any.whl")
+50 |     files = git("ls-tree", "-r", "--name-only", IMPLEMENTATION, "src/sakurapool").decode().splitlines()
+   |                                                                                                     ^^^ E501
+51 |     compared = 0
+52 |     with zipfile.ZipFile(wheel) as archive:
+   |
+
+Found 1 error.
+
+EXIT_CODE=1
+END 2026-09-30T11:41:52+08:00

@@ -1,0 +1,35 @@
+START 2026-09-30T11:42:52+08:00
+PWD /d/SakuraTool/SakuraPool
+HEAD 51ea23a4367cb8f069e930c5ab1882a0a00c8423
+HEAD_TREE f0680c67652afc6cb04a236169ecc37bd425aa2d
+CMD bash -c set\ -e\;\ git\ diff\ --check\;\ git\ diff\ 51ea23a4367cb8f069e930c5ab1882a0a00c8423\ --exit-code\ --\ src\ rust\ tests\ pyproject.toml\;\ git\ status\ --short\;\ git\ rev-parse\ HEAD\ HEAD\^\{tree\}\;\ git\ ls-remote\ origin\ refs/heads/dev\ refs/heads/main\;\ printf\ \"LOCK_GIT_BLOB_BYTES=\"\;\ git\ cat-file\ -s\ HEAD:rust/Cargo.lock\;\ git\ show\ HEAD:rust/Cargo.lock\ \|\ sha256sum 
+CARGO_TARGET_DIR=D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target
+SAKURAPOOL_RUST_WORKER=D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target/release/sakurapool-worker.exe
+PYTHONPATH=<unset>
+warning: in the working copy of 'reports/P3/raw/ruff.log', LF will be replaced by CRLF the next time Git touches it
+ M reports/P3/raw/ruff.log
+?? P3-Execution-Plan.md
+?? SakuraPool-P2-9ec0519.tar.gz
+?? SakuraPool-P2-final-repair.diff
+?? SakuraPool-P2.diff
+?? agents.md
+?? reports/P3/raw/32mib-runtime-remediation-r4.log
+?? reports/P3/raw/bench-final-r4.log
+?? reports/P3/raw/diff-check.log
+?? reports/P3/raw/full-sha.log
+?? reports/P3/raw/pytest-host-314-r4.log
+?? reports/P3/raw/pytest-wheel-312-r4.log
+?? reports/P4/konachan-selection.patch
+?? reports/P4/real-modelscope-verification.json
+?? reports/R1-final/evidence/
+?? reports/R1-final/fix3-plan.md
+?? todo.md
+51ea23a4367cb8f069e930c5ab1882a0a00c8423
+f0680c67652afc6cb04a236169ecc37bd425aa2d
+51ea23a4367cb8f069e930c5ab1882a0a00c8423	refs/heads/dev
+edc72fbaaddc4dc8f9865ddfa576b737c7b15f5a	refs/heads/main
+LOCK_GIT_BLOB_BYTES=35107
+b19a8381aed8e30effea200ffcb4c64acbc2c33a1098ff69aa0ee94961d9da6e *-
+
+EXIT_CODE=0
+END 2026-09-30T11:42:55+08:00
