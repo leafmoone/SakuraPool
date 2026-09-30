@@ -9,7 +9,8 @@
 - 首个且唯一 R2 产品/测试实现提交，以及 `R2_IMPLEMENTATION_END_SHA = b2af1f1b6049129a27dcb9e7a8498c50eda56791`，tree `3e0c4ec02257c364719095942a81a3db0360311e`。
 - 实现提交主题 `feat(storage): wire gated Rust ModelScope transport`，18 个显式授权路径，已经正常 `git push origin dev`，`git ls-remote` 核验远端 dev 等于该完整 SHA。
 - `R2_SUBMISSION_SHA` 是随后仅 `reports/R2/` 文档/验证证据提交：为避免报告嵌入自身 SHA，以 `git log -1 --format=%H -- reports/R2/report.md` 解析；最终回复给出实际完整值以及全部中间提交、最终远端 dev 核验。
-- 本轮 dev 产品提交仅上述一项；后续 SUBMISSION 只提交报告和必要证据，不改变已测产品/测试 tree。
+- 全部中间提交除上述实现外，还有初始证据提交 `27a0fb49e79d4d50c1e120a331887b95af23d65e`（tree `f2b960af8b010c43ac3a9fc8bb3d83dd43a7ed3e`），已正常push；最终SUBMISSION是随后日志字节保留/报告修正提交，未amend已推提交。
+- 初始证据提交后实际原字节比较发现两份log在首次stage时被autocrlf归一化；新增-text规则后的普通add没有重入index。只对这两个本轮log执行`git add --renormalize <explicit paths>`，核对index字节等于真实capture后新提交；不改日志内容，不增加hash，不改产品/测试tree。两份result JSON原字节本就匹配。
 - local main、origin/main 和远端 main 保持 `edc72fbaaddc4dc8f9865ddfa576b737c7b15f5a`。唯一 Git 写入方为 swe，审查方只读。
 - 第一次 commit 因 user identity 未配置 exit128，没有产生提交；读取历史 Author/Committer 后仅通过本条命令的 `git -c` 沿用历史身份，没有改全局配置、amend、reset、强推或历史重写。
 - 保留既有 dirty `reports/P3/raw/ruff.log` 及未知/untracked 工作文件、旧 diff/tar/报告和 `todo.md`，没有因 push 授权把它们纳入提交。MEMORY.md 仍 ignored，不提交。

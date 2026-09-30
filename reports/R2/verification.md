@@ -8,6 +8,13 @@ Final full Python regression and necessary installed-wheel verification have now
 completed on this product/test source. Earlier failed/unknown attempts below are
 preserved and not counted as passes. P4_COMPLETE = NO; production binding blocked.
 
+Initial evidence commit `27a0fb49e79d4d50c1e120a331887b95af23d65e` was normally
+pushed. A final raw-byte comparison found both logs were initially staged with
+CRLF normalization before the local -text attributes existed. Explicit-path
+`git add --renormalize` restaged the actual original capture bytes under -text;
+index comparisons now match. Result JSON already matched. A new evidence-only
+submission preserves this correction, with no amend, source changes or new hashes.
+
 ## Latest independent Rust verification
 
 Environment: rustc/cargo 1.98.1, x86_64-pc-windows-gnu;
