@@ -104,12 +104,15 @@ def twohop():
                 return
             ranged = self.headers.get("Range")
             raw = state["raw"]
+            raw_file = state.get("file")
+            raw_size = raw_file.stat().st_size if raw_file else len(raw)
             if ranged:
                 start, end = [int(n) for n in ranged.removeprefix("bytes=").split("-")]
-                body = raw[start : end + 1]
+                body = raw[start : end + 1] if raw_file is None else None
                 status = 200 if state["mode"] == "200" else 206
             else:
-                body = raw
+                body = raw if raw_file is None else None
+                start, end = 0, raw_size - 1
                 status = 200
             if state["mode"] == "cdn-redirect":
                 self.send_response(302)
@@ -118,10 +121,11 @@ def twohop():
                 self.end_headers()
                 return
             self.send_response(status)
-            total = len(raw) + (1 if state["mode"] == "wrong-size" else 0)
+            total = raw_size + (1 if state["mode"] == "wrong-size" else 0)
             if ranged:
                 self.send_header("Content-Range", f"bytes {start}-{end}/{total}")
-            length = len(body) + (1 if state["mode"] == "long" else 0)
+            length = end - start + 1 if raw_file else len(body)
+            length += 1 if state["mode"] == "long" else 0
             self.send_header("Content-Length", str(length))
             if state["mode"] == "duplicate":
                 self.send_header("Content-Length", str(length))
@@ -135,7 +139,17 @@ def twohop():
                 else '"r2-bound"',
             )
             self.end_headers()
-            if state["mode"] == "short":
+            if raw_file:
+                left = end - start + 1
+                with raw_file.open("rb") as handle:
+                    handle.seek(start)
+                    while left:
+                        chunk = handle.read(min(left, 65536))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        left -= len(chunk)
+            elif state["mode"] == "short":
                 self.wfile.write(body[:-1])
                 self.close_connection = True
             else:
@@ -288,10 +302,18 @@ def test_range_headers_reject_without_body_or_fallback(twohop, mode):
     assert ledger.status()["body"] == (0 if mode == "cdn-redirect" else 2)
     assert ledger.status()["inflight"] == 0
     diagnostic = transport.last_result["diagnostic"]
-    assert set(diagnostic) == {"phase", "http_status", "body_bytes_observed", "attempts",
-                               "accounting_complete", "content_length_present",
-                               "content_range_present", "etag_present", "etag_is_strong",
-                               "content_encoding_present"}
+    assert set(diagnostic) == {
+        "phase",
+        "http_status",
+        "body_bytes_observed",
+        "attempts",
+        "accounting_complete",
+        "content_length_present",
+        "content_range_present",
+        "etag_present",
+        "etag_is_strong",
+        "content_encoding_present",
+    }
     assert diagnostic["phase"] == "cdn"
     assert diagnostic["http_status"] == (
         200 if mode == "200" else 302 if mode == "cdn-redirect" else 206
@@ -415,7 +437,10 @@ def test_two_admin_modes_same_file_audit_and_stage_contract(twohop, mode):
     with closing(sqlite3.connect(result.database)) as db:
         rows = db.execute("select name,kind,size from members order by name").fetchall()
     assert rows == [("one.json", "json", 15), ("one.png", "image", 15)]
-    assert not list(ledger.root.glob("rust-transfer-*"))
+    retained = list(ledger.root.glob("rust-transfer-*"))
+    assert bool(retained) == (mode == "download-then-scan")
+    if retained:
+        assert (retained[0] / "body").stat().st_size == obj.object_size
     assert ledger.status()["inflight"] == 0
     # Exact same audited P2/P3/package chain in both administrator modes.
     from sakurapool.runtime.compiler import compile_runtime
@@ -442,8 +467,11 @@ def test_two_admin_modes_same_file_audit_and_stage_contract(twohop, mode):
         package / "durable",
         adapter,
         audit_output=package / "audit/members.json",
+        production_transport=transport,
     )
     assert summary["samples"] == 1 and summary["errors"] == 0
+    transport.release_committed_downloads(package / "durable")
+    assert not list(ledger.root.glob("rust-transfer-*"))
     compile_runtime(load_p2_inventory(package / "durable"), package / "runtime")
     with RuntimeSnapshot.open(package / "runtime", full_verify=True) as rt:
         assert rt.manifest["runtime_format_version"] == 2
@@ -546,13 +574,19 @@ def test_administrator_cli_modes_obey_combined_capacity_before_metadata(
     monkeypatch.setattr(production_cli, "load_profile", lambda _: (config, obj, transport))
     called = []
     monkeypatch.setattr(production_cli, "verify_tree_object", lambda *_: called.append(True))
-    ledger.limits["disk"] = min(ledger.limits["disk"], ledger.status()["disk"] + (2 << 30))
+    from sakurapool.storage.production_resources import ProductionFootprint
+    from sakurapool.storage.remote_index import OFFLINE_BUILD_ALLOWANCE
+
+    peak = ProductionFootprint.admit(mode, obj.object_size).admin_peak(OFFLINE_BUILD_ALLOWANCE)
     before = len(state["calls"])
     plan = ledger.root / "admin-plan.json"
     adapter = DatasetAdapter("r2", "synthetic")
     stage = ledger.root / "admin-stage"
     plan.write_text(json.dumps({"adapter": asdict(adapter), "stage": str(stage)}))
     durable = ledger.root / "admin-durable"
+    # New bounded implementation fits within old2GiB test slack. Reject at its
+    # actual phase bound instead, without weakening the before-HTTP guarantee.
+    ledger.limits["disk"] = ledger.status()["disk"] + peak - 1
     assert (
         main(
             [
@@ -583,7 +617,8 @@ def test_administrator_combined_large_working_set_blocks_before_metadata(twohop,
     from sakurapool.storage import production_cli
 
     state, ledger, transport, obj = twohop
-    obj = replace(transport.verify_conditions(obj), object_size=8 << 20)
+    # Download3GiB exceeds4GiB at the durable live phase, independently of RAM.
+    obj = replace(transport.verify_conditions(obj), object_size=3 << 30)
     ledger.record_condition_proof(proof_key(obj, test=True), "0" * 64)
     monkeypatch.setattr(production_cli, "load_profile", lambda _: ({}, obj, transport))
     called = []
@@ -599,7 +634,7 @@ def test_administrator_combined_large_working_set_blocks_before_metadata(twohop,
         )
     )
     with pytest.raises(Exception) as error:
-        production_cli.scan(None, plan, ledger.root / "durable", "remote-stream-scan")
+        production_cli.scan(None, plan, ledger.root / "durable", "download-then-scan")
     from sakurapool.storage.budget import BudgetExceeded
 
     assert isinstance(error.value, BudgetExceeded)
@@ -655,10 +690,14 @@ def test_partial_or_invalid_fullstream_never_marks_stage_complete(twohop, mode):
             bound, DatasetAdapter("r2", "synthetic"), ledger.root / "bad-stage", mode=mode
         )
     assert not (ledger.root / "bad-stage/stage.complete").exists()
-    assert not list(ledger.root.glob("rust-transfer-*"))
+    retained = list(ledger.root.glob("rust-transfer-*"))
     if mode == "download-then-scan":
+        assert len(retained) == 1
+        assert (retained[0] / "body").read_bytes() == state["raw"]
+        assert transport._retained_download  # Invalid TAR is not permission to release spool.
         assert ledger.status()["body"] - before == obj.object_size
     else:
+        assert not retained
         assert ledger.status()["body"] - before == obj.object_size + 1  # early parser stop: unknown
 
 

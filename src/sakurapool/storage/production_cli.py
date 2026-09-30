@@ -114,8 +114,8 @@ def fetch(config_path, package_root, record_id, output):
 def scan(config_path, plan_path, output, mode):
     from sakurapool.registry import DatasetAdapter
 
-    from .production import REPORT_CAP
-    from .remote_index import OFFLINE_BUILD_ALLOWANCE, OFFLINE_STAGE_ALLOWANCE, write_staged_v4
+    from .production_resources import ProductionFootprint
+    from .remote_index import OFFLINE_BUILD_ALLOWANCE, write_staged_v4
 
     config, obj, transport = load_profile(config_path)
     if Path(plan_path).stat().st_size > 65536:
@@ -140,22 +140,13 @@ def scan(config_path, plan_path, output, mode):
     adapter = DatasetAdapter(**plan["adapter"])
     transport.register(obj)
     records = min(100_000, max(1, obj.object_size // 512))
-    preflight = transport.ledger.reserve(
-        Reservation(
-            disk=OFFLINE_STAGE_ALLOWANCE
-            + OFFLINE_BUILD_ALLOWANCE
-            + obj.object_size
-            + REPORT_CAP
-            + 8192,
-            inflight=64 * obj.object_size + (4 << 20),
-            records=records,
-        )
-    )
+    footprint = ProductionFootprint.admit(mode, obj.object_size)
+    preflight = transport.ledger.reserve(Reservation(
+        disk=footprint.admin_peak(OFFLINE_BUILD_ALLOWANCE),
+        inflight=footprint.memory, records=records))
     transport.ledger.settle(preflight)
-    # Durable-build capacity remains reserved while stage/download peaks run.
-    build_lease = transport.ledger.reserve(
-        Reservation(disk=OFFLINE_BUILD_ALLOWANCE, records=records)
-    )
+    # No fictitious sum of historical phases. Reserve durable only when it starts.
+    build_lease = None
     delegated = False
     try:
         verify_tree_object(config, obj, transport)
@@ -168,6 +159,8 @@ def scan(config_path, plan_path, output, mode):
             obj.validator,
             repository=obj.repo_id,
         )
+        build_lease = transport.ledger.reserve(
+            Reservation(disk=OFFLINE_BUILD_ALLOWANCE, records=records))
         delegated = True
         summary = write_staged_v4(
             transport.ledger,
@@ -177,14 +170,15 @@ def scan(config_path, plan_path, output, mode):
             production_transport=transport,
             _build_lease=build_lease,
         )
+        transport.release_committed_downloads(Path(output))
     finally:
-        if not delegated:
+        if not delegated and build_lease is not None:
             transport.ledger.settle(build_lease)
     return {
         "status": "indexed",
         "mode": mode,
         "summary": summary,
         "durable": str(output),
-        "whole_tar_temporary_disk_spool": True,
+        "whole_tar_temporary_disk_spool": mode == "download-then-scan",
         "runtime_compile": "separately scheduled",
     }

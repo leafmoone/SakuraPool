@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import stat
 from contextlib import closing
 from pathlib import Path
 from posixpath import splitext
@@ -53,12 +54,12 @@ class FileArchive:
 
     def __getitem__(self, span):
         start, end, _ = span.indices(self.size)
-        if end-start > MAX_JSON_PAYLOAD_BYTES:
+        if end - start > MAX_JSON_PAYLOAD_BYTES:
             raise RustScanAuditError("audit extent exceeds bounded JSON read")
         with self.path.open("rb") as f:
             f.seek(start)
-            data = f.read(end-start)
-            if len(data) != end-start:
+            data = f.read(end - start)
+            if len(data) != end - start:
                 raise RustScanAuditError("archive truncated during audit")
             return data
 
@@ -67,7 +68,7 @@ def _digest(raw, start, size):
     digest = hashlib.sha256()
     while size:
         n = min(size, 65536)
-        digest.update(raw[start:start+n])
+        digest.update(raw[start : start + n])
         start += n
         size -= n
     return digest.hexdigest()
@@ -144,7 +145,8 @@ def build_stage_from_scan(
     adapter: DatasetAdapter,
     stage_dir: Path,
     ledger: BudgetLedger,
-    *, _stage_lease: str | None = None,
+    *,
+    _stage_lease: str | None = None,
 ) -> StagedObject:
     """Populate a completed stage from an audited *Rust scan report*.
 
@@ -160,45 +162,75 @@ def build_stage_from_scan(
         if _stage_lease is not None:
             ledger.settle(_stage_lease)
         raise
-    return _write_stage(scan, rows, bound, adapter, stage_dir, ledger,
-                        _stage_lease=_stage_lease)
+    return _write_stage(scan, rows, bound, adapter, stage_dir, ledger, _stage_lease=_stage_lease)
 
 
 def _write_stage(
     scan: Mapping[str, Any],
     rows: Iterable[tuple[str, str, int, int, str, bytes | None]],
-    bound: BoundObject, adapter: DatasetAdapter,
-    stage_dir: Path, ledger: BudgetLedger | None,
-    *, _stage_lease: str | None = None,
+    bound: BoundObject,
+    adapter: DatasetAdapter,
+    stage_dir: Path,
+    ledger: BudgetLedger | None,
+    *,
+    _stage_lease: str | None = None,
+    _max_pages: int = MAX_STAGE_PAGES,
 ) -> StagedObject:
     images = 0
     member_count = 0
     lease = _stage_lease or (
-        ledger.reserve(Reservation(disk=OFFLINE_STAGE_ALLOWANCE)) if ledger else None)
+        ledger.reserve(Reservation(disk=OFFLINE_STAGE_ALLOWANCE)) if ledger else None
+    )
 
     try:
         stage_dir.mkdir(exist_ok=False)
         db_path = stage_dir / "members.sqlite"
         with closing(sqlite3.connect(db_path)) as db:
-            db.execute("PRAGMA journal_mode=DELETE")
+            # Production builds fresh disposable private DBs; failure never publishes marker.
+            journal = "OFF" if callable(rows) else "DELETE"
+            if db.execute(f"PRAGMA journal_mode={journal}").fetchone()[0] != journal.lower():
+                raise RustScanAuditError("staging journal configuration unavailable")
             db.execute("PRAGMA page_size=4096")
-            if (
-                db.execute(f"PRAGMA max_page_count={MAX_STAGE_PAGES}").fetchone()[0]
-                > MAX_STAGE_PAGES
-            ):
+            if db.execute(f"PRAGMA max_page_count={_max_pages}").fetchone()[0] > _max_pages:
                 raise AssertionError("staging SQLite page cap not enforceable")
             db.execute("PRAGMA synchronous=FULL")
+            db.execute("PRAGMA cache_size=-2048")
+            db.execute("PRAGMA mmap_size=0")
+            # Fixed INSERT VALUES / primary-key operations have no sorter/temp B-tree.
+            db.execute("PRAGMA temp_store=MEMORY")
             db.execute(
                 "CREATE TABLE members (name TEXT NOT NULL PRIMARY KEY,"
                 "kind TEXT NOT NULL, offset_data INTEGER NOT NULL,"
                 "size INTEGER NOT NULL, sha256 TEXT NOT NULL,"
                 "json_payload BLOB)"
             )
-            for row in rows:
+            if callable(rows):
+                # Empty-table index creation has no unbounded sort; inserts maintain order.
+                db.execute("CREATE INDEX members_extents ON members(offset_data,name)")
+            source = rows(db) if callable(rows) else rows
+            for row in source:
                 db.execute("INSERT INTO members VALUES (?,?,?,?,?,?)", row)
                 member_count += 1
                 images += row[1] == "image"
             db.commit()
+        # Journal-OFF private DB must be durably synced BEFORE hash/marker publication.
+        with db_path.open("r+b") as handle:
+            info = os.fstat(handle.fileno())
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_nlink != 1
+                or db_path.is_symlink()
+                or is_reparse(db_path)
+            ):
+                raise RustScanAuditError("staging database ownership changed before fsync")
+            os.fsync(handle.fileno())
+            after = db_path.stat(follow_symlinks=False)
+            if (info.st_dev, info.st_ino, info.st_size) != (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+            ):
+                raise RustScanAuditError("staging database replaced during fsync")
         database_hash = _file_sha256(db_path)
         adapter_hash = hashlib.sha256(
             json.dumps(adapter.to_dict(), sort_keys=True, separators=(",", ":")).encode()
@@ -225,7 +257,8 @@ def _write_stage(
             ledger.settle(lease)
         return StagedObject(db_path, scan["whole_sha256"], bound.size, member_count, images)
     except BaseException:
-        if ledger is not None and lease is not None:
+        # A retained partial stage is still job-owned disk, not refundable capacity.
+        if ledger is not None and lease is not None and not stage_dir.exists():
             ledger.settle(lease)
         raise
 
@@ -239,8 +272,12 @@ def _file_sha256(path: Path) -> str:
 
 
 def build_stage_from_file_scan(
-    scan: Mapping[str, Any], tar_path: Path, bound: BoundObject,
-    adapter: DatasetAdapter, stage_dir: Path, ledger: BudgetLedger | None = None,
+    scan: Mapping[str, Any],
+    tar_path: Path,
+    bound: BoundObject,
+    adapter: DatasetAdapter,
+    stage_dir: Path,
+    ledger: BudgetLedger | None = None,
 ) -> StagedObject:
     """Stage a trusted local-worker report, reading only JSON payload extents.
 
@@ -261,12 +298,21 @@ def build_stage_from_file_scan(
         if member["kind"] != "file":
             continue
         start, size = member["offset"], member["size"]
-        if (type(start) is not int or type(size) is not int or start % 512
-                or start < previous_end or size <= 0 or start + size > before.st_size):
+        if (
+            type(start) is not int
+            or type(size) is not int
+            or start % 512
+            or start < previous_end
+            or size <= 0
+            or start + size > before.st_size
+        ):
             raise RustScanAuditError(f"invalid member extent: {name!r}")
         digest = member["sha256"]
-        if (not isinstance(digest, str) or len(digest) != 64
-                or any(c not in "0123456789abcdef" for c in digest)):
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(c not in "0123456789abcdef" for c in digest)
+        ):
             raise RustScanAuditError(f"invalid member SHA256: {name!r}")
         previous_end = start + size
 
@@ -284,15 +330,26 @@ def build_stage_from_file_scan(
                         raise RustScanAuditError("JSON exceeds adapter.max_json_bytes")
                     handle.seek(member["offset"])
                     payload = handle.read(member["size"])
-                    if (len(payload) != member["size"] or
-                            hashlib.sha256(payload).hexdigest() != member["sha256"]):
+                    if (
+                        len(payload) != member["size"]
+                        or hashlib.sha256(payload).hexdigest() != member["sha256"]
+                    ):
                         raise RustScanAuditError("JSON extent hash mismatch")
                     json.loads(payload)
-                yield (member["path"], "json" if suffix == ".json" else "image",
-                       member["offset"], member["size"], member["sha256"], payload)
+                yield (
+                    member["path"],
+                    "json" if suffix == ".json" else "image",
+                    member["offset"],
+                    member["size"],
+                    member["sha256"],
+                    payload,
+                )
             after = tar_path.stat()
             if (before.st_size, before.st_mtime_ns, before.st_ino) != (
-                    after.st_size, after.st_mtime_ns, after.st_ino):
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ino,
+            ):
                 raise RustScanAuditError("local TAR changed during staging")
 
     return _write_stage(scan, rows(), bound, adapter, stage_dir, ledger)

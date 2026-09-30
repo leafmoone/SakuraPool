@@ -300,16 +300,8 @@ fn dispatch(request: &Request) -> Result<serde_json::Value, &'static str> {
         } else {
             transfer.object.object_size
         };
-        let required_disk = bytes.saturating_add(if transfer.mode == "range" {
-            0
-        } else {
-            16 * 1024 * 1024
-        });
-        let required_memory = if transfer.mode == "range" {
-            bytes.saturating_mul(4).saturating_add(65536)
-        } else {
-            bytes.saturating_mul(64).saturating_add(4 * 1024 * 1024)
-        };
+        let (required_memory, required_disk) =
+            sakurapool_rust::production::footprint(&transfer.mode, bytes)?;
         if request.budget.body < bytes.saturating_add(1)
             || request.budget.attempts < 2
             || request.budget.disk < required_disk
@@ -321,6 +313,7 @@ fn dispatch(request: &Request) -> Result<serde_json::Value, &'static str> {
         let outcome = sakurapool_rust::production::run(transfer);
         let mut value = outcome.result;
         value["diagnostic"] = outcome.accounting.diagnostic();
+        value["observation"] = outcome.accounting.observation();
         value["accounting"] = serde_json::to_value(outcome.accounting).map_err(|_| "accounting")?;
         if let Some(error) = outcome.error {
             value["production_error"] = serde_json::json!(error);

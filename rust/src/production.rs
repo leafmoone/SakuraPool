@@ -35,6 +35,35 @@ pub struct Transfer {
     pub output_name: String,
     pub report_name: Option<String>,
     pub mode: String,
+    #[serde(default = "default_json_limit")]
+    pub json_limit: u64,
+}
+fn default_json_limit() -> u64 {
+    crate::scan_sidecar::JSON_CAP
+}
+
+/// Capacity model reflects retained artifacts, not the remote object's RAM size.
+pub fn footprint(mode: &str, bytes: u64) -> Result<(u64, u64), &'static str> {
+    match mode {
+        "range" if bytes <= 8 * 1024 * 1024 => Ok((32 * 1024 * 1024 + bytes * 2, bytes)),
+        "download-then-scan" => Ok((
+            128 * 1024 * 1024,
+            bytes
+                .checked_add(
+                    crate::scan_sidecar::RECORD_CAP
+                        + crate::scan_sidecar::METADATA_CAP
+                        + crate::scan_sidecar::FOOTER_CAP,
+                )
+                .ok_or("production_budget")?,
+        )),
+        "remote-stream-scan" => Ok((
+            128 * 1024 * 1024,
+            crate::scan_sidecar::RECORD_CAP
+                + crate::scan_sidecar::METADATA_CAP
+                + crate::scan_sidecar::FOOTER_CAP,
+        )),
+        _ => Err("production_budget"),
+    }
 }
 #[derive(Default, Serialize)]
 pub struct Accounting {
@@ -55,11 +84,27 @@ pub struct Accounting {
     pub etag_is_strong: bool,
     #[serde(skip)]
     pub content_encoding_present: bool,
+    #[serde(skip)]
+    pub origin_http_status: Option<u16>,
+    #[serde(skip)]
+    pub cdn_http_status: Option<u16>,
+    #[serde(skip)]
+    pub cdn_content_length: Option<u64>,
 }
 impl Accounting {
     fn observe_headers(&mut self, response: &Response) {
         self.http_status = Some(response.status().as_u16());
         let h = response.headers();
+        if self.phase == "origin" {
+            self.origin_http_status = self.http_status;
+        }
+        if self.phase == "cdn" {
+            self.cdn_http_status = self.http_status;
+            self.cdn_content_length = h
+                .get("content-length")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok());
+        }
         self.content_length_present = h.contains_key("content-length");
         self.content_range_present = h.contains_key("content-range");
         self.etag_present = h.contains_key("etag");
@@ -68,6 +113,10 @@ impl Accounting {
             .and_then(|v| v.to_str().ok())
             .is_some_and(validator);
         self.content_encoding_present = h.contains_key("content-encoding");
+    }
+    pub fn observation(&self) -> serde_json::Value {
+        serde_json::json!({"origin_http_status":self.origin_http_status,
+            "cdn_http_status":self.cdn_http_status,"content_length":self.cdn_content_length})
     }
     pub fn diagnostic(&self) -> serde_json::Value {
         serde_json::json!({"phase":self.phase,"http_status":self.http_status,
@@ -339,9 +388,10 @@ fn file(root: &Path, name: &str) -> Result<File, &'static str> {
 }
 struct CountTee<'a> {
     response: Response,
-    file: File,
+    file: Option<File>,
     max: u64,
     count: &'a mut u64,
+    complete: &'a mut bool,
 }
 impl Read for CountTee<'_> {
     fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
@@ -358,14 +408,35 @@ impl Read for CountTee<'_> {
         if *self.count > self.max {
             return Err(std::io::Error::other("body_limit"));
         }
-        self.file.write_all(&b[..n])?;
+        if let Some(file) = self.file.as_mut() {
+            file.write_all(&b[..n])?;
+        }
+        if n == 0 {
+            *self.complete = true;
+        }
         Ok(n)
     }
 }
 fn transfer(t: &Transfer, a: &mut Accounting) -> Result<serde_json::Value, &'static str> {
     // Validate output ownership before making any request. Files remain job-owned until Python audits.
     let url = origin(t)?;
-    let mut output = file(&t.output_root, &t.output_name)?;
+    let mut output = if t.mode == "remote-stream-scan" {
+        None
+    } else {
+        Some(file(&t.output_root, &t.output_name)?)
+    };
+    let mut sidecars = if t.mode == "range" {
+        None
+    } else {
+        Some(crate::scan_sidecar::SidecarObserver::new(
+            file(
+                &t.output_root,
+                t.report_name.as_deref().ok_or("report_missing")?,
+            )?,
+            file(&t.output_root, "metadata.bin")?,
+            t.json_limit,
+        )?)
+    };
     let origin_client = client()?;
     let mut req = origin_client.get(url).header("accept-encoding", "identity");
     let range = format!("bytes={}-{}", t.start, t.start + t.length.saturating_sub(1));
@@ -440,7 +511,11 @@ fn transfer(t: &Transfer, a: &mut Accounting) -> Result<serde_json::Value, &'sta
         if status != 412 || !a.complete {
             return Err("conditional_unsupported");
         }
-        output.sync_all().map_err(|_| "output_io")?;
+        output
+            .as_mut()
+            .ok_or("output_io")?
+            .sync_all()
+            .map_err(|_| "output_io")?;
         return Ok(serde_json::json!({"status":412,"cdn_host":target.host_str(),"bytes":0}));
     }
     if status != if t.mode == "range" { 206 } else { 200 } {
@@ -486,7 +561,7 @@ fn transfer(t: &Transfer, a: &mut Accounting) -> Result<serde_json::Value, &'sta
     a.complete = false;
     a.phase = "body";
     if t.mode == "range" {
-        let mut bytes = Vec::new();
+        let mut hash = Sha256::new();
         let mut chunk = [0u8; 65536];
         while a.body < size + 1 {
             let cap = ((size + 1 - a.body) as usize).min(chunk.len());
@@ -495,77 +570,76 @@ fn transfer(t: &Transfer, a: &mut Accounting) -> Result<serde_json::Value, &'sta
                 break;
             }
             a.body += n as u64;
-            bytes.extend_from_slice(&chunk[..n]);
+            hash.update(&chunk[..n]);
+            output
+                .as_mut()
+                .ok_or("output_io")?
+                .write_all(&chunk[..n])
+                .map_err(|_| "output_io")?;
         }
         a.complete = true;
         if a.body != size {
             return Err("body_length");
         }
         output
-            .write_all(&bytes)
-            .and_then(|_| output.sync_all())
+            .as_mut()
+            .ok_or("output_io")?
+            .sync_all()
             .map_err(|_| "output_io")?;
         return Ok(
-            serde_json::json!({"bytes":a.body,"sha256":format!("{:x}",Sha256::digest(&bytes)),"etag":etag,"status":status,"cdn_host":target.host_str()}),
+            serde_json::json!({"bytes":a.body,"sha256":format!("{:x}",hash.finalize()),"etag":etag,"status":status,"cdn_host":target.host_str()}),
         );
     }
-    a.phase = "scan";
+    let limits = crate::ScanLimits {
+        max_bytes: size,
+        max_members: 100_000,
+    };
+    let observer = sidecars.as_mut().ok_or("report_missing")?;
     let report = if t.mode == "remote-stream-scan" {
-        let mut tee = CountTee {
+        a.phase = "scan";
+        let mut counted = CountTee {
             response: r,
-            file: output,
+            file: None,
             max: size,
             count: &mut a.body,
+            complete: &mut a.complete,
         };
-        let report = crate::scan_tar_reader(
-            &mut tee,
-            &crate::ScanLimits {
-                max_bytes: size,
-                max_members: 100_000,
-            },
-        )
-        .map_err(|_| "scan_failed")?;
-        tee.file.sync_all().map_err(|_| "output_io")?;
-        report
+        crate::scan_tar_reader_observed(&mut counted, &limits, observer)
+            .map_err(|_| "scan_failed")?
     } else {
+        a.phase = "body";
         let mut tee = CountTee {
             response: r,
             file: output,
             max: size,
             count: &mut a.body,
+            complete: &mut a.complete,
         };
         std::io::copy(&mut tee, &mut std::io::sink()).map_err(|_| "body_io")?;
-        tee.file.sync_all().map_err(|_| "output_io")?;
+        tee.file
+            .as_mut()
+            .ok_or("output_io")?
+            .sync_all()
+            .map_err(|_| "output_io")?;
         drop(tee);
-        a.complete = true; // EOF is known even when the later local scan rejects.
-        crate::scan_tar_reader(
+        a.phase = "scan";
+        crate::scan_tar_reader_observed(
             File::open(t.output_root.join(&t.output_name)).map_err(|_| "output_io")?,
-            &crate::ScanLimits {
-                max_bytes: size,
-                max_members: 100_000,
-            },
+            &limits,
+            observer,
         )
         .map_err(|_| "scan_failed")?
     };
-    a.complete = true;
-    if a.body != size || report.size != size {
+    if a.body != size || report.size != size || !a.complete {
         return Err("body_length");
     }
-    let report_bytes = serde_json::to_vec(&report).map_err(|_| "report_failed")?;
-    if report_bytes.len() > 16 * 1024 * 1024 {
-        return Err("report_limit");
-    }
-    let mut report_file = file(
-        &t.output_root,
-        t.report_name.as_deref().ok_or("report_missing")?,
-    )?;
-    report_file
-        .write_all(&report_bytes)
-        .and_then(|_| report_file.sync_all())
-        .map_err(|_| "report_io")?;
-    Ok(
-        serde_json::json!({"bytes":a.body,"sha256":report.whole_sha256,"etag":etag,"status":status,"cdn_host":target.host_str(),"report_bytes":report_bytes.len()}),
-    )
+    let mut result = sidecars.take().ok_or("report_missing")?.finish(&report)?;
+    result["bytes"] = serde_json::json!(a.body);
+    result["sha256"] = serde_json::json!(report.whole_sha256);
+    result["etag"] = serde_json::json!(etag);
+    result["status"] = serde_json::json!(status);
+    result["cdn_host"] = serde_json::json!(target.host_str());
+    Ok(result)
 }
 pub fn run(t: Transfer) -> Outcome {
     let mut accounting = Accounting {

@@ -7,6 +7,7 @@
 
 mod http;
 pub mod production;
+pub mod scan_sidecar;
 pub use http::{
     http_request, HttpBody, HttpOp, HttpPolicy, HttpResponse, HTTP_MAX_HEADER_BYTES,
     HTTP_MAX_RANGE_BYTES,
@@ -334,11 +335,58 @@ fn member_path(bytes: &[u8]) -> Result<String, &'static str> {
 /// fine - nothing is ever re-read. Fail-closed on truncation, checksum
 /// errors, nonzero tails, any non-regular/non-directory member, and any
 /// bound exceeded (checked as bytes flow).
+pub trait ScanObserver {
+    fn begin(
+        &mut self,
+        _path: &str,
+        _kind: MemberKind,
+        _offset: u64,
+        _size: u64,
+    ) -> Result<(), &'static str> {
+        Ok(())
+    }
+    fn chunk(&mut self, _bytes: &[u8]) -> Result<(), &'static str> {
+        Ok(())
+    }
+    fn end(&mut self, member: TarMember) -> Result<(), &'static str>;
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TarScanSummary {
+    pub whole_sha256: String,
+    pub size: u64,
+    pub member_count: u64,
+    pub trailing_bytes: u64,
+}
+
 pub fn scan_tar_reader<R: Read>(reader: R, limits: &ScanLimits) -> Result<TarScan, &'static str> {
+    struct Collect(Vec<TarMember>);
+    impl ScanObserver for Collect {
+        fn end(&mut self, member: TarMember) -> Result<(), &'static str> {
+            self.0.push(member);
+            Ok(())
+        }
+    }
+    let mut collect = Collect(Vec::new());
+    let summary = scan_tar_reader_observed(reader, limits, &mut collect)?;
+    Ok(TarScan {
+        whole_sha256: summary.whole_sha256,
+        size: summary.size,
+        trailing_bytes: summary.trailing_bytes,
+        members: collect.0,
+    })
+}
+
+/// Same scanner, borrowed bounded observer; no retained member vector.
+pub fn scan_tar_reader_observed<R: Read, O: ScanObserver>(
+    reader: R,
+    limits: &ScanLimits,
+    observer: &mut O,
+) -> Result<TarScanSummary, &'static str> {
     let (reader, bytes, over_limit) = HashCountReader::new(reader, limits.max_bytes);
     let mut archive = tar::Archive::new(reader);
 
-    let mut members: Vec<TarMember> = Vec::new();
+    let mut member_count = 0u64;
     let mut gnu_path: Option<Vec<u8>> = None;
     let mut pax_path: Option<Vec<u8>> = None;
     let mut pax_size: Option<u64> = None;
@@ -352,7 +400,7 @@ pub fn scan_tar_reader<R: Read>(reader: R, limits: &ScanLimits) -> Result<TarSca
         let entries = archive.entries().map_err(|_| "corrupt_archive")?.raw(true);
         for entry in entries {
             let mut entry = entry.map_err(|_| "corrupt_archive")?;
-            if (members.len() as u64) >= limits.max_members {
+            if member_count >= limits.max_members {
                 return Err("limit_exceeded");
             }
             let kind = entry.header().entry_type();
@@ -437,6 +485,7 @@ pub fn scan_tar_reader<R: Read>(reader: R, limits: &ScanLimits) -> Result<TarSca
                     if declared > limits.max_bytes {
                         return Err("limit_exceeded");
                     }
+                    observer.begin(&path, MemberKind::File, offset, declared)?;
                     let mut member_hasher = StreamingSha256::new();
                     let mut read: u64 = 0;
                     let mut buffer = [0u8; 64 * 1024];
@@ -451,6 +500,7 @@ pub fn scan_tar_reader<R: Read>(reader: R, limits: &ScanLimits) -> Result<TarSca
                             return Err("corrupt_archive");
                         }
                         member_hasher.update(&buffer[..n]);
+                        observer.chunk(&buffer[..n])?;
                     }
                     if over_limit.load(Ordering::SeqCst) {
                         return Err("limit_exceeded");
@@ -458,29 +508,31 @@ pub fn scan_tar_reader<R: Read>(reader: R, limits: &ScanLimits) -> Result<TarSca
                     if read != declared {
                         return Err("truncated_member");
                     }
-                    members.push(TarMember {
+                    observer.end(TarMember {
                         path,
                         kind: MemberKind::File,
                         offset,
                         size: declared,
                         sha256: Some(member_hasher.finish()),
-                    });
+                    })?;
                 }
                 tar::EntryType::Directory => {
                     if entry.size() != 0 {
                         return Err("unsupported_member");
                     }
-                    members.push(TarMember {
+                    observer.begin(&path, MemberKind::Dir, offset, 0)?;
+                    observer.end(TarMember {
                         path,
                         kind: MemberKind::Dir,
                         offset,
                         size: 0,
                         sha256: None,
-                    });
+                    })?;
                 }
                 // Links, sparse, char/block devices, fifos, and anything unknown.
                 _ => return Err("unsupported_member"),
             }
+            member_count += 1;
             if over_limit.load(Ordering::SeqCst) {
                 return Err("limit_exceeded");
             }
@@ -517,10 +569,10 @@ pub fn scan_tar_reader<R: Read>(reader: R, limits: &ScanLimits) -> Result<TarSca
         return Err("invalid_tail");
     }
     let size = bytes.load(Ordering::SeqCst);
-    Ok(TarScan {
+    Ok(TarScanSummary {
         whole_sha256: tail.hasher.finish(),
         size,
-        members,
+        member_count,
         trailing_bytes,
     })
 }

@@ -10,39 +10,71 @@ import hashlib
 import json
 import re
 import secrets
+import stat
+import sys
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
-from .budget import BudgetLedger, Reservation, _disk_usage, is_reparse
+from .budget import BudgetLedger, Reservation, _cluster_bytes, _disk_usage, is_reparse
 from .location_gate import normalize_endpoint, two_hop_proof_key
 from .modelscope import ListedFile, ModelScopeDataset
+from .production_resources import STAGE_DISK_CAP, STREAM_MEMORY, ProductionFootprint
 from .rust_bridge import RustWorker, RustWorkerError
 from .transport import RemoteIOError
 
-REPORT_CAP = 16 * (1 << 20)
 MAX_RANGE = 8 * (1 << 20)
-_DIAGNOSTIC_FLAGS = ("content_length_present", "content_range_present", "etag_present",
-                     "etag_is_strong", "content_encoding_present")
-_PUBLIC_ERROR_CODES = frozenset({"location_invalid", "location_encoding", "validator_mismatch",
-                                "cdn_status", "origin_status", "conditional_unsupported",
-                                "body_framing", "content_range", "body_length", "body_io",
-                                "scan_failed", "origin_transport", "cdn_transport"})
+_DIAGNOSTIC_FLAGS = (
+    "content_length_present",
+    "content_range_present",
+    "etag_present",
+    "etag_is_strong",
+    "content_encoding_present",
+)
+_PUBLIC_ERROR_CODES = frozenset(
+    {
+        "location_invalid",
+        "location_encoding",
+        "validator_mismatch",
+        "cdn_status",
+        "origin_status",
+        "conditional_unsupported",
+        "body_framing",
+        "content_range",
+        "body_length",
+        "body_io",
+        "scan_failed",
+        "origin_transport",
+        "cdn_transport",
+    }
+)
 
 
 def _safe_diagnostic(value, accounting):
-    keys = {"phase", "http_status", "attempts", "body_bytes_observed", "accounting_complete",
-            *_DIAGNOSTIC_FLAGS}
+    keys = {
+        "phase",
+        "http_status",
+        "attempts",
+        "body_bytes_observed",
+        "accounting_complete",
+        *_DIAGNOSTIC_FLAGS,
+    }
     if not isinstance(value, dict) or set(value) != keys:
         raise RemoteIOError("Rust production request rejected; diagnostic invalid")
-    if (value["phase"] not in ("origin", "cdn", "body", "scan") or
-            not (value["http_status"] is None or type(value["http_status"]) is int and
-                 100 <= value["http_status"] <= 599) or
-            any(type(value[k]) is not bool for k in (*_DIAGNOSTIC_FLAGS, "accounting_complete")) or
-            type(value["attempts"]) is not int or type(value["body_bytes_observed"]) is not int or
-            (value["attempts"], value["body_bytes_observed"], value["accounting_complete"]) !=
-            (accounting["attempts"], accounting["body"], accounting["complete"])):
+    if (
+        value["phase"] not in ("origin", "cdn", "body", "scan")
+        or not (
+            value["http_status"] is None
+            or type(value["http_status"]) is int
+            and 100 <= value["http_status"] <= 599
+        )
+        or any(type(value[k]) is not bool for k in (*_DIAGNOSTIC_FLAGS, "accounting_complete"))
+        or type(value["attempts"]) is not int
+        or type(value["body_bytes_observed"]) is not int
+        or (value["attempts"], value["body_bytes_observed"], value["accounting_complete"])
+        != (accounting["attempts"], accounting["body"], accounting["complete"])
+    ):
         raise RemoteIOError("Rust production request rejected; diagnostic invalid")
     return dict(value)
 
@@ -216,16 +248,27 @@ class RustProductionTransport:
         root.mkdir(exist_ok=False)
         return root
 
-    def _call(self, obj, root, *, start=0, length=1, condition="match", mode="range"):
+    def _call(
+        self, obj, root, *, start=0, length=1, condition="match", mode="range", json_limit=1 << 20
+    ):
         try:
-            return self._call_accounted(obj, root, start=start, length=length,
-                                        condition=condition, mode=mode)
+            return self._call_accounted(
+                obj,
+                root,
+                start=start,
+                length=length,
+                condition=condition,
+                mode=mode,
+                json_limit=json_limit,
+            )
         except RustWorkerError:
             # Leave the handler before raising: no raw cause OR retained __context__.
             pass
         raise RemoteIOError("Rust production request rejected; accounting uncertain")
 
-    def _call_accounted(self, obj, root, *, start=0, length=1, condition="match", mode="range"):
+    def _call_accounted(
+        self, obj, root, *, start=0, length=1, condition="match", mode="range", json_limit=1 << 20
+    ):
         obj.validate(test=self._test)
         if obj.origin != self.origin:
             raise RemoteIOError("origin binding mismatch")
@@ -239,8 +282,8 @@ class RustProductionTransport:
         if any(value in json.dumps(asdict(obj)) for value in secrets_in_memory):
             raise RemoteIOError("credential echo in object description rejected")
         size = length if mode == "range" else obj.object_size
-        memory = 4 * size + 65536 if mode == "range" else 64 * size + (4 << 20)
-        disk = size if mode == "range" else size + REPORT_CAP
+        footprint = ProductionFootprint.admit(mode, size)
+        memory, disk = footprint.memory, footprint.artifacts
         budget = {"body": size + 1, "attempts": 2, "disk": disk, "inflight": memory}
         lease1 = self.ledger.reserve(Reservation(body=size + 1, attempt=True))
         try:
@@ -260,6 +303,7 @@ class RustProductionTransport:
             output_name="body",
             report_name=None if mode == "range" else "scan.json",
             mode=mode,
+            json_limit=json_limit,
         )
         # All leases exist before hello; malformed/crash/timeout keeps unknown body pending.
         with RustWorker(self.worker, job_budget=budget, timeout_s=40) as worker:
@@ -305,10 +349,22 @@ class RustProductionTransport:
                 "accounting": dict(accounting),
                 "diagnostic": _safe_diagnostic(result.get("diagnostic"), accounting),
             }
+            observation = result.get("observation")
+            if isinstance(observation, dict):
+                self.last_result["observation"] = {
+                    key: value if type(value) is int and 0 <= value <= maximum else None
+                    for key, maximum in (
+                        ("origin_http_status", 599),
+                        ("cdn_http_status", 599),
+                        ("content_length", 2**63 - 1),
+                    )
+                    for value in (observation.get(key),)
+                }
             if "production_error" in result:
                 code = result["production_error"]
                 self.last_result["production_error"] = (
-                    code if isinstance(code, str) and code in _PUBLIC_ERROR_CODES else "rejected")
+                    code if isinstance(code, str) and code in _PUBLIC_ERROR_CODES else "rejected"
+                )
             if not msg.get("ok") or "production_error" in result:
                 # Account first even when ok=true: the envelope is not business success.
                 raise RemoteIOError("Rust production request rejected")
@@ -317,23 +373,45 @@ class RustProductionTransport:
             return result
 
     @contextmanager
-    def transfer(self, obj, *, start=0, length=1, condition="match", mode="range"):
+    def transfer(
+        self,
+        obj,
+        *,
+        start=0,
+        length=1,
+        condition="match",
+        mode="range",
+        json_limit=1 << 20,
+        retain=False,
+    ):
         """Keep disk/inflight reserved through consumer audit; never publish partial files."""
         size = length if mode == "range" else obj.object_size
-        memory = 4 * size + 65536 if mode == "range" else 64 * size + (4 << 20)
-        disk = size + 8192 if mode == "range" else size + REPORT_CAP + 8192
+        footprint = ProductionFootprint.admit(mode, size)
+        memory, disk = footprint.memory, footprint.transfer_disk
         # Check profile/binding and working set before filesystem creation or network.
         if (
             condition == "match"
             and self.ledger.condition_proof(proof_key(obj, test=self._test)) is None
         ):
             raise RemoteIOError("verified production binding required")
-        lease = self.ledger.reserve(Reservation(disk=disk, inflight=memory))
+        lease = self.ledger.reserve(Reservation(disk=disk))
+        try:
+            memory_lease = self.ledger.reserve(Reservation(inflight=memory))
+        except BaseException:
+            self.ledger.settle(lease)
+            raise
         root = None
+        completed = False
         try:
             root = self._owned_dir()
             result = self._call(
-                obj, root, start=start, length=length, condition=condition, mode=mode
+                obj,
+                root,
+                start=start,
+                length=length,
+                condition=condition,
+                mode=mode,
+                json_limit=json_limit,
             )
             body = root / "body"
             if mode == "range":
@@ -345,26 +423,130 @@ class RustProductionTransport:
                     if len(raw) != size or hashlib.sha256(raw).hexdigest() != result.get("sha256"):
                         raise RemoteIOError("Rust Range artifact verification failed")
             else:
-                if body.stat().st_size != size or _disk_usage(root) > disk:
-                    raise RemoteIOError("Rust fullstream artifact budget mismatch")
+                if (
+                    mode == "remote-stream-scan"
+                    and body.exists()
+                    or mode == "download-then-scan"
+                    and body.stat().st_size != size
+                    or _disk_usage(root) > disk
+                ):
+                    raise RemoteIOError("Rust stream artifact budget mismatch")
             yield root, result
+            completed = True
         finally:
-            # Only this call's exact owned file set. Unknown or linked files retain quota.
-            if root is None:
-                self.ledger.settle(lease)
-            elif (
-                root.is_dir()
-                and not root.is_symlink()
-                and not is_reparse(root)
-                and {p.name for p in root.iterdir()} <= {"body", "scan.json"}
-                and all(
-                    p.is_file() and not p.is_symlink() and not is_reparse(p) for p in root.iterdir()
-                )
+            primary = sys.exc_info()[1]
+            failed = False
+            try:
+                try:
+                    self.ledger.settle(memory_lease)
+                finally:
+                    # Always attempt ownership registration/cleanup, even if settlement rejects.
+                    if root is None:
+                        self.ledger.settle(lease)
+                    else:
+                        snapshot = self._owned_snapshot(root)
+                        if snapshot is not None and retain:
+                            self._retained_download = getattr(self, "_retained_download", {})
+                            self._retained_download[str(root)] = {
+                                "lease": lease,
+                                "object": obj,
+                                "snapshot": snapshot,
+                                "digest": result.get("sha256") if completed else None,
+                            }
+                        elif snapshot is not None:
+                            self._delete_owned(root, snapshot)
+                            self.ledger.settle(lease)
+                        # Unknown/reparse/failed ownership stays on disk with quota.
+            except Exception:
+                failed = True
+            if failed and primary is None:
+                raise RemoteIOError("production resource finalization incomplete; quota retained")
+
+    def _owned_snapshot(self, root):
+        try:
+            if not root.is_relative_to(self.ledger.root) or any(
+                p.is_symlink() or is_reparse(p) for p in (root, *root.parents)
             ):
-                for path in root.iterdir():
-                    path.unlink()
-                root.rmdir()
-                self.ledger.settle(lease)
+                return None
+            directory = root.lstat()
+            if not stat.S_ISDIR(directory.st_mode):
+                return None
+            files = {}
+            for path in root.iterdir():
+                info = path.lstat()
+                if (
+                    path.name not in {"body", "scan.json", "metadata.bin"}
+                    or not stat.S_ISREG(info.st_mode)
+                    or is_reparse(path)
+                    or info.st_nlink != 1
+                ):
+                    return None
+                files[path.name] = (info.st_dev, info.st_ino, info.st_size)
+            after = root.lstat()
+            if (directory.st_dev, directory.st_ino) != (after.st_dev, after.st_ino):
+                return None
+            return (directory.st_dev, directory.st_ino), files
+        except OSError:
+            return None
+
+    def _delete_owned(self, root, snapshot):
+        if self._owned_snapshot(root) != snapshot:
+            raise RemoteIOError("owned production artifacts changed; retained")
+        for name, identity in snapshot[1].items():
+            path = root / name
+            info = path.lstat()
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_nlink != 1
+                or is_reparse(path)
+                or (info.st_dev, info.st_ino, info.st_size) != identity
+            ):
+                raise RemoteIOError("owned production identity changed; retained")
+            path.unlink()
+        root.rmdir()
+
+    def _expect_download_commit(self, p2_root, contract, frozen):
+        """Called only by validated write_staged_v4, binding intended output and full INPUT."""
+        for job in getattr(self, "_retained_download", {}).values():
+            for rel, bound, stage in frozen:
+                if (
+                    rel == job["object"].object_path
+                    and stage.content_sha256 == job["digest"]
+                    and contract.get("adapter") == job.get("adapter")
+                    and self._bound_object(bound) == job["object"]
+                ):
+                    job["expected_root"] = str(Path(p2_root).absolute())
+                    job["expected_contract"] = json.dumps(contract, sort_keys=True)
+
+    def release_committed_downloads(self, p2_root):
+        """Release only unchanged owned spools matched by validated durable P2 COMMIT.
+
+        A crash loses the in-memory ownership map: retained roots/quota are NOT
+        automatically reclaimed. Unknown files and failed jobs remain conservative.
+        """
+        lease = self.ledger.reserve(Reservation(inflight=STREAM_MEMORY))
+        try:
+            return self._release_verified_downloads(p2_root)
+        finally:
+            self.ledger.settle(lease)
+
+    def _release_verified_downloads(self, p2_root):
+        from ..runtime.inventory import load_p2_inventory
+
+        inventory = load_p2_inventory(p2_root, _row_batch_size=128)
+        committed = {item.object_id for item in inventory.objects}
+        owned = getattr(self, "_retained_download", {})
+        for text, job in list(owned.items()):
+            if (
+                job["digest"] is None
+                or job.get("expected_root") != str(Path(p2_root).absolute())
+                or job.get("expected_contract") != json.dumps(inventory.contract, sort_keys=True)
+                or f"{job['object'].object_path}@sha256-{job['digest']}" not in committed
+            ):
+                continue
+            self._delete_owned(Path(text), job["snapshot"])
+            self.ledger.settle(job["lease"])
+            del owned[text]
 
     def verify_conditions(self, candidate: ProviderObject):
         """Observe then positive+negative at the actual byte endpoint. Never infer support."""
@@ -386,7 +568,10 @@ class RustProductionTransport:
     @contextmanager
     def _capability_match(self, obj):
         # Same bytes/header/size path; only the proof prerequisite differs.
-        lease = self.ledger.reserve(Reservation(disk=8192, inflight=65540))
+        footprint = ProductionFootprint.admit("range", 1)
+        lease = self.ledger.reserve(
+            Reservation(disk=footprint.transfer_disk, inflight=footprint.memory)
+        )
         root = None
         try:
             root = self._owned_dir()
@@ -444,13 +629,8 @@ class RustProductionTransport:
             yield (root / "body").read_bytes()
 
     def build_stage(self, obj, adapter, stage_dir: Path, *, mode: str):
-        """Admin-only small admitted job; both pipelines share the existing stage contract.
-
-        Both modes retain a whole-TAR temporary disk spool. The remote mode still
-        feeds live response Read directly into the unchanged Rust scanner.
-        """
-        from .remote_index import OFFLINE_STAGE_ALLOWANCE
-        from .rust_index import FileArchive, build_stage_from_scan
+        """Existing stage contract via capped scanner sidecars; only Download keeps TAR."""
+        from .production_stage import build_stage_from_sidecars
         from .transport import BoundObject
 
         stage_dir = Path(stage_dir).absolute()
@@ -466,16 +646,17 @@ class RustProductionTransport:
             if part.is_symlink() or is_reparse(part):
                 raise ValueError("stage parent reparse rejected")
         self.register(obj)
-        stage_lease = self.ledger.reserve(Reservation(disk=OFFLINE_STAGE_ALLOWANCE))
+        if _cluster_bytes(self.ledger.root) > 4096:
+            raise RemoteIOError("production artifact allocation bound unavailable on work volume")
+        stage_lease = self.ledger.reserve(Reservation(disk=STAGE_DISK_CAP))
         transferred = False
         try:
-            with self.transfer(obj, mode=mode) as (root, result):
-                report_path = root / "scan.json"
-                if not 0 < report_path.stat().st_size <= REPORT_CAP:
-                    raise RemoteIOError("scan report exceeds production bound")
-                report = json.loads(report_path.read_bytes())
-                if report.get("whole_sha256") != result.get("sha256"):
-                    raise RemoteIOError("scan report identity mismatch")
+            with self.transfer(
+                obj,
+                mode=mode,
+                json_limit=min(adapter.max_json_bytes, 1 << 20),
+                retain=mode == "download-then-scan",
+            ) as (root, result):
                 provider = ModelScopeDataset(self, obj.origin, obj.repo_id)
                 bound = BoundObject(
                     provider.download_url(obj.revision, obj.object_path),
@@ -485,15 +666,20 @@ class RustProductionTransport:
                     repository=obj.repo_id,
                 )
                 transferred = True
-                return build_stage_from_scan(
-                    report,
-                    FileArchive(root / "body"),
+                stage = build_stage_from_sidecars(
+                    root,
+                    result,
                     bound,
                     adapter,
                     stage_dir,
                     self.ledger,
-                    _stage_lease=stage_lease,
+                    stage_lease=stage_lease,
                 )
+            if mode == "download-then-scan":
+                job = getattr(self, "_retained_download", {}).get(str(root))
+                if job is not None:
+                    job["adapter"] = adapter.to_dict()
+            return stage
         finally:
             if not transferred:
                 self.ledger.settle(stage_lease)

@@ -82,6 +82,7 @@ def test_same_dataset_multipart_runtime_keeps_duplicate_posts(tmp_path):
     assert snapshots[0] == snapshots[1]
 
 
+@pytest.mark.parametrize("mode", ["download-then-scan", "remote-stream-scan"])
 @pytest.mark.parametrize(
     "source,value,category",
     [
@@ -89,7 +90,15 @@ def test_same_dataset_multipart_runtime_keeps_duplicate_posts(tmp_path):
         ("zerochan_native", "tiger", "character"),
     ],
 )
-def test_local_remote_stage_equivalence_v2(twohop, tmp_path, monkeypatch, source, value, category):
+def test_local_remote_stage_equivalence_v2(
+    twohop,
+    tmp_path,
+    monkeypatch,
+    source,
+    value,
+    category,
+    mode,
+):
     state, ledger, transport, original_obj = twohop
     metadata = {
         "schema_version": 1,
@@ -182,9 +191,7 @@ def test_local_remote_stage_equivalence_v2(twohop, tmp_path, monkeypatch, source
     assert captured["scan"]["whole_sha256"] == digest
     assert receipt["build_metadata"]["runtime_format_version"] == 2
     bound = transport.verify_conditions(obj)
-    remote = transport.build_stage(
-        bound, adapter, ledger.root / "remote-stage", mode="remote-stream-scan"
-    )
+    remote = transport.build_stage(bound, adapter, ledger.root / "remote-stage", mode=mode)
     with closing(sqlite3.connect(remote.database)) as db:
         assert db.execute("select * from members order by name").fetchall() == captured["rows"]
     assert remote.content_sha256 == digest
@@ -197,8 +204,16 @@ def test_local_remote_stage_equivalence_v2(twohop, tmp_path, monkeypatch, source
         repository=obj.repo_id,
     )
     remote_p2 = ledger.root / "remote-p2"
-    summary = write_staged_v4(ledger, [(obj.object_path, resolved, remote)], remote_p2, adapter)
+    summary = write_staged_v4(
+        ledger,
+        [(obj.object_path, resolved, remote)],
+        remote_p2,
+        adapter,
+        production_transport=transport,
+    )
     assert summary["samples"] == 1 and summary["errors"] == 0
+    transport.release_committed_downloads(remote_p2)
+    assert not list(ledger.root.glob("rust-transfer-*"))
     for table in indexer.SCHEMAS:
         local_rows = pq.read_table(
             next((tmp_path / "local-p2").glob(f"*.{table}.parquet"))

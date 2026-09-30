@@ -21,53 +21,64 @@ from .metadata import MetadataInvalid, SourceMismatch, normalize_nested
 from .records import IdentityConflictError, RecordKey
 from .registry import AdapterRegistry, DatasetAdapter
 
-TAG_TYPE = pa.list_(pa.struct([
-    pa.field("value", pa.string(), nullable=False),
-    pa.field("category", pa.string()),
-]))
-KEY_FIELDS = [pa.field(k, pa.string(), nullable=False)
-              for k in ("record_id", "dataset_id", "object_id", "sample_path")]
-OBJECTS_SCHEMA = pa.schema([
-    pa.field("storage_id", pa.string(), nullable=False),
-    pa.field("backend", pa.string(), nullable=False),
-    pa.field("repo_type", pa.string()),
-    pa.field("archive_format", pa.string(), nullable=False),
-    pa.field("dataset", pa.string(), nullable=False),
-    pa.field("object_path", pa.string(), nullable=False),
-    pa.field("object_size", pa.uint64(), nullable=False),
-    pa.field("object_version", pa.string(), nullable=False),
-    pa.field("validator_kind", pa.string(), nullable=False),
-    pa.field("validator", pa.string(), nullable=False),
-    pa.field("scan_status", pa.string(), nullable=False),
-    pa.field("dataset_id", pa.string(), nullable=False),
-    pa.field("object_id", pa.string(), nullable=False),
-    pa.field("source", pa.string(), nullable=False),
-    pa.field("path", pa.string(), nullable=False),
-    pa.field("size", pa.uint64(), nullable=False),
-    pa.field("validator_strength", pa.string(), nullable=False),
-    pa.field("sha256", pa.string(), nullable=False),
-])
-SAMPLES_SCHEMA = pa.schema(KEY_FIELDS + [
-    pa.field("source", pa.string(), nullable=False),
-    pa.field("post_id", pa.string(), nullable=False),
-    pa.field("image_path", pa.string(), nullable=False),
-    pa.field("offset_data", pa.uint64(), nullable=False),
-    pa.field("size", pa.uint64(), nullable=False),
-    pa.field("json_path", pa.string()),
-    pa.field("json_offset_data", pa.uint64()),
-    pa.field("json_size", pa.uint64()),
-    pa.field("text", pa.string()),
-    pa.field("tags_state", pa.string(), nullable=False),
-    pa.field("tags", TAG_TYPE),
-    pa.field("hash_source", pa.string(), nullable=False),
-    pa.field("sha256", pa.string()),
-    pa.field("image_format", pa.string()),
-    pa.field("width", pa.uint32()),
-    pa.field("height", pa.uint32()),
-    pa.field("has_alpha", pa.bool_()),
-    pa.field("hash_kind", pa.string()),
-    pa.field("status", pa.string(), nullable=False),
-])
+TAG_TYPE = pa.list_(
+    pa.struct(
+        [
+            pa.field("value", pa.string(), nullable=False),
+            pa.field("category", pa.string()),
+        ]
+    )
+)
+KEY_FIELDS = [
+    pa.field(k, pa.string(), nullable=False)
+    for k in ("record_id", "dataset_id", "object_id", "sample_path")
+]
+OBJECTS_SCHEMA = pa.schema(
+    [
+        pa.field("storage_id", pa.string(), nullable=False),
+        pa.field("backend", pa.string(), nullable=False),
+        pa.field("repo_type", pa.string()),
+        pa.field("archive_format", pa.string(), nullable=False),
+        pa.field("dataset", pa.string(), nullable=False),
+        pa.field("object_path", pa.string(), nullable=False),
+        pa.field("object_size", pa.uint64(), nullable=False),
+        pa.field("object_version", pa.string(), nullable=False),
+        pa.field("validator_kind", pa.string(), nullable=False),
+        pa.field("validator", pa.string(), nullable=False),
+        pa.field("scan_status", pa.string(), nullable=False),
+        pa.field("dataset_id", pa.string(), nullable=False),
+        pa.field("object_id", pa.string(), nullable=False),
+        pa.field("source", pa.string(), nullable=False),
+        pa.field("path", pa.string(), nullable=False),
+        pa.field("size", pa.uint64(), nullable=False),
+        pa.field("validator_strength", pa.string(), nullable=False),
+        pa.field("sha256", pa.string(), nullable=False),
+    ]
+)
+SAMPLES_SCHEMA = pa.schema(
+    KEY_FIELDS
+    + [
+        pa.field("source", pa.string(), nullable=False),
+        pa.field("post_id", pa.string(), nullable=False),
+        pa.field("image_path", pa.string(), nullable=False),
+        pa.field("offset_data", pa.uint64(), nullable=False),
+        pa.field("size", pa.uint64(), nullable=False),
+        pa.field("json_path", pa.string()),
+        pa.field("json_offset_data", pa.uint64()),
+        pa.field("json_size", pa.uint64()),
+        pa.field("text", pa.string()),
+        pa.field("tags_state", pa.string(), nullable=False),
+        pa.field("tags", TAG_TYPE),
+        pa.field("hash_source", pa.string(), nullable=False),
+        pa.field("sha256", pa.string()),
+        pa.field("image_format", pa.string()),
+        pa.field("width", pa.uint32()),
+        pa.field("height", pa.uint32()),
+        pa.field("has_alpha", pa.bool_()),
+        pa.field("hash_kind", pa.string()),
+        pa.field("status", pa.string(), nullable=False),
+    ]
+)
 ANNOTATIONS_SCHEMA = KEY_FIELDS + [
     pa.field("namespace", pa.string(), nullable=False),
     pa.field("origin", pa.string(), nullable=False),
@@ -75,26 +86,41 @@ ANNOTATIONS_SCHEMA = KEY_FIELDS + [
     pa.field("tags", TAG_TYPE),
 ]
 ANNOTATIONS_SCHEMA = pa.schema(ANNOTATIONS_SCHEMA)
-ERROR_CODES = frozenset({
-    "invalid_post_id", "missing_image", "missing_metadata", "metadata_invalid", "source_mismatch",
-    "ambiguous_image_member", "ambiguous_metadata_member", "unsupported_member",
-    "unsupported_archive", "record_identity_conflict",
-})
-ERRORS_SCHEMA = pa.schema([
-    pa.field("dataset_id", pa.string(), nullable=False),
-    pa.field("object_id", pa.string(), nullable=False),
-    pa.field("source", pa.string(), nullable=False),
-    pa.field("object_path", pa.string(), nullable=False),
-    pa.field("member", pa.string()),
-    pa.field("post_id", pa.string()),
-    pa.field("record_id", pa.string()),
-    pa.field("path", pa.string()),
-    pa.field("code", pa.string(), nullable=False),
-    pa.field("error_detail", pa.string()),
-    pa.field("detail", pa.string()),
-])
-SCHEMAS = dict(objects=OBJECTS_SCHEMA, samples=SAMPLES_SCHEMA,
-               annotations=ANNOTATIONS_SCHEMA, errors=ERRORS_SCHEMA)
+ERROR_CODES = frozenset(
+    {
+        "invalid_post_id",
+        "missing_image",
+        "missing_metadata",
+        "metadata_invalid",
+        "source_mismatch",
+        "ambiguous_image_member",
+        "ambiguous_metadata_member",
+        "unsupported_member",
+        "unsupported_archive",
+        "record_identity_conflict",
+    }
+)
+ERRORS_SCHEMA = pa.schema(
+    [
+        pa.field("dataset_id", pa.string(), nullable=False),
+        pa.field("object_id", pa.string(), nullable=False),
+        pa.field("source", pa.string(), nullable=False),
+        pa.field("object_path", pa.string(), nullable=False),
+        pa.field("member", pa.string()),
+        pa.field("post_id", pa.string()),
+        pa.field("record_id", pa.string()),
+        pa.field("path", pa.string()),
+        pa.field("code", pa.string(), nullable=False),
+        pa.field("error_detail", pa.string()),
+        pa.field("detail", pa.string()),
+    ]
+)
+SCHEMAS = dict(
+    objects=OBJECTS_SCHEMA,
+    samples=SAMPLES_SCHEMA,
+    annotations=ANNOTATIONS_SCHEMA,
+    errors=ERRORS_SCHEMA,
+)
 
 
 class _TableProxy:
@@ -113,14 +139,17 @@ class _SpoolState:
 
 class CleanupHandle:
     """Controlled retry handle for owned spool resources after a scan failure."""
+
     def __init__(self, scope: "_SpoolScope") -> None:
         self._scope = scope
         self.errors: list[BaseException] = []
 
     @property
     def pending_resources(self) -> list[dict[str, Any]]:
-        return [{"path": resource.path, "errors": list(resource.errors)}
-                for resource in self._scope.resources]
+        return [
+            {"path": resource.path, "errors": list(resource.errors)}
+            for resource in self._scope.resources
+        ]
 
     def retry(self) -> list[dict[str, Any]]:
         self.errors = self._scope.cleanup()
@@ -128,9 +157,25 @@ class CleanupHandle:
 
 
 class _SpoolScope:
-    def __init__(self) -> None:
+    def __init__(self, *, limits: dict[str, int] | None = None) -> None:
+        self.limits = limits
         self.resources: set[_SpoolState] = set()
         self.handle = CleanupHandle(self)
+
+    def configure(self, db: sqlite3.Connection) -> None:
+        if self.limits is None:
+            return
+        db.execute("PRAGMA page_size=4096")
+        pages = self.limits["spool_pages"]
+        if db.execute(f"PRAGMA max_page_count={pages}").fetchone()[0] > pages:
+            raise ValueError("production spool page cap unavailable")
+        # Disposable spool only: errors/crashes invalidate job; no rollback recovery promised.
+        if db.execute("PRAGMA journal_mode=OFF").fetchone()[0] != "off":
+            raise ValueError("production spool journal configuration unavailable")
+        db.execute("PRAGMA cache_size=-2048")
+        db.execute("PRAGMA mmap_size=0")
+        # Fixed indexed INSERT/lookup/order operations; no temporary sort operators.
+        db.execute("PRAGMA temp_store=MEMORY")
 
     def add(self, resource: _SpoolState) -> None:
         self.resources.add(resource)
@@ -151,8 +196,12 @@ class _SpoolScope:
 
 def _remove_spool_files(path: Path) -> list[BaseException]:
     errors = []
-    for candidate in (path, Path(str(path) + "-journal"), Path(str(path) + "-wal"),
-                      Path(str(path) + "-shm")):
+    for candidate in (
+        path,
+        Path(str(path) + "-journal"),
+        Path(str(path) + "-wal"),
+        Path(str(path) + "-shm"),
+    ):
         try:
             candidate.unlink(missing_ok=True)
         except BaseException as exc:
@@ -181,8 +230,7 @@ def _release_spool(resource: _SpoolState) -> list[BaseException]:
 
 
 class _MemberSpool:
-    def __init__(self, scope: _SpoolScope | None = None,
-                 directory: Path | None = None) -> None:
+    def __init__(self, scope: _SpoolScope | None = None, directory: Path | None = None) -> None:
         handle = tempfile.NamedTemporaryFile(
             prefix="sakurapool-members-", suffix=".sqlite", delete=False, dir=directory
         )
@@ -196,6 +244,7 @@ class _MemberSpool:
             self.resource.handle = None
             self.db = sqlite3.connect(self.path)
             self.resource.db = self.db
+            self.scope.configure(self.db)
             if getattr(self, "_ddl_injection", False):
                 raise RuntimeError("ddl injection")
             self.db.execute(
@@ -215,8 +264,10 @@ class _MemberSpool:
             raise
 
     def add(self, key: str, member: tarfile.TarInfo, suffix: str, is_image: bool) -> None:
-        self.db.execute("INSERT INTO members VALUES (?, ?, ?, ?, ?, ?)",
-                        (key, member.name, suffix, member.offset_data, member.size, int(is_image)))
+        self.db.execute(
+            "INSERT INTO members VALUES (?, ?, ?, ?, ?, ?)",
+            (key, member.name, suffix, member.offset_data, member.size, int(is_image)),
+        )
 
     def iter_keys(self):
         cursor = self.db.execute("SELECT DISTINCT key FROM members ORDER BY key")
@@ -227,7 +278,8 @@ class _MemberSpool:
         result = []
         for name, suffix, offset, size, flag in self.db.execute(
             "SELECT name, suffix, offset, size, is_image FROM members "
-            "WHERE key=? AND is_image=? ORDER BY name LIMIT 2", (key, int(is_image)),
+            "WHERE key=? AND is_image=? ORDER BY name LIMIT 2",
+            (key, int(is_image)),
         ):
             if bool(flag) == is_image:
                 member = tarfile.TarInfo(name)
@@ -248,8 +300,8 @@ class _MemberSpool:
 
 class _SpoolRows:
     """Disk-backed row spool; only one bounded batch is materialized at a time."""
-    def __init__(self, scope: _SpoolScope | None = None,
-                 directory: Path | None = None) -> None:
+
+    def __init__(self, scope: _SpoolScope | None = None, directory: Path | None = None) -> None:
         handle = tempfile.NamedTemporaryFile(
             prefix="sakurapool-spool-", suffix=".sqlite", delete=False, dir=directory
         )
@@ -263,6 +315,7 @@ class _SpoolRows:
             self.resource.handle = None
             self.db = sqlite3.connect(self.path)
             self.resource.db = self.db
+            self.scope.configure(self.db)
             if getattr(self, "_ddl_injection", False):
                 raise RuntimeError("ddl injection")
             self.db.execute(
@@ -297,9 +350,15 @@ class _SpoolRows:
 
     def append(self, name: str, row: dict[str, Any]) -> None:
         ordinal = self.counts[name]
+        payload = json.dumps(row, ensure_ascii=False)
+        if (
+            self.scope.limits is not None
+            and len(payload.encode("utf-8")) > self.scope.limits["row_bytes"]
+        ):
+            raise ValueError("production durable row byte cap")
         self.db.execute(
             "INSERT INTO rows VALUES (?, ?, ?, ?)",
-            (name, ordinal, row.get("record_id"), json.dumps(row, ensure_ascii=False)),
+            (name, ordinal, row.get("record_id"), payload),
         )
         self.counts[name] += 1
         if ordinal % BATCH_SIZE == BATCH_SIZE - 1:
@@ -307,6 +366,27 @@ class _SpoolRows:
 
     def iter_batches(self, name: str):
         cursor = self.db.execute("SELECT payload FROM rows WHERE kind=? ORDER BY ordinal", (name,))
+        if self.scope.limits is not None:
+            batch = []
+            used = 0
+            for (payload,) in cursor:
+                size = len(payload.encode("utf-8"))
+                if size > self.scope.limits["row_bytes"]:
+                    raise ValueError("production durable row byte cap")
+                if batch and (
+                    used + size > self.scope.limits["batch_bytes"] or len(batch) >= BATCH_SIZE
+                ):
+                    yield batch
+                    batch, used = [], 0
+                batch.append(json.loads(payload))
+                used += size
+                # Large rows are bounded <=row_bytes singletons, not unlimited exceptions.
+                if used >= self.scope.limits["batch_bytes"]:
+                    yield batch
+                    batch, used = [], 0
+            if batch:
+                yield batch
+            return
         while True:
             payloads = cursor.fetchmany(BATCH_SIZE)
             if not payloads:
@@ -342,8 +422,12 @@ class UnsupportedArchiveError(ValueError):
 
 
 def _json(value: Any) -> bytes:
-    return (json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False,
-                       separators=(",", ":")) + "\n").encode("utf-8")
+    return (
+        json.dumps(
+            value, sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+        )
+        + "\n"
+    ).encode("utf-8")
 
 
 def _sha(path: Path) -> str:
@@ -382,8 +466,13 @@ def _validator(path: Path) -> dict[str, Any]:
     after = path.stat()
     if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
         raise ValueError("input validator mismatch: changed while hashing")
-    return dict(size=after.st_size, mtime_ns=after.st_mtime_ns, sha256=digest,
-                strength="strong:sha256", version=1)
+    return dict(
+        size=after.st_size,
+        mtime_ns=after.st_mtime_ns,
+        sha256=digest,
+        strength="strong:sha256",
+        version=1,
+    )
 
 
 def _sync_directory(path: Path) -> None:
@@ -406,8 +495,9 @@ def _atomic(path: Path, data: bytes) -> None:
     _sync_directory(path.parent)
 
 
-def _read_member(archive: tarfile.TarFile, member: tarfile.TarInfo,
-                 verify_offsets: bool = False) -> bytes:
+def _read_member(
+    archive: tarfile.TarFile, member: tarfile.TarInfo, verify_offsets: bool = False
+) -> bytes:
     archive.fileobj.seek(member.offset_data)
     data = archive.fileobj.read(member.size)
     if len(data) != member.size:
@@ -445,8 +535,11 @@ def _next_member(archive: tarfile.TarFile) -> tarfile.TarInfo | None:
 
 
 def _safe(name: str) -> bool:
-    return bool(name) and "\\" not in name and ":" not in name and all(
-        p not in ("", ".", "..") for p in name.split("/")
+    return (
+        bool(name)
+        and "\\" not in name
+        and ":" not in name
+        and all(p not in ("", ".", "..") for p in name.split("/"))
     )
 
 
@@ -455,37 +548,71 @@ def _object_id(rel: str, validator_sha256: str) -> str:
     return f"{rel}@sha256-{validator_sha256}"
 
 
-def _scan_shard_impl(path: Path | None, rel: str, adapter: DatasetAdapter, hash_images: bool,
-                timings: dict[str, float], validator: dict[str, Any],
-                verify_offsets: bool = False, scope: _SpoolScope | None = None,
-                *, staged_archive: Any = None,
-                staged_provenance: tuple[str, str] = ("modelscope", "dataset"),
-                spool_directory: Path | None = None) -> _SpoolRows:
+def _scan_shard_impl(
+    path: Path | None,
+    rel: str,
+    adapter: DatasetAdapter,
+    hash_images: bool,
+    timings: dict[str, float],
+    validator: dict[str, Any],
+    verify_offsets: bool = False,
+    scope: _SpoolScope | None = None,
+    *,
+    staged_archive: Any = None,
+    staged_provenance: tuple[str, str] = ("modelscope", "dataset"),
+    spool_directory: Path | None = None,
+) -> _SpoolRows:
     scope = scope or _SpoolScope()
     rows = _SpoolRows(scope, directory=spool_directory)
 
     object_id = _object_id(rel, validator["sha256"])
-    rows["objects"].append(dict(
-        storage_id=adapter.storage_id,
-        backend=staged_provenance[0] if staged_archive is not None else "local",
-        repo_type=staged_provenance[1] if staged_archive is not None else "local",
-        archive_format="tar", dataset=adapter.dataset, object_path=rel,
-        object_size=validator["size"], object_version=validator["sha256"],
-        validator=validator["sha256"], validator_kind="sha256",
-        scan_status="committed", dataset_id=adapter.dataset, object_id=object_id,
-        source=adapter.source, path=rel, size=validator["size"],
-        validator_strength=validator["strength"], sha256=validator["sha256"],
-    ))
+    rows["objects"].append(
+        dict(
+            storage_id=adapter.storage_id,
+            backend=staged_provenance[0] if staged_archive is not None else "local",
+            repo_type=staged_provenance[1] if staged_archive is not None else "local",
+            archive_format="tar",
+            dataset=adapter.dataset,
+            object_path=rel,
+            object_size=validator["size"],
+            object_version=validator["sha256"],
+            validator=validator["sha256"],
+            validator_kind="sha256",
+            scan_status="committed",
+            dataset_id=adapter.dataset,
+            object_id=object_id,
+            source=adapter.source,
+            path=rel,
+            size=validator["size"],
+            validator_strength=validator["strength"],
+            sha256=validator["sha256"],
+        )
+    )
 
-    def error(member: str, code: str, detail: str = "", post_id: str | None = None,
-              record_id: str | None = None) -> None:
+    def error(
+        member: str,
+        code: str,
+        detail: str = "",
+        post_id: str | None = None,
+        record_id: str | None = None,
+    ) -> None:
         assert code in ERROR_CODES
         detail = _truncate_utf8(detail)
-        rows["errors"].append(dict(
-            dataset_id=adapter.dataset, object_id=object_id, source=adapter.source,
-            object_path=rel, member=member, post_id=post_id, record_id=record_id, path=member,
-            code=code, error_detail=detail, detail=detail,
-        ))
+        rows["errors"].append(
+            dict(
+                dataset_id=adapter.dataset,
+                object_id=object_id,
+                source=adapter.source,
+                object_path=rel,
+                member=member,
+                post_id=post_id,
+                record_id=record_id,
+                path=member,
+                code=code,
+                error_detail=detail,
+                detail=detail,
+            )
+        )
 
     started = time.perf_counter()
     try:
@@ -553,7 +680,8 @@ def _scan_shard_impl(path: Path | None, rel: str, adapter: DatasetAdapter, hash_
                         raise ValueError("metadata exceeds configured size limit")
                     metadata_payload = (
                         _read_member(archive, meta, verify_offsets)
-                        if verify_offsets else _read_member(archive, meta)
+                        if verify_offsets
+                        else _read_member(archive, meta)
                     )
                     metadata = json.loads(
                         metadata_payload,
@@ -564,13 +692,15 @@ def _scan_shard_impl(path: Path | None, rel: str, adapter: DatasetAdapter, hash_
                     if not isinstance(metadata, dict):
                         raise ValueError("metadata must be a JSON object")
                     _json(metadata)
-                    if (adapter.metadata_mode == "flat" and "source" in metadata
-                            and metadata["source"] != adapter.source):
+                    if (
+                        adapter.metadata_mode == "flat"
+                        and "source" in metadata
+                        and metadata["source"] != adapter.source
+                    ):
                         error(meta.name, "source_mismatch", post_id=post_id, record_id=record_id)
                         continue
             except (ValueError, UnicodeError) as exc:
-                error(meta.name, "metadata_invalid", str(exc), post_id=post_id,
-                      record_id=record_id)
+                error(meta.name, "metadata_invalid", str(exc), post_id=post_id, record_id=record_id)
                 continue
             finally:
                 timings["json_seconds"] += time.perf_counter() - started
@@ -585,64 +715,125 @@ def _scan_shard_impl(path: Path | None, rel: str, adapter: DatasetAdapter, hash_
             if not isinstance(has_alpha, bool):
                 has_alpha = None
             tags = values.get(adapter.tags_field)
-            state = ("missing" if adapter.tags_field not in values else "invalid"
-                     if not isinstance(tags, list) or any(not isinstance(t, str) for t in tags)
-                     else "empty" if not tags else "known")
-            tag_rows = [dict(value=t, category=adapter.tag_category) for t in tags] if state in (
-                "known", "empty") else None
+            state = (
+                "missing"
+                if adapter.tags_field not in values
+                else "invalid"
+                if not isinstance(tags, list) or any(not isinstance(t, str) for t in tags)
+                else "empty"
+                if not tags
+                else "known"
+            )
+            tag_rows = (
+                [dict(value=t, category=adapter.tag_category) for t in tags]
+                if state in ("known", "empty")
+                else None
+            )
             nested = None
             if adapter.metadata_mode == "nested_json_v1":
                 try:
-                    nested = normalize_nested(values, adapter, post_id,
-                                              PurePosixPath(image.name).suffix)
+                    nested = normalize_nested(
+                        values, adapter, post_id, PurePosixPath(image.name).suffix
+                    )
                 except SourceMismatch as exc:
-                    error(meta.name if meta else key, "source_mismatch", str(exc),
-                          post_id=post_id, record_id=record_id)
+                    error(
+                        meta.name if meta else key,
+                        "source_mismatch",
+                        str(exc),
+                        post_id=post_id,
+                        record_id=record_id,
+                    )
                     continue
                 except MetadataInvalid as exc:
-                    error(meta.name if meta else key, "metadata_invalid", str(exc),
-                          post_id=post_id, record_id=record_id)
+                    error(
+                        meta.name if meta else key,
+                        "metadata_invalid",
+                        str(exc),
+                        post_id=post_id,
+                        record_id=record_id,
+                    )
                     continue
                 width, height = nested.width, nested.height
                 has_alpha = None
                 state, tag_rows = nested.tags_state, nested.tags
             digest = values.get("sha256") if adapter.metadata_mode == "flat" else None
-            if digest is not None and (not isinstance(digest, str)
-                                       or not re.fullmatch(r"[0-9a-fA-F]{64}", digest)):
-                error(meta.name, "metadata_invalid", "invalid declared sha256",
-                      post_id=post_id, record_id=record_id)
+            if digest is not None and (
+                not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest)
+            ):
+                error(
+                    meta.name,
+                    "metadata_invalid",
+                    "invalid declared sha256",
+                    post_id=post_id,
+                    record_id=record_id,
+                )
                 digest = None
             digest = digest.lower() if digest else None
             origin = "declared:json.sha256" if digest else "missing"
             if hash_images:
-                digest = (staged_archive.member_sha256(image.name)
-                          if staged_archive is not None else _hash_member(archive, image))
+                digest = (
+                    staged_archive.member_sha256(image.name)
+                    if staged_archive is not None
+                    else _hash_member(archive, image)
+                )
                 origin = "computed:sha256"
             text = nested.text if nested is not None else values.get(adapter.text_field)
             if text is not None and not isinstance(text, str):
-                error(meta.name, "metadata_invalid", "invalid text", post_id=post_id,
-                      record_id=record_id)
+                error(
+                    meta.name,
+                    "metadata_invalid",
+                    "invalid text",
+                    post_id=post_id,
+                    record_id=record_id,
+                )
                 text = None
-            identity_fields = dict(record_id=record_id, dataset_id=adapter.dataset,
-                                   object_id=object_id, sample_path=key)
-            rows["samples"].append(dict(
-                **identity_fields, source=adapter.source, post_id=post_id, image_path=image.name,
-                offset_data=image.offset_data, size=image.size,
-                json_path=meta.name if meta else None,
-                json_offset_data=meta.offset_data if meta else None,
-                json_size=meta.size if meta else None,
-                text=text, tags_state=state, tags=tag_rows, hash_source=origin, sha256=digest,
-                image_format=(nested.image_format if nested is not None else
-                              PurePosixPath(image.name).suffix.lower().lstrip(".")),
-                width=width, height=height, has_alpha=has_alpha,
-                hash_kind="sha256" if digest else None,
-                status="indexed",
-            ))
-            rows["annotations"].append(dict(
-                **identity_fields, namespace=adapter.tag_namespace,
-                origin=("declared:nested_json_v1.tags" if nested is not None else
-                        f"declared:json.{adapter.tags_field}"), tags_state=state, tags=tag_rows,
-            ))
+            identity_fields = dict(
+                record_id=record_id,
+                dataset_id=adapter.dataset,
+                object_id=object_id,
+                sample_path=key,
+            )
+            rows["samples"].append(
+                dict(
+                    **identity_fields,
+                    source=adapter.source,
+                    post_id=post_id,
+                    image_path=image.name,
+                    offset_data=image.offset_data,
+                    size=image.size,
+                    json_path=meta.name if meta else None,
+                    json_offset_data=meta.offset_data if meta else None,
+                    json_size=meta.size if meta else None,
+                    text=text,
+                    tags_state=state,
+                    tags=tag_rows,
+                    hash_source=origin,
+                    sha256=digest,
+                    image_format=(
+                        nested.image_format
+                        if nested is not None
+                        else PurePosixPath(image.name).suffix.lower().lstrip(".")
+                    ),
+                    width=width,
+                    height=height,
+                    has_alpha=has_alpha,
+                    hash_kind="sha256" if digest else None,
+                    status="indexed",
+                )
+            )
+            rows["annotations"].append(
+                dict(
+                    **identity_fields,
+                    namespace=adapter.tag_namespace,
+                    origin=(
+                        "declared:nested_json_v1.tags"
+                        if nested is not None
+                        else f"declared:json.{adapter.tags_field}"
+                    ),
+                    tags_state=state,
+                    tags=tag_rows,
+                )
+            )
         member_spool.close()
     return rows
 
@@ -651,13 +842,20 @@ def _cleanup_spools(scope: _SpoolScope) -> list[BaseException]:
     return scope.cleanup()
 
 
-def _scan_shard(path: Path, rel: str, adapter: DatasetAdapter, hash_images: bool,
-                timings: dict[str, float], validator: dict[str, Any],
-                verify_offsets: bool = False) -> _SpoolRows:
+def _scan_shard(
+    path: Path,
+    rel: str,
+    adapter: DatasetAdapter,
+    hash_images: bool,
+    timings: dict[str, float],
+    validator: dict[str, Any],
+    verify_offsets: bool = False,
+) -> _SpoolRows:
     scope = _SpoolScope()
     try:
-        rows = _scan_shard_impl(path, rel, adapter, hash_images, timings, validator,
-                                verify_offsets, scope)
+        rows = _scan_shard_impl(
+            path, rel, adapter, hash_images, timings, validator, verify_offsets, scope
+        )
     except BaseException as primary:
         cleanup_errors = _cleanup_spools(scope)
         if cleanup_errors:
@@ -679,8 +877,7 @@ def _validate_references(rows: _SpoolRows) -> None:
         raise ValueError("objects table must contain one ObjectRef")
     object_ref = (object_row["dataset_id"], object_row["object_id"])
     for name in ("samples", "annotations", "errors"):
-        if any((row["dataset_id"], row["object_id"]) != object_ref
-               for row in rows.iter_rows(name)):
+        if any((row["dataset_id"], row["object_id"]) != object_ref for row in rows.iter_rows(name)):
             raise ValueError(f"{name} contains an ObjectRef outside objects")
     missing = rows.db.execute(
         "SELECT a.record_id FROM rows AS a "
@@ -691,29 +888,36 @@ def _validate_references(rows: _SpoolRows) -> None:
         raise ValueError("annotations contains a RecordKey outside samples")
 
 
-def _verify_fragment(path: Path, schema: pa.Schema) -> int:
+def _verify_fragment(path: Path, schema: pa.Schema, *, bounded_groups: bool = False) -> int:
     parquet = pq.ParquetFile(path)
     if parquet.schema_arrow != schema:
         raise ValueError(f"schema mismatch: {path.name}")
     metadata_rows = parquet.metadata.num_rows
     if metadata_rows == 0:
         return 0
-    iterated_rows = sum(
-        batch.num_rows for batch in parquet.iter_batches(batch_size=BATCH_SIZE)
+    iterated_rows = (
+        sum(parquet.read_row_group(group).num_rows for group in range(parquet.num_row_groups))
+        if bounded_groups
+        else sum(batch.num_rows for batch in parquet.iter_batches(batch_size=BATCH_SIZE))
     )
     if iterated_rows != metadata_rows:
         raise ValueError(f"row metadata mismatch: {path.name}")
     return metadata_rows
 
 
-def _write_fragments(files: dict[str, Path], rows: _SpoolRows,
-                     checkpoint: Callable[[str], None],
-                     byte_limit: int | None = None) -> dict[str, dict]:
+def _write_fragments(
+    files: dict[str, Path],
+    rows: _SpoolRows,
+    checkpoint: Callable[[str], None],
+    byte_limit: int | None = None,
+) -> dict[str, dict]:
     info = {}
     written = 0
+
     class CappedStream:
         def __init__(self, target):
             self.target = target
+
         def write(self, data):
             nonlocal written
             if byte_limit is not None and written + len(data) > byte_limit:
@@ -721,15 +925,27 @@ def _write_fragments(files: dict[str, Path], rows: _SpoolRows,
             consumed = self.target.write(data)
             written += consumed
             return consumed
+
         def __getattr__(self, name):
             return getattr(self.target, name)
+
     for name, final in files.items():
         partial = final.with_name(final.name + ".partial")
         # Local P2 retains its original overwrite/recovery semantics. P4's
         # explicit byte-limit path requires a fresh partial and fails closed.
         with partial.open("xb" if byte_limit is not None else "wb") as raw:
             stream = CappedStream(raw) if byte_limit is not None else raw
-            with pq.ParquetWriter(stream, SCHEMAS[name]) as writer:
+            options = (
+                {
+                    "use_dictionary": False,
+                    "write_batch_size": 128,
+                    "compression": "NONE",
+                    "write_statistics": False,
+                }
+                if rows.scope.limits
+                else {}
+            )
+            with pq.ParquetWriter(stream, SCHEMAS[name], **options) as writer:
                 batches = rows.iter_batches(name)
                 first = next(batches, None)
                 if name == "samples":
@@ -740,15 +956,26 @@ def _write_fragments(files: dict[str, Path], rows: _SpoolRows,
                     checkpoint("A")  # samples partial lacks footer and remaining rows
                 elif first:
                     writer.write_table(_table_from_rows(first, SCHEMAS[name]))
+                if rows.scope.limits:
+                    first = None
+                groups = 1
                 for batch in batches:
+                    groups += 1
+                    if rows.scope.limits and groups > rows.scope.limits["row_groups"]:
+                        raise ValueError("production fragment row-group cap")
                     writer.write_table(_table_from_rows(batch, SCHEMAS[name]))
             stream.flush()
             os.fsync(stream.fileno())
-        actual_rows = _verify_fragment(partial, SCHEMAS[name])
+        actual_rows = (
+            _verify_fragment(partial, SCHEMAS[name], bounded_groups=True)
+            if rows.scope.limits
+            else _verify_fragment(partial, SCHEMAS[name])
+        )
         if actual_rows != rows.counts[name]:
             raise ValueError(f"schema/row mismatch before publication: {name}")
-        info[name] = dict(path=final.name, sha256=_sha(partial),
-                          bytes=partial.stat().st_size, rows=actual_rows)
+        info[name] = dict(
+            path=final.name, sha256=_sha(partial), bytes=partial.stat().st_size, rows=actual_rows
+        )
     checkpoint("B")  # all parquet closed and fsynced, no rename
     for index, final in enumerate(files.values()):
         os.replace(final.with_name(final.name + ".partial"), final)
@@ -759,10 +986,16 @@ def _write_fragments(files: dict[str, Path], rows: _SpoolRows,
     return info
 
 
-def scan(root: Path, output: Path, *, hash_images: bool = False, dataset: str = "local",
-         registry: AdapterRegistry | None = None,
-         checkpoint: Callable[[str], None] | None = None,
-         verify_offsets: bool = False) -> dict[str, Any]:
+def scan(
+    root: Path,
+    output: Path,
+    *,
+    hash_images: bool = False,
+    dataset: str = "local",
+    registry: AdapterRegistry | None = None,
+    checkpoint: Callable[[str], None] | None = None,
+    verify_offsets: bool = False,
+) -> dict[str, Any]:
     """A-D restart builds safely; E verifies the commit before skipping the TAR object."""
     started = time.perf_counter()
     timings = dict(header_seconds=0.0, json_seconds=0.0, parquet_seconds=0.0)
@@ -775,8 +1008,13 @@ def scan(root: Path, output: Path, *, hash_images: bool = False, dataset: str = 
     if output == root or output.is_relative_to(root) or root.is_relative_to(output):
         raise ValueError("input and output directories must not overlap")
     validators = {p.relative_to(base).as_posix(): _validator(p) for p in archives}
-    contract = dict(format_version=FORMAT_VERSION, builder=BUILDER, adapter=adapter.to_dict(),
-                    hash_images=hash_images, inputs=validators)
+    contract = dict(
+        format_version=FORMAT_VERSION,
+        builder=BUILDER,
+        adapter=adapter.to_dict(),
+        hash_images=hash_images,
+        inputs=validators,
+    )
     output.mkdir(parents=True, exist_ok=True)
     input_path = output / "INPUT.json"
     if input_path.exists():
@@ -788,8 +1026,16 @@ def scan(root: Path, output: Path, *, hash_images: bool = False, dataset: str = 
         if unknown:
             raise ValueError("output contains artifacts without INPUT.json")
         _atomic(input_path, _json(contract))
-    counts = dict(archives=len(archives), objects_seen=len(archives), objects_committed=0,
-                  objects_skipped=0, objects=0, samples=0, errors=0, skipped=0)
+    counts = dict(
+        archives=len(archives),
+        objects_seen=len(archives),
+        objects_committed=0,
+        objects_skipped=0,
+        objects=0,
+        samples=0,
+        errors=0,
+        skipped=0,
+    )
     expected_markers = set()
     for path in archives:
         rel = path.relative_to(base).as_posix()
@@ -803,16 +1049,23 @@ def scan(root: Path, output: Path, *, hash_images: bool = False, dataset: str = 
                 commit = json.loads(marker.read_bytes())
                 if commit["contract_sha256"] != hashlib.sha256(_json(contract)).hexdigest():
                     raise ValueError("contract hash mismatch")
-                if (commit["input"] != validators[rel] or commit["object_id"] != object_id
-                        or commit["dataset_id"] != dataset or commit["builder"] != BUILDER
-                        or commit["schema"] != FORMAT_VERSION):
+                if (
+                    commit["input"] != validators[rel]
+                    or commit["object_id"] != object_id
+                    or commit["dataset_id"] != dataset
+                    or commit["builder"] != BUILDER
+                    or commit["schema"] != FORMAT_VERSION
+                ):
                     raise ValueError("commit identity/validator mismatch")
                 if set(commit["files"]) != set(SCHEMAS):
                     raise ValueError("fragment set mismatch")
                 for name, fragment in files.items():
                     info = commit["files"][name]
-                    if (info["path"] != fragment.name or info["sha256"] != _sha(fragment)
-                            or info["bytes"] != fragment.stat().st_size):
+                    if (
+                        info["path"] != fragment.name
+                        or info["sha256"] != _sha(fragment)
+                        or info["bytes"] != fragment.stat().st_size
+                    ):
                         raise ValueError(f"output hash mismatch: {name}")
                     if _verify_fragment(fragment, SCHEMAS[name]) != info["rows"]:
                         raise ValueError(f"schema/row mismatch: {name}")
@@ -851,9 +1104,15 @@ def scan(root: Path, output: Path, *, hash_images: bool = False, dataset: str = 
             if _validator(path) != validators[rel]:
                 raise ValueError("input validator mismatch: input changed during scan")
             commit = dict(
-                schema=FORMAT_VERSION, builder=BUILDER, dataset_id=dataset, object_id=object_id,
-                created_at=datetime.now(timezone.utc).isoformat(), input=validators[rel],
-                files=info, contract_sha256=hashlib.sha256(_json(contract)).hexdigest())
+                schema=FORMAT_VERSION,
+                builder=BUILDER,
+                dataset_id=dataset,
+                object_id=object_id,
+                created_at=datetime.now(timezone.utc).isoformat(),
+                input=validators[rel],
+                files=info,
+                contract_sha256=hashlib.sha256(_json(contract)).hexdigest(),
+            )
             _atomic(marker, _json(commit))
             counts["objects_committed"] += 1
             checkpoint("E")
