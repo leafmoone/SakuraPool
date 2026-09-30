@@ -11,8 +11,8 @@ from .errors import (
 )
 from .inventory import P2Inventory, combine_inventories, load_p2_inventory
 
-RUNTIME_FORMAT_VERSION = 1
-RUNTIME_COMPILER = "sakurapool-p3-v1"
+RUNTIME_FORMAT_VERSION = 2
+RUNTIME_COMPILER = "sakurapool-p3-v2"
 
 __all__ = [
     "AmbiguousRecordError",

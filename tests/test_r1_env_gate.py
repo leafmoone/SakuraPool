@@ -45,7 +45,8 @@ def test_r1_suite_skips_and_reports_without_worker():
     """No build output -> the whole R1 bridge file skips (exit 0) and the
     session header carries the report with the build instruction."""
     env = {**os.environ, "SAKURAPOOL_RUST_WORKER": FAKE_WORKER,
-           "PYTHONPATH": "src"}
+           "PYTHONPATH": (os.environ["PYTHONPATH"]
+                          if os.environ.get("SAKURAPOOL_TEST_EXCLUSIVE_ROOT") else "src")}
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "tests/test_r1_bridge.py",
          "-p", "no:cacheprovider"],

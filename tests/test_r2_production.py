@@ -443,6 +443,10 @@ def test_two_admin_modes_same_file_audit_and_stage_contract(twohop, mode):
     assert summary["samples"] == 1 and summary["errors"] == 0
     compile_runtime(load_p2_inventory(package / "durable"), package / "runtime")
     with RuntimeSnapshot.open(package / "runtime", full_verify=True) as rt:
+        assert rt.manifest["runtime_format_version"] == 2
+        assert rt.manifest["compiler"] == "sakurapool-p3-v2"
+        assert rt.tag_categories("tags", "r2") == ("general",)
+        assert "category" not in [row[1] for row in rt._catalog.execute("PRAGMA table_info(tags)")]
         assert rt.query(RuntimeQuerySpec(all_tags=[("tags", "r2")])).count() == 1
         ref = rt.object_ref(0)
     binding = Binding(
@@ -466,6 +470,13 @@ def test_two_admin_modes_same_file_audit_and_stage_contract(twohop, mode):
         production_transport=transport,
     )
     audit = json.loads((package / "audit/members.json").read_bytes())
+    from sakurapool.storage.package import load_package
+
+    loaded = load_package(package, allow_offline_loopback=True)
+    with RuntimeSnapshot.open(package / loaded.runtime, full_verify=True) as rt:
+        loaded_binding, sample = loaded.sample(rt, next(iter(audit)))
+        assert loaded_binding.content_sha256 == result.content_sha256
+        assert sample.image.size == 15 and sample.json_member.size == 15
     output = ledger.root / "images"
     output.mkdir()
     dest = fetch_from_package(package, next(iter(audit)), output, transport)

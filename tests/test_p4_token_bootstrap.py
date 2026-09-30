@@ -24,10 +24,20 @@ def local_fixture():
 def _child(token_file: Path, command: list[str]) -> subprocess.CompletedProcess[str]:
     # Synthetic path only. Child's -I ignores all caller PYTHONPATH settings;
     # bridge independently asserts its installed source origin before runpy.
-    code = """import importlib.util,sys
+    code = """import importlib.util,sys,os
 from pathlib import Path
 s=importlib.util.spec_from_file_location('isolated_bridge',sys.argv[1])
 m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+# Apply the fixture root only AFTER the bridge has validated source origin.
+# No package pre-import: its fail-closed origin guard remains effective.
+exclusive=os.environ.get('SAKURAPOOL_TEST_EXCLUSIVE_ROOT')
+if exclusive:
+    original=m.runpy.run_module
+    def isolated_run(*args,**kwargs):
+        import sakurapool.storage.budget as budget
+        budget.DEFAULT_WORK_ROOT=Path(exclusive)
+        return original(*args,**kwargs)
+    m.runpy.run_module=isolated_run
 raise SystemExit(m._run_cli(tuple(sys.argv[3:]),token_path=Path(sys.argv[2])))
 """
     env = os.environ.copy()

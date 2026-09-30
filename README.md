@@ -196,6 +196,10 @@ command logs, compatible installation failures/successes, and remaining gates.
 
 The runtime compiles one or more committed P2 directories into an immutable
 snapshot and answers queries from bitmaps without touching original archives.
+The runtime format is 2, compiler `sakurapool-p3-v2`; v1 runtime snapshots are
+rejected and must be recompiled. P2 durable FORMAT4 is unchanged, including
+readability of partition build provenance recording runtime format 1. Snapshot
+identity includes runtime format and compiler, so v1 and v2 do not collide.
 
 ```console
 sakura runtime compile [--index DIR ...] [P2_DIR ...] RUNTIME_ROOT
@@ -233,12 +237,21 @@ after the payload: a fast open binds the whole file to the snapshot identity
 as does a whole-file swap of `bitmaps.sqlite`/`catalog.sqlite`), while an
 in-place same-size payload edit is only detected by `--full` streaming
 verification. `catalog.sqlite` holds names/IDs (records, sources, datasets,
-namespaces, tags with categories) and every lookup resolves via index
+namespaces, tags, tag_categories) and every lookup resolves via index
 (asserted by `EXPLAIN QUERY PLAN` tests). Tag identity is `(namespace, value)`;
 one namespace may be served by multiple sources/origins (bitmap union).
 `tags_state in (known, empty)` defines a record's known set; `missing`/`invalid`
-records contribute no tags. Conflicting categories for one `(namespace, value)`
-fail the compile with `TAG_CATEGORY_CONFLICT`. Offsets/sizes are stored lossless
+records contribute no tags. Categories are metadata: distinct non-null categories
+are unioned into `tag_categories(tag_id, category)` (composite primary key,
+declared FK to tags, index on `(category, tag_id)`). The compiler explicitly
+validates references; it does not rely on SQLite FK enforcement. `tags` has no
+category column. Staging `CATEGORIES.json` contains `[tag_id, category]` pairs
+sorted by ID then category. `STAGE2-COUNTS.json` reports raw `tag_occurrences`;
+formal `tag_memberships` sums final tag bitmap cardinalities, deduplicated across
+categories, origins and chunks. `rt.tag_categories(namespace, value)` returns a
+sorted tuple (empty for null-only categories); unknown tags/namespaces raise
+`UnknownQueryValueError`. No category filter APIs are provided; queries remain
+value-based. Offsets/sizes are stored lossless
 beyond 2**63 and metadata presence is independent of its size (a zero-length
 metadata keeps `HAS_METADATA`). The snapshot fingerprint excludes the P2
 `created_at` timestamps by design, so re-timestamped identical inputs produce

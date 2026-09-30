@@ -584,7 +584,9 @@ def test_real_p2_p3_package_builder_and_audit_roundtrip_offline(http_and_budget)
                                   "trusted_hosts": ["127.0.0.1"],
                                   "work_root": str(ledger.root)}), encoding="utf-8")
     env = os.environ.copy()
-    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    source_path = str(Path(__file__).resolve().parents[1] / "src")
+    env["PYTHONPATH"] = (os.environ["PYTHONPATH"]
+                         if os.environ.get("SAKURAPOOL_TEST_EXCLUSIVE_ROOT") else source_path)
     plan = ledger.root / "inspect-plan.json"
     inspect = subprocess.run([sys.executable, "-m", "sakurapool", "remote", "inspect",
                               "--config", str(config), "--output", str(plan),
@@ -619,7 +621,9 @@ def test_cli_bootstrap_revisions_then_select_candidate_offline(http_and_budget):
               "work_root": str(ledger.root)}
     config_path.write_text(json.dumps(config), encoding="utf-8")
     env = os.environ.copy()
-    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    source_path = str(Path(__file__).resolve().parents[1] / "src")
+    env["PYTHONPATH"] = (os.environ["PYTHONPATH"]
+                         if os.environ.get("SAKURAPOOL_TEST_EXCLUSIVE_ROOT") else source_path)
     plan_path = ledger.root / "bootstrap-plan.json"
     def run():
         return subprocess.run([sys.executable, "-m", "sakurapool", "remote",

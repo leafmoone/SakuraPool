@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 from pyroaring import BitMap
 
-from . import RUNTIME_FORMAT_VERSION
+from . import RUNTIME_COMPILER, RUNTIME_FORMAT_VERSION
 from .compiler import LOCATION_DTYPE, _check_location_identity, _from_u64, _sha256_file
 from .errors import (
     AmbiguousRecordError,
@@ -144,6 +144,8 @@ class RuntimeSnapshot:
             raise SnapshotCorruptError(
                 f"unsupported runtime_format_version: "
                 f"{manifest['runtime_format_version']}")
+        if manifest.get("compiler") != RUNTIME_COMPILER:
+            raise SnapshotCorruptError("unsupported runtime compiler")
         from .compiler import _manifest_data_files
         _manifest_data_files(manifest)
         for name in _DATA_FILES:
@@ -177,7 +179,8 @@ class RuntimeSnapshot:
                 "SELECT source_id, name FROM sources LIMIT 0",
                 "SELECT dataset_id, name, source_id FROM datasets LIMIT 0",
                 "SELECT namespace_id, namespace FROM namespaces LIMIT 0",
-                "SELECT tag_id, namespace_id, value, category, cardinality FROM tags LIMIT 0",
+                "SELECT tag_id, namespace_id, value, cardinality FROM tags LIMIT 0",
+                "SELECT tag_id, category FROM tag_categories LIMIT 0",
                 "SELECT rid, record_id, source_id, dataset_id, post_id FROM records LIMIT 0",
                 "SELECT format_id, format FROM formats LIMIT 0",
                 "SELECT object_idx, storage_id, object_id, object_path, object_size, "
@@ -192,7 +195,7 @@ class RuntimeSnapshot:
                 "SELECT snapshot_id, runtime_format_version, compiler, "
                 "source_fingerprint, rid_count FROM meta").fetchone()
             if meta is None or meta[0] != snapshot_id or \
-                    meta[1] != RUNTIME_FORMAT_VERSION:
+                    meta[1] != RUNTIME_FORMAT_VERSION or meta[2] != RUNTIME_COMPILER:
                 raise SnapshotCorruptError("catalog meta mismatch")
             rid_count = meta[4]
             if rid_count != manifest["rid_count"]:
@@ -301,6 +304,14 @@ class RuntimeSnapshot:
         return row[0]
 
     # -- lookups -----------------------------------------------------------
+    def tag_categories(self, namespace: str, value: str) -> tuple[str, ...]:
+        """Return sorted non-null category metadata, not a query filter."""
+        self._check_open()
+        tag_id = self._tag_id(namespace, value)
+        return tuple(row[0] for row in self._catalog.execute(
+            "SELECT category FROM tag_categories WHERE tag_id = ? ORDER BY category",
+            (tag_id,)))
+
     def lookup_rids(self, source: str, post_id: str,
                     dataset: str | None = None) -> list[int]:
         self._check_open()

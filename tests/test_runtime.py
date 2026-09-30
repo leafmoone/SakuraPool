@@ -6,6 +6,7 @@ import pytest
 from test_indexer import make_tar
 
 from sakurapool import cli, indexer
+from sakurapool.runtime.compiler import compile_runtime
 from sakurapool.runtime.errors import (
     AmbiguousRecordError,
     CorruptInputError,
@@ -226,12 +227,14 @@ def test_rebuilt_inputs_same_logical_results(tmp_path):
     assert s1 == [0, 1]
 
 
-def test_duplicate_dataset_names_rejected(tmp_path):
+def test_same_dataset_disjoint_partitions_accepted(tmp_path):
     index_a = build_p2_index(tmp_path, "da", {"a.tar": {"1.jpg": b"a", "1.json": meta(["t"])}})
     index_b = build_p2_index(tmp_path, "db", {"b.tar": {"2.jpg": b"b", "2.json": meta(["t"])}})
-    with pytest.raises(CorruptInputError, match="duplicate dataset"):
-        combine_inventories([load_p2_inventory(index_a),
-                             load_p2_inventory(index_b)])
+    combined = combine_inventories([load_p2_inventory(index_a),
+                                    load_p2_inventory(index_b)])
+    assert len(combined.objects) == 2
+    summary = compile_runtime(combined, tmp_path / "multipart-runtime")
+    assert summary.rid_count == 2
 
 
 def test_cli_runtime(tmp_path, capsys):
@@ -369,37 +372,6 @@ def test_dual_compile_determinism(tmp_path):
     for value in profiles.values():
         assert value == first
 
-
-def test_tag_category_resolution_and_conflict(tmp_path):
-    from synthetic_p2 import ObjectSpec, SampleSpec, build_p2_directory
-
-    import sakurapool.runtime.compiler as compiler
-
-    def build(name, samples):
-        idx = tmp_path / name
-        build_p2_directory(
-            idx, dataset="ds", source="src",
-            objects=[ObjectSpec("a.tar", samples)],
-            created_at="2025-01-01T00:00:00+00:00")
-        return compiler.compile_runtime(load_p2_inventory(idx),
-                                        tmp_path / f"rt-{name}")
-
-    # all null -> NULL
-    build("cat-null", [SampleSpec("1.jpg", "1", [("t", None)]),
-                       SampleSpec("2.jpg", "2", [("t", None)])])
-    # one non-null wins over nulls
-    build("cat-one", [SampleSpec("1.jpg", "1", [("t", None)]),
-                      SampleSpec("2.jpg", "2", [("t", "male")])])
-    # different non-null values -> compile failure
-    with pytest.raises(CorruptInputError, match="TAG_CATEGORY_CONFLICT"):
-        build("cat-conflict", [SampleSpec("1.jpg", "1", [("t", "male")]),
-                               SampleSpec("2.jpg", "2", [("t", "female")])])
-    import sqlite3
-    catalog = tmp_path / "rt-cat-one" / "snapshots"
-    catalog = next(catalog.iterdir()) / "catalog.sqlite"
-    con = sqlite3.connect(str(catalog))
-    assert con.execute("SELECT category FROM tags").fetchone()[0] == "male"
-    con.close()
 
 
 def test_multi_origin_union_and_namespace_split(tmp_path):

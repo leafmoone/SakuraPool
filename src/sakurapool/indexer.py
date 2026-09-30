@@ -17,6 +17,7 @@ from typing import Any, Callable
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from .metadata import MetadataInvalid, SourceMismatch, normalize_nested
 from .records import IdentityConflictError, RecordKey
 from .registry import AdapterRegistry, DatasetAdapter
 
@@ -458,6 +459,7 @@ def _scan_shard_impl(path: Path | None, rel: str, adapter: DatasetAdapter, hash_
                 timings: dict[str, float], validator: dict[str, Any],
                 verify_offsets: bool = False, scope: _SpoolScope | None = None,
                 *, staged_archive: Any = None,
+                staged_provenance: tuple[str, str] = ("modelscope", "dataset"),
                 spool_directory: Path | None = None) -> _SpoolRows:
     scope = scope or _SpoolScope()
     rows = _SpoolRows(scope, directory=spool_directory)
@@ -465,8 +467,8 @@ def _scan_shard_impl(path: Path | None, rel: str, adapter: DatasetAdapter, hash_
     object_id = _object_id(rel, validator["sha256"])
     rows["objects"].append(dict(
         storage_id=adapter.storage_id,
-        backend="modelscope" if staged_archive is not None else "local",
-        repo_type="dataset" if staged_archive is not None else "local",
+        backend=staged_provenance[0] if staged_archive is not None else "local",
+        repo_type=staged_provenance[1] if staged_archive is not None else "local",
         archive_format="tar", dataset=adapter.dataset, object_path=rel,
         object_size=validator["size"], object_version=validator["sha256"],
         validator=validator["sha256"], validator_kind="sha256",
@@ -562,7 +564,8 @@ def _scan_shard_impl(path: Path | None, rel: str, adapter: DatasetAdapter, hash_
                     if not isinstance(metadata, dict):
                         raise ValueError("metadata must be a JSON object")
                     _json(metadata)
-                    if "source" in metadata and metadata["source"] != adapter.source:
+                    if (adapter.metadata_mode == "flat" and "source" in metadata
+                            and metadata["source"] != adapter.source):
                         error(meta.name, "source_mismatch", post_id=post_id, record_id=record_id)
                         continue
             except (ValueError, UnicodeError) as exc:
@@ -587,7 +590,23 @@ def _scan_shard_impl(path: Path | None, rel: str, adapter: DatasetAdapter, hash_
                      else "empty" if not tags else "known")
             tag_rows = [dict(value=t, category=adapter.tag_category) for t in tags] if state in (
                 "known", "empty") else None
-            digest = values.get("sha256")
+            nested = None
+            if adapter.metadata_mode == "nested_json_v1":
+                try:
+                    nested = normalize_nested(values, adapter, post_id,
+                                              PurePosixPath(image.name).suffix)
+                except SourceMismatch as exc:
+                    error(meta.name if meta else key, "source_mismatch", str(exc),
+                          post_id=post_id, record_id=record_id)
+                    continue
+                except MetadataInvalid as exc:
+                    error(meta.name if meta else key, "metadata_invalid", str(exc),
+                          post_id=post_id, record_id=record_id)
+                    continue
+                width, height = nested.width, nested.height
+                has_alpha = None
+                state, tag_rows = nested.tags_state, nested.tags
+            digest = values.get("sha256") if adapter.metadata_mode == "flat" else None
             if digest is not None and (not isinstance(digest, str)
                                        or not re.fullmatch(r"[0-9a-fA-F]{64}", digest)):
                 error(meta.name, "metadata_invalid", "invalid declared sha256",
@@ -599,7 +618,7 @@ def _scan_shard_impl(path: Path | None, rel: str, adapter: DatasetAdapter, hash_
                 digest = (staged_archive.member_sha256(image.name)
                           if staged_archive is not None else _hash_member(archive, image))
                 origin = "computed:sha256"
-            text = values.get(adapter.text_field)
+            text = nested.text if nested is not None else values.get(adapter.text_field)
             if text is not None and not isinstance(text, str):
                 error(meta.name, "metadata_invalid", "invalid text", post_id=post_id,
                       record_id=record_id)
@@ -613,14 +632,16 @@ def _scan_shard_impl(path: Path | None, rel: str, adapter: DatasetAdapter, hash_
                 json_offset_data=meta.offset_data if meta else None,
                 json_size=meta.size if meta else None,
                 text=text, tags_state=state, tags=tag_rows, hash_source=origin, sha256=digest,
-                image_format=PurePosixPath(image.name).suffix.lower().lstrip("."),
+                image_format=(nested.image_format if nested is not None else
+                              PurePosixPath(image.name).suffix.lower().lstrip(".")),
                 width=width, height=height, has_alpha=has_alpha,
                 hash_kind="sha256" if digest else None,
                 status="indexed",
             ))
             rows["annotations"].append(dict(
                 **identity_fields, namespace=adapter.tag_namespace,
-                origin=f"declared:json.{adapter.tags_field}", tags_state=state, tags=tag_rows,
+                origin=("declared:nested_json_v1.tags" if nested is not None else
+                        f"declared:json.{adapter.tags_field}"), tags_state=state, tags=tag_rows,
             ))
         member_spool.close()
     return rows

@@ -1,17 +1,10 @@
-"""Offline bridge from Python to the ``sakurapool-worker`` Rust binary.
+"""Subprocess bridge for the version-1 NDJSON Rust worker protocol.
 
-Formal NDJSON control protocol (version 1): a ``hello`` handshake carrying
-the job budget, then one ``request`` per line with an operation, a
-per-request budget and a payload. The worker's budget counters are
-in-memory only; the durable reservation always happens here, on the Python
-side, against the BudgetLedger BEFORE any worker request. A clean worker
-rejection settles the lease (the attempt stays charged); a crash-class
-failure (timeout, pipe failure, protocol violation, process death) leaves
-the lease pending, i.e. never refunded.
-
-The worker binary path is explicit; there is no search or fallback. stdout
-carries protocol messages only; stderr is drained continuously and kept in
-a bounded tail.
+Python owns durable budget reservations. Clean worker rejection settles the
+lease; crash-class failures leave it pending. Requests and control responses
+are limited to 64 KiB; successful TAR manifests may occupy up to 64 MiB and
+contain at most 100,000 members. stdout is framed in bounded chunks, stderr
+is continuously drained into a bounded tail, and teardown has its own timeout.
 """
 
 from __future__ import annotations
@@ -28,10 +21,13 @@ from .budget import Reservation
 
 PROTOCOL_VERSION = 1
 MAX_LINE_BYTES = 64 * 1024
+MAX_SCAN_RESPONSE_BYTES = 64 * 1024 * 1024
+MAX_SCAN_MEMBERS = 100_000
 _STDERR_TAIL_BYTES = 64 * 1024
 _STDOUT_QUEUE_LINES = 8
 _QUEUE_WAIT_S = 0.05
 _TIMEOUT_S = 60.0
+_SHUTDOWN_TIMEOUT_S = 2.0
 _REJECTED = "worker rejected request"
 _ZERO_BUDGET = {"body": 0, "disk": 0, "inflight": 0, "attempts": 0}
 
@@ -77,9 +73,10 @@ class RustWorker:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            bufsize=0,  # no BufferedReader/Writer lock held by a blocked pipe operation
+            bufsize=0,  # no buffered pipe lock held by a blocked operation
         )
         self._lines: queue.Queue[bytes] = queue.Queue(maxsize=_STDOUT_QUEUE_LINES)
+        self._response_line_bytes = MAX_LINE_BYTES
         self._stop = threading.Event()
         self._reader_done = threading.Event()
         self._stdout_error: str | None = None
@@ -96,32 +93,52 @@ class RustWorker:
         try:
             self._handshake(normalized_budget)
         except BaseException:
-            self.cancel()  # constructor failures must not leak a child or pipe threads
+            self.cancel()  # constructor failures must not leak a child or threads
             raise
 
     # -- transport ------------------------------------------------------
 
     def _drain_stdout(self) -> None:
         assert self._proc is not None and self._proc.stdout is not None
-        pipe = self._proc.stdout
+        proc = self._proc
+        pipe = proc.stdout
+        pending = bytearray()
         try:
             while True:
-                raw = pipe.readline(MAX_LINE_BYTES + 1)
-                if not raw:
+                chunk = pipe.read(MAX_LINE_BYTES)
+                if not chunk:
+                    if pending and not self._stop.is_set():
+                        self._stdout_error = "worker returned invalid json"
                     break
                 if self._stop.is_set():
-                    # Shutdown abandons queued delivery, but drains the pipe so a
-                    # finite writer can exit gracefully instead of deadlocking.
+                    # Drain discarded output in fixed chunks during graceful close.
+                    pending.clear()
                     continue
-                if len(raw) > MAX_LINE_BYTES:
-                    self._stdout_error = "worker response line too long"
-                    break
-                while not self._stop.is_set():
-                    try:
-                        self._lines.put(raw, timeout=_QUEUE_WAIT_S)
+                start = 0
+                while start < len(chunk):
+                    newline = chunk.find(b"\n", start)
+                    end = len(chunk) if newline < 0 else newline + 1
+                    if len(pending) + end - start > self._response_line_bytes:
+                        self._stdout_error = "worker response line too long"
+                        # Never abandon a blocked writer alive on an undrained
+                        # pipe, nor wait for its newline (it might never arrive).
+                        try:
+                            proc.kill()
+                        except OSError:
+                            pass
+                        return
+                    pending.extend(chunk[start:end])
+                    start = end
+                    if newline < 0:
                         break
-                    except queue.Full:
-                        continue  # real backpressure: do not read another line
+                    raw = bytes(pending)
+                    pending.clear()
+                    while not self._stop.is_set():
+                        try:
+                            self._lines.put(raw, timeout=_QUEUE_WAIT_S)
+                            break
+                        except queue.Full:
+                            continue  # bounded queue provides backpressure
         except (OSError, ValueError):
             if not self._stop.is_set():
                 self._stdout_error = "worker pipe failure"
@@ -138,7 +155,7 @@ class RustWorker:
                     break
                 self._append_stderr(chunk)
         except (OSError, ValueError):
-            pass  # a concurrently closing pipe has no more diagnostics
+            pass
 
     def _append_stderr(self, chunk: bytes) -> None:
         with self._stderr_lock:
@@ -173,7 +190,7 @@ class RustWorker:
             finally:
                 self._writing.clear()
 
-    def _receive(self) -> dict:
+    def _receive(self, *, max_line_bytes: int = MAX_LINE_BYTES) -> dict:
         deadline = time.monotonic() + self.timeout_s
         while True:
             if self._stop.is_set():
@@ -186,8 +203,6 @@ class RustWorker:
                 if self._stop.is_set():
                     raise RustWorkerError("worker is closed")
                 if self._reader_done.is_set():
-                    # Producer may have enqueued its final line between our
-                    # timeout and publishing done. Drain it before reporting EOF.
                     try:
                         raw = self._lines.get_nowait()
                         break
@@ -195,16 +210,20 @@ class RustWorker:
                         raise RustWorkerError(self._stdout_error or "worker exited") from None
                 if time.monotonic() >= deadline:
                     raise RustWorkerError("worker timed out")
+        if len(raw) > max_line_bytes:
+            raise RustWorkerError("worker response line too long")
         try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise RustWorkerError("worker returned invalid json") from exc
-        try:
-            message = json.loads(text)
-        except json.JSONDecodeError as exc:
+            message = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, RecursionError) as exc:
             raise RustWorkerError("worker returned invalid json") from exc
         if not isinstance(message, dict):
             raise RustWorkerError("worker returned invalid json")
+        # A scan request permits a large successful report, not a large error
+        # or other control message. The transport remains bounded either way.
+        if len(raw) > MAX_LINE_BYTES and not (
+            message.get("type") == "response" and message.get("ok") is True
+        ):
+            raise RustWorkerError("worker response line too long")
         return message
 
     def _handshake(self, job_budget: dict) -> None:
@@ -236,14 +255,17 @@ class RustWorker:
         budget: dict | None = None,
         payload: dict | None = None,
     ) -> dict:
-        """Send one request and return its ``result`` object.
+        """Return a result; only clean rejection is refundable by callers.
 
-        A clean worker rejection raises :class:`RustWorkerError` with the
-        static message ``worker rejected request``. Timeout, pipe failure
-        and malformed replies raise with other static messages (crash
-        class); callers with a durable reservation must then leave it
-        pending.
+        TAR scan manifests have a separate bounded response allowance. This
+        synchronous protocol permits one outstanding request per worker.
         """
+        scan = operation in ("scan_tar", "scan_http_tar")
+        member_limit = MAX_SCAN_MEMBERS
+        if scan and payload is not None:
+            member_limit = payload.get("max_members", MAX_SCAN_MEMBERS)
+            if type(member_limit) is not int or not 0 <= member_limit <= MAX_SCAN_MEMBERS:
+                raise RustWorkerError("worker scan member limit invalid")
         request = {
             "type": "request",
             "request_id": uuid.uuid4().hex,
@@ -251,8 +273,13 @@ class RustWorker:
             "budget": _normalize_budget(budget),
             "payload": payload if payload is not None else {},
         }
-        self._send((json.dumps(request) + "\n").encode("utf-8"))
-        message = self._receive()
+        response_limit = MAX_SCAN_RESPONSE_BYTES if scan else MAX_LINE_BYTES
+        self._response_line_bytes = response_limit
+        try:
+            self._send((json.dumps(request) + "\n").encode("utf-8"))
+            message = self._receive(max_line_bytes=response_limit)
+        finally:
+            self._response_line_bytes = MAX_LINE_BYTES
         if message.get("type") == "protocol_error":
             raise RustWorkerError("worker protocol error")
         if (
@@ -265,6 +292,10 @@ class RustWorker:
         result = message.get("result")
         if not isinstance(result, dict):
             raise RustWorkerError("worker returned invalid json")
+        if scan:
+            members = result.get("members")
+            if not isinstance(members, list) or len(members) > member_limit:
+                raise RustWorkerError("worker returned invalid json")
         return result
 
     def send_raw(self, line: bytes) -> None:
@@ -272,7 +303,7 @@ class RustWorker:
         self._send(line)
 
     def read_raw(self) -> dict:
-        """Protocol-level receive (audit/tests)."""
+        """Protocol-level receive (audit/tests), with the control response cap."""
         return self._receive()
 
     # -- budget-gated fetch ----------------------------------------------
@@ -288,15 +319,7 @@ class RustWorker:
         disk_reserve: int = 0,
         ipc_reserve: int = 4096,
     ) -> dict:
-        """Loopback range fetch with a durable pre-request reservation.
-
-        The Python BudgetLedger is the only durable budget authority: the
-        reservation (body + disk + inflight + one attempt) is persisted
-        before any worker request. Clean worker rejection settles the lease
-        (attempt stays charged, remainder released). Crash-class failures
-        (timeout, pipe failure, protocol error, death) leave the lease
-        pending: nothing is refunded.
-        """
+        """Reserve durably before fetching; crash-class failures stay pending."""
         if not 0 <= start <= end < total:
             raise RustWorkerError("range outside resource")
         body = end - start + 1
@@ -336,7 +359,7 @@ class RustWorker:
         self._shutdown(kill=True)
 
     def close(self) -> None:
-        """Stop queue delivery, drain pipes, close stdin, wait; kill on timeout."""
+        """Drain pipes and wait briefly, then kill; independent of scan timeout."""
         self._shutdown(kill=False)
 
     def _shutdown(self, *, kill: bool) -> None:
@@ -345,34 +368,32 @@ class RustWorker:
             if proc is None:
                 return
             self._alive = False
-            self._stop.set()  # wakes a producer blocked on the bounded queue
-            # Closing a pipe while another thread is blocked in WriteFile can
-            # itself block forever on Windows. Kill+wait FIRST in that case;
-            # the pipe failure releases the writer before any handle is closed.
+            self._stop.set()
+            # Kill+wait before closing stdin when a Windows WriteFile is
+            # blocked; closing that handle first can itself block forever.
             if kill or self._writing.is_set():
                 try:
                     proc.kill()
                 except OSError:
                     pass
-                proc.wait(timeout=self.timeout_s)
+                proc.wait(timeout=_SHUTDOWN_TIMEOUT_S)
             if proc.stdin is not None:
                 try:
                     proc.stdin.close()
                 except (OSError, ValueError):
                     pass
             try:
-                proc.wait(timeout=self.timeout_s)
+                proc.wait(timeout=_SHUTDOWN_TIMEOUT_S)
             except subprocess.TimeoutExpired:
                 proc.kill()
-                # Do not silently mark an unreaped process as closed.
-                proc.wait(timeout=self.timeout_s)
+                proc.wait(timeout=_SHUTDOWN_TIMEOUT_S)
             for reader in (self._reader, self._stderr_reader):
-                reader.join(timeout=self.timeout_s)
+                reader.join(timeout=_SHUTDOWN_TIMEOUT_S)
+            if self._reader.is_alive() or self._stderr_reader.is_alive():
+                raise RustWorkerError("worker pipe reader failed to exit")
             for pipe in (proc.stdin, proc.stdout, proc.stderr):
                 if pipe is not None:
                     pipe.close()
-            if self._reader.is_alive() or self._stderr_reader.is_alive():
-                raise RustWorkerError("worker pipe reader failed to exit")
             self._proc = None
 
     def __enter__(self) -> RustWorker:

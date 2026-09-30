@@ -51,6 +51,11 @@ def _build_corpus(base):
                     tags.append(("solo", "general"))
                 if rng.random() < 0.05:
                     tags.append(("group", "general"))  # exclusive pair
+                # Same-rid category overlap plus different-rid category variation.
+                if i % 3 == 0:
+                    tags.extend([("multicat", "artist"), ("multicat", "general")])
+                else:
+                    tags.append(("multicat", "character"))
                 tags_state = "known"
                 if rng.random() < 0.03:
                     tags_state = "missing"

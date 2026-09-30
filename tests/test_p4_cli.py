@@ -35,7 +35,9 @@ def test_remote_cli_invalid_profile_or_blocked_scan_no_output(tmp_path, operatio
             ['remote', 'fetch', '--package', str(package), '--config', str(config),
              '--record-id', 'a' * 32, '--output', str(output)])
     env = os.environ.copy()
-    env['PYTHONPATH'] = str(Path(__file__).resolve().parents[1] / 'src')
+    env['PYTHONPATH'] = (os.environ['PYTHONPATH']
+                         if os.environ.get('SAKURAPOOL_TEST_EXCLUSIVE_ROOT')
+                         else str(Path(__file__).resolve().parents[1] / 'src'))
     finished = subprocess.run([sys.executable, '-m', 'sakurapool', *argv],
                               capture_output=True, text=True, env=env,
                               timeout=20, check=False)

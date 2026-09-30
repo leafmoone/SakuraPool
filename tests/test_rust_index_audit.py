@@ -16,7 +16,6 @@ import pytest
 from sakurapool.registry import DatasetAdapter
 from sakurapool.storage.budget import DEFAULT_WORK_ROOT, MIB, BudgetLedger
 from sakurapool.storage.rust_index import (
-    MAX_JSON_PAYLOAD_BYTES,
     RustScanAuditError,
     build_stage_from_scan,
 )
@@ -159,7 +158,7 @@ def test_unparsable_json_rejected():
 
 
 def test_oversized_json_rejected():
-    big = b'{"text": "' + b"y" * (MAX_JSON_PAYLOAD_BYTES) + b'"}'
+    big = b'{"text": "' + b"y" * (_adapter().max_json_bytes) + b'"}'
     raw = RAW[:JSON_OFF] + big + RAW[JSON_OFF + len(JSON) :]
 
     tmp, ledger = _ledger_root()
