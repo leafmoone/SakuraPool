@@ -20,7 +20,7 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 from posixpath import splitext
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from sakurapool.registry import DatasetAdapter
 from sakurapool.storage.budget import BudgetLedger, Reservation
@@ -30,10 +30,6 @@ from sakurapool.storage.remote_index import (
     StagedObject,
 )
 from sakurapool.storage.transport import BoundObject
-
-# A staged JSON payload larger than this is a scan/transport anomaly, not
-# an image dataset: refuse to stage it.
-MAX_JSON_PAYLOAD_BYTES = 1 << 20
 
 
 class RustScanAuditError(ValueError):
@@ -85,9 +81,9 @@ def _member_rows(
         if not payload:
             raise RustScanAuditError(f"empty member payload: {member['path']!r}")
         if is_json:
-            if len(payload) > MAX_JSON_PAYLOAD_BYTES:
+            if len(payload) > adapter.max_json_bytes:
                 raise RustScanAuditError(
-                    f"json payload exceeds {MAX_JSON_PAYLOAD_BYTES} bytes: {member['path']!r}"
+                    f"json payload exceeds {adapter.max_json_bytes} bytes: {member['path']!r}"
                 )
             json.loads(payload)  # staged JSON must parse
         rows.append(
@@ -120,8 +116,18 @@ def build_stage_from_scan(
     """
     _audit_scan(scan, raw)
     rows = _member_rows(scan, raw, adapter)
-    images = sum(1 for row in rows if row[1] == "image")
-    lease = ledger.reserve(Reservation(disk=OFFLINE_STAGE_ALLOWANCE))
+    return _write_stage(scan, rows, bound, adapter, stage_dir, ledger)
+
+
+def _write_stage(
+    scan: Mapping[str, Any],
+    rows: Iterable[tuple[str, str, int, int, str, bytes | None]],
+    bound: BoundObject, adapter: DatasetAdapter,
+    stage_dir: Path, ledger: BudgetLedger | None,
+) -> StagedObject:
+    images = 0
+    member_count = 0
+    lease = ledger.reserve(Reservation(disk=OFFLINE_STAGE_ALLOWANCE)) if ledger else None
     try:
         stage_dir.mkdir(exist_ok=False)
         db_path = stage_dir / "members.sqlite"
@@ -140,9 +146,12 @@ def build_stage_from_scan(
                 "size INTEGER NOT NULL, sha256 TEXT NOT NULL,"
                 "json_payload BLOB)"
             )
-            db.executemany("INSERT INTO members VALUES (?,?,?,?,?,?)", rows)
+            for row in rows:
+                db.execute("INSERT INTO members VALUES (?,?,?,?,?,?)", row)
+                member_count += 1
+                images += row[1] == "image"
             db.commit()
-        database_hash = hashlib.sha256(db_path.read_bytes()).hexdigest()
+        database_hash = _file_sha256(db_path)
         adapter_hash = hashlib.sha256(
             json.dumps(adapter.to_dict(), sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
@@ -150,7 +159,7 @@ def build_stage_from_scan(
             {
                 "sha256": scan["whole_sha256"],
                 "size": bound.size,
-                "members": len(rows),
+                "members": member_count,
                 "potential_records": images,
                 "database_sha256": database_hash,
                 "adapter_sha256": adapter_hash,
@@ -164,8 +173,78 @@ def build_stage_from_scan(
             handle.write(stamp)
             handle.flush()
             os.fsync(handle.fileno())
-        ledger.settle(lease)
-        return StagedObject(db_path, scan["whole_sha256"], bound.size, len(rows), images)
+        if ledger is not None and lease is not None:
+            ledger.settle(lease)
+        return StagedObject(db_path, scan["whole_sha256"], bound.size, member_count, images)
     except BaseException:
-        ledger.settle(lease)
+        if ledger is not None and lease is not None:
+            ledger.settle(lease)
         raise
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def build_stage_from_file_scan(
+    scan: Mapping[str, Any], tar_path: Path, bound: BoundObject,
+    adapter: DatasetAdapter, stage_dir: Path, ledger: BudgetLedger | None = None,
+) -> StagedObject:
+    """Stage a trusted local-worker report, reading only JSON payload extents.
+
+    The caller must obtain the report from its own single-pass Rust worker and
+    compare its whole hash against the provider validator before invoking this.
+    This API does not authenticate arbitrary externally supplied scan reports.
+    """
+    before = tar_path.stat()
+    if before.st_size != scan["size"] or bound.size != scan["size"]:
+        raise RustScanAuditError("scan/file/binding size mismatch")
+    seen = set()
+    previous_end = 0
+    for member in scan["members"]:
+        name = member["path"]
+        if name in seen:
+            raise RustScanAuditError(f"duplicate member path: {name!r}")
+        seen.add(name)
+        if member["kind"] != "file":
+            continue
+        start, size = member["offset"], member["size"]
+        if (type(start) is not int or type(size) is not int or start % 512
+                or start < previous_end or size <= 0 or start + size > before.st_size):
+            raise RustScanAuditError(f"invalid member extent: {name!r}")
+        digest = member["sha256"]
+        if (not isinstance(digest, str) or len(digest) != 64
+                or any(c not in "0123456789abcdef" for c in digest)):
+            raise RustScanAuditError(f"invalid member SHA256: {name!r}")
+        previous_end = start + size
+
+    def rows():
+        with tar_path.open("rb") as handle:
+            for member in scan["members"]:
+                if member["kind"] != "file":
+                    continue
+                suffix = splitext(member["path"])[1].lower()
+                if suffix not in adapter.image_extensions and suffix != ".json":
+                    continue
+                payload = None
+                if suffix == ".json":
+                    if member["size"] > adapter.max_json_bytes:
+                        raise RustScanAuditError("JSON exceeds adapter.max_json_bytes")
+                    handle.seek(member["offset"])
+                    payload = handle.read(member["size"])
+                    if (len(payload) != member["size"] or
+                            hashlib.sha256(payload).hexdigest() != member["sha256"]):
+                        raise RustScanAuditError("JSON extent hash mismatch")
+                    json.loads(payload)
+                yield (member["path"], "json" if suffix == ".json" else "image",
+                       member["offset"], member["size"], member["sha256"], payload)
+            after = tar_path.stat()
+            if (before.st_size, before.st_mtime_ns, before.st_ino) != (
+                    after.st_size, after.st_mtime_ns, after.st_ino):
+                raise RustScanAuditError("local TAR changed during staging")
+
+    return _write_stage(scan, rows(), bound, adapter, stage_dir, ledger)

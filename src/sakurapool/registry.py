@@ -42,8 +42,44 @@ class DatasetAdapter:
     tag_category: str = "general"
     numeric_post_id: bool = False
     ignored_names: tuple[str, ...] = ("README.md", "manifest.json")
+    metadata_mode: str = "flat"
+    id_path: str = "id"
+    source_provenance_path: str = "source.dataset"
+    allowed_provenance: tuple[str, ...] = ()
+    width_path: str = "image.width"
+    height_path: str = "image.height"
+    format_path: str = "image.format"
+    text_path: str = "captions.nl2"
+    tag_fields: dict[str, str] = field(default_factory=lambda: {
+        "general": "tags.general", "artist": "tags.artist",
+        "character": "tags.character", "copyright": "tags.copyright",
+    })
 
     def __post_init__(self) -> None:
+        if self.metadata_mode not in ("flat", "nested_json_v1"):
+            raise ValueError("unknown metadata mode")
+        paths = (self.id_path, self.source_provenance_path, self.width_path,
+                 self.height_path, self.format_path, self.text_path)
+        if any(not isinstance(p, str) or not p or any(
+                not segment or segment != segment.strip() for segment in p.split("."))
+               for p in paths):
+            raise ValueError("metadata paths must be nonempty dotted paths")
+        if (not isinstance(self.allowed_provenance, (list, tuple)) or any(
+                not isinstance(v, str) or not v or v != v.strip()
+                for v in self.allowed_provenance)):
+            raise ValueError("allowed provenance must contain canonical strings")
+        if (not isinstance(self.tag_fields, dict) or set(self.tag_fields) != {
+                "general", "artist", "character", "copyright"} or any(
+                not isinstance(p, str) or not p or any(not s or s != s.strip()
+                for s in p.split(".")) for p in self.tag_fields.values())):
+            raise ValueError("tag_fields must declare four category paths")
+        if self.metadata_mode == "nested_json_v1":
+            if not self.allowed_provenance:
+                raise ValueError("nested adapter requires allowed provenance")
+            if self.image_prefix or self.metadata_prefix or not self.numeric_post_id:
+                raise ValueError("nested adapter requires full-path pairing and numeric post ids")
+        object.__setattr__(self, "allowed_provenance", tuple(self.allowed_provenance))
+        object.__setattr__(self, "tag_fields", dict(self.tag_fields))
         for value in (self.dataset, self.source, self.storage_id, self.tags_field, self.text_field,
                       self.tag_namespace, self.tag_category):
             if not isinstance(value, str) or not value.strip() or value != value.strip():
@@ -83,6 +119,14 @@ class DatasetAdapter:
         result = asdict(self)
         result["image_extensions"] = list(self.image_extensions)
         result["ignored_names"] = list(self.ignored_names)
+        if self.metadata_mode == "flat":
+            # Preserve the historical flat adapter's durable canonical contract.
+            for key in ("metadata_mode", "id_path", "source_provenance_path",
+                        "allowed_provenance", "width_path", "height_path",
+                        "format_path", "text_path", "tag_fields"):
+                result.pop(key)
+        else:
+            result["allowed_provenance"] = list(self.allowed_provenance)
         return result
 
 

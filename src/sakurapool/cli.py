@@ -233,6 +233,15 @@ def main(argv: list[str] | None = None) -> int:
     scan_command.add_argument("--config", type=Path)
     scan_command.add_argument("--dataset", default="local")
     scan_command.add_argument("--hash-images", action="store_true")
+    build = index_subparsers.add_parser(
+        "build-partition", help="single-pass local Rust partition build")
+    build.add_argument("--config", type=Path, required=True)
+    build.add_argument("--manifest", type=Path, required=True)
+    build.add_argument("--worker", type=Path, required=True)
+    build.add_argument("--work-dir", type=Path, required=True)
+    build.add_argument("--output", type=Path, required=True)
+    build.add_argument("--code-sha", required=True,
+                       help="full SHA of the installed candidate/approved build")
     scan_remote = index_subparsers.add_parser("scan-remote", help="gated P4 scan")
     scan_remote.add_argument("--config", type=Path, required=True)
     scan_remote.add_argument("--plan", type=Path, required=True)
@@ -268,6 +277,16 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             print(json.dumps(result, sort_keys=True))
             return 0
+        if args.command == "index" and args.index_command == "build-partition":
+            from .local_builder import build_partition
+            from .partition import PartitionManifest
+            manifest = PartitionManifest.from_dict(_load_json(str(args.manifest)))
+            registry = AdapterRegistry.from_dict(_load_json(str(args.config)))
+            result = build_partition(manifest, registry.get(manifest.dataset), args.worker,
+                                     args.work_dir, args.output, code_sha=args.code_sha,
+                                     completion=lambda value: print(json.dumps(value), flush=True))
+            print(json.dumps(result, sort_keys=True))
+            return 0 if result["counts"]["errors"] == 0 else 1
         if args.command == "index" and args.index_command == "scan-remote":
             return _scan_remote_blocked()
         if args.command == "runtime":

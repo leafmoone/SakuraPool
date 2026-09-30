@@ -65,8 +65,8 @@ class P2Inventory:
 def combine_inventories(inventories: list[P2Inventory]) -> P2Inventory:
     """Merge multiple committed P2 indexes into one P3 compile input.
 
-    Object and dataset names must be unique across inputs; the combined
-    fingerprint hashes the per-directory fingerprints in input order.
+    Same-dataset partitions must have equal adapter/hash contracts and
+    disjoint physical objects. Duplicate post ids are intentionally retained.
     """
     if not inventories:
         _fail("no P2 inputs provided")
@@ -74,13 +74,26 @@ def combine_inventories(inventories: list[P2Inventory]) -> P2Inventory:
         return inventories[0]
     objects = []
     seen = set()
-    datasets = set()
+    paths = set()
+    datasets = {}
     for inventory in inventories:
-        for dataset in {obj.dataset_id for obj in inventory.objects}:
-            if dataset in datasets:
-                _fail(f"duplicate dataset name across inputs: {dataset}")
-            datasets.add(dataset)
-        for obj in inventory.objects:
+        # Revalidate disk inputs: callers cannot bypass integrity checks by
+        # constructing a P2Inventory dataclass themselves.
+        verified = load_p2_inventory(inventory.root)
+        if verified.source_fingerprint != inventory.source_fingerprint:
+            _fail("inventory changed before combine")
+        for dataset in {obj.dataset_id for obj in verified.objects}:
+            contract = _json([verified.contract["adapter"],
+                              verified.contract["hash_images"]])
+            if dataset in datasets and datasets[dataset] != contract:
+                _fail(f"adapter/hash contract mismatch across inputs: {dataset}")
+            datasets[dataset] = contract
+        for obj in verified.objects:
+            object_path = obj.object_id.rsplit("@sha256-", 1)[0]
+            path_key = (obj.dataset_id, object_path)
+            if path_key in paths:
+                _fail(f"duplicate object_path across inputs: {object_path}")
+            paths.add(path_key)
             key = (obj.dataset_id, obj.object_id)
             if key in seen:
                 _fail(f"duplicate object across inputs: {obj.object_id}")
@@ -164,8 +177,25 @@ def _load_directory(root: Path, dataset: str) -> tuple[dict[str, Any], list[P2Ob
     if (contract.get("format_version") != FORMAT_VERSION
             or contract.get("builder") != BUILDER):
         _fail(f"unsupported P2 contract: {root}")
-    if set(contract) != {"format_version", "builder", "adapter", "hash_images", "inputs"}:
+    base_keys = {"format_version", "builder", "adapter", "hash_images", "inputs"}
+    if set(contract) not in (base_keys, base_keys | {"build_metadata", "partition_manifest"}):
         _fail("unexpected INPUT.json keys")
+    if "build_metadata" in contract:
+        from ..local_builder import validate_build_metadata
+        from ..partition import PartitionManifest
+        try:
+            validate_build_metadata(contract["build_metadata"])
+            plan = contract["partition_manifest"]
+            restored = dict(plan, objects=[dict(obj, local_path=str(root / "unused.tar"))
+                                         for obj in plan["objects"]])
+            parsed_plan = PartitionManifest.from_dict(restored)
+            if (parsed_plan.dataset != dataset or
+                    parsed_plan.source != contract["adapter"]["source"]):
+                _fail("partition plan adapter identity mismatch")
+            if {obj.repository_path for obj in parsed_plan.objects} != set(contract["inputs"]):
+                _fail("partition plan input set mismatch")
+        except (KeyError, TypeError, ValueError) as exc:
+            _fail(f"invalid partition build provenance: {exc}")
     if contract["adapter"].get("dataset") != dataset:
         _fail("P2 adapter.dataset does not match this input directory")
     if not isinstance(contract["inputs"], dict) or not contract["inputs"]:
@@ -196,10 +226,19 @@ def _load_directory(root: Path, dataset: str) -> tuple[dict[str, Any], list[P2Ob
         if set(commit) != {"schema", "builder", "dataset_id", "object_id", "input",
                            "files", "contract_sha256", "created_at"}:
             _fail(f"unexpected COMMIT keys: {marker_path.name}")
+        planned = contract["inputs"][rel]
+        actual = commit["input"]
+        input_matches = actual == planned
+        if ("build_metadata" in contract and planned.get("sha256") is None
+                and isinstance(actual, dict)):
+            import re
+            input_matches = (dict(actual, sha256=None) == planned
+                             and isinstance(actual.get("sha256"), str)
+                             and re.fullmatch(r"[0-9a-f]{64}", actual["sha256"]) is not None)
         if (commit["schema"] != FORMAT_VERSION or commit["builder"] != BUILDER
                 or commit["contract_sha256"] != contract_hash
                 or commit["dataset_id"] != dataset
-                or commit["input"] != contract["inputs"][rel]):
+                or not input_matches):
             _fail(f"COMMIT identity/validator mismatch: {marker_path.name}")
         object_id = commit["object_id"]
         expected_object_id = f"{rel}@sha256-{commit['input']['sha256']}"
@@ -238,6 +277,8 @@ def load_p2_inventory(
     roots = [Path(r) for r in roots]
     if not roots:
         _fail("at least one P2 index directory is required")
+    if len(roots) > 1:
+        return combine_inventories([load_p2_inventory(root) for root in roots])
     all_objects: list[P2Object] = []
     contracts: list[dict[str, Any]] = []
     for root_value in roots:
