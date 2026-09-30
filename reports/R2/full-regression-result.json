@@ -1,0 +1,19 @@
+{
+  "command": [
+    "D:\\SakuraTool\\SakuraPool-Fix3-20260930a\\python-env\\Scripts\\python.exe",
+    "-m",
+    "pytest",
+    "-q",
+    "-ra"
+  ],
+  "cwd": "D:\\SakuraTool\\SakuraPool",
+  "started_utc": "2026-09-30T10:21:57.529346+00:00",
+  "finished_utc": "2026-09-30T10:53:33.113140+00:00",
+  "pid": 57576,
+  "exit_code": 1,
+  "elapsed_seconds": 1895.55,
+  "pythonpath": "unset",
+  "worker": "D:/SakuraTool/SakuraPool-Fix3-20260930a/rust-target/release/sakurapool-worker.exe",
+  "log": "D:\\SakuraTool\\SakuraPool\\reports\\R2\\full-regression.log",
+  "retries": 0
+}

@@ -1,0 +1,3 @@
+# Keep actual terminal capture bytes, including traceback whitespace.
+*.log -text -whitespace
+full-regression*-result.json -text
