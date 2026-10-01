@@ -37,6 +37,10 @@ MAX_JSON_BYTES = 16 << 20
 MAX_STAGE_PAGES = 131_072
 MAX_STAGE_DB_BYTES = MAX_STAGE_PAGES * 4096
 OFFLINE_STAGE_ALLOWANCE = 1152 * (1 << 20)
+# Keep JSON extent seeks logarithmic without indexing large payload blobs.
+JSON_OFFSET_INDEX_SQL = (
+    "CREATE INDEX members_json_offset ON members(offset_data) WHERE kind='json'"
+)
 
 
 def _offline_only(ledger: BudgetLedger) -> None:
@@ -74,6 +78,7 @@ class StagedArchive:
         return self
 
     def __exit__(self, *_exc: object) -> None:
+        self.cursor.close()
         self.db.close()
 
     def next(self) -> tarfile.TarInfo | None:
@@ -368,6 +373,7 @@ def stage_tar(transport: GuardedTransport, ledger: BudgetLedger,
                        "kind TEXT NOT NULL, offset_data INTEGER NOT NULL,"
                        "size INTEGER NOT NULL, sha256 TEXT NOT NULL,"
                        "json_payload BLOB)")
+            db.execute(JSON_OFFSET_INDEX_SQL)
             count = images = 0
             with transport.stream_object(bound) as stream:
                 try:
