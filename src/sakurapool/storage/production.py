@@ -306,7 +306,18 @@ class RustProductionTransport:
             json_limit=json_limit,
         )
         # All leases exist before hello; malformed/crash/timeout keeps unknown body pending.
-        with RustWorker(self.worker, job_budget=budget, timeout_s=40) as worker:
+        worker_type = RustWorker
+        if getattr(self, "_track_correct_worker", False):
+            transport = self
+
+            class CorrectWorker(RustWorker):
+                def __init__(self, *args, **kwargs):
+                    self._proc = None  # Distinguish constructor-before-spawn from live unknown.
+                    transport._correct_worker = self
+                    super().__init__(*args, **kwargs)
+
+            worker_type = CorrectWorker
+        with worker_type(self.worker, job_budget=budget, timeout_s=40) as worker:
             request_id = uuid.uuid4().hex
             worker.send_raw(
                 (
@@ -569,10 +580,15 @@ class RustProductionTransport:
     def _capability_match(self, obj):
         # Same bytes/header/size path; only the proof prerequisite differs.
         footprint = ProductionFootprint.admit("range", 1)
-        lease = self.ledger.reserve(
-            Reservation(disk=footprint.transfer_disk, inflight=footprint.memory)
-        )
+        lease = self.ledger.reserve(Reservation(disk=footprint.transfer_disk))
+        try:
+            memory_lease = self.ledger.reserve(Reservation(inflight=footprint.memory))
+        except BaseException:
+            self.ledger.settle(lease)
+            raise
         root = None
+        self._correct_worker = None
+        self._track_correct_worker = True
         try:
             root = self._owned_dir()
             result = self._call(obj, root, condition="match")
@@ -581,20 +597,33 @@ class RustProductionTransport:
                 raise RemoteIOError("conditional capability bytes invalid")
             yield result
         finally:
-            if root is None:
-                self.ledger.settle(lease)
-            elif (
-                root.is_dir()
-                and not root.is_symlink()
-                and not is_reparse(root)
-                and {p.name for p in root.iterdir()} == {"body"}
-                and (root / "body").is_file()
-                and not (root / "body").is_symlink()
-                and not is_reparse(root / "body")
-            ):
-                (root / "body").unlink()
-                root.rmdir()
-                self.ledger.settle(lease)
+            primary = sys.exc_info()[1]
+            self._track_correct_worker = False
+            failed = False
+            try:
+                worker = self._correct_worker
+                proc = getattr(worker, "_proc", None) if worker is not None else None
+                # Base shutdown clears _proc only after wait. Otherwise poll the actual
+                # retained Popen. No handle means no successful spawn or already reaped.
+                stopped = proc is None or proc.poll() is not None
+                if stopped:
+                    try:
+                        self.ledger.settle(memory_lease)
+                    finally:
+                        if root is None:
+                            self.ledger.settle(lease)
+                        else:
+                            snapshot = self._owned_snapshot(root)
+                            if snapshot is not None and set(snapshot[1]) <= {"body"}:
+                                self._delete_owned(root, snapshot)
+                                self.ledger.settle(lease)
+                            # Unknown artifacts retain disk quota, never dead worker RAM.
+                else:
+                    failed = True  # Live/unknown worker retains both quota and artifacts.
+            except Exception:
+                failed = True
+            if failed and primary is None:
+                raise RemoteIOError("conditional resource finalization incomplete; quota retained")
 
     def _bound_object(self, bound):
         from urllib.parse import parse_qs, urlsplit
