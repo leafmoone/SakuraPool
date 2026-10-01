@@ -64,6 +64,7 @@ def main():
     tests = repo / "tests"
     nodes = [
         str(tests / "test_r2c2_negative_body.py"),
+        str(tests / "test_r2c2_canary_admission.py"),
         str(tests / "test_r2c2_binding.py")
         + "::test_verify_conditions_loopback_proof_and_exact_package_lookup",
         str(tests / "test_r2c2_binding.py") + "::test_binding_negative_matrix_fail_closed",

@@ -694,11 +694,23 @@ def test_c2_small_canary_uses_own_proof_and_both_formal_builders(twohop, monkeyp
     assert report["status"] == "PASS", report
     assert report["runtime_verified"] and report["json_content_sha_independently_verified"]
     assert report["whole_tar_spool"] is False
+    # Shared physical-domain pressure is real even in a loopback ledger. Derive
+    # the expected outcome from the actual snapshot, never loosen the disk cap.
+    admitted = canary.builder_admission(ledger, candidate.object_size, "download-then-scan")
+    attempts_before = ledger.status()["attempts"]
     download, report = canary.build_one(
         transport, candidate, adapter, "download-then-scan", scheduler, identity
     )
-    assert report["status"] == "PASS", report
-    assert canary.equivalent(ledger, remote, download)["status"] == "PASS"
+    if admitted["admitted"]:
+        assert report["status"] == "PASS", report
+        assert canary.equivalent(ledger, remote, download)["status"] == "PASS"
+    else:
+        assert report["status"] == "CAPACITY_BLOCKED", report
+        assert report["admission"]["blocked_resources"] == admitted["blocked_resources"]
+        assert download is None and report["network_requests"] == 0
+        assert ledger.status()["attempts"] == attempts_before
+        assert ledger.status()["inflight"] == 0
+        assert report["budget_after"]["pending_leases"] == 0
     for field, changed in (
         ("object_size", candidate.object_size + 1),
         ("repo_id", "other/repo"),
@@ -837,7 +849,7 @@ def test_c2_main_closure_preserves_terminal_exit_without_network(monkeypatch, te
     monkeypatch.setattr(
         scheduler.importlib.util,
         "module_from_spec",
-        lambda spec: SimpleNamespace(closure=lambda *args: result),
+        lambda spec: SimpleNamespace(closure=lambda *args, **kwargs: result),
     )
     assert scheduler.main(["--run-authorized-c2"]) == exit_code
 
@@ -886,7 +898,12 @@ def test_c2_build_settlement_failure_preserves_scan_primary(tmp_path, monkeypatc
         raise RustScanAuditError(TOKEN + ETAG)
 
     ledger = SimpleNamespace(
-        root=tmp_path, reserve=lambda reservation: "offline-validation", settle=settle_failure
+        root=tmp_path,
+        offline_mode=True,
+        status=lambda: dict(body=0, attempts=0, disk=0, inflight=0),
+        limits=dict(body=8 << 30, attempts=2000, disk=4 << 30, inflight=256 << 20),
+        reserve=lambda reservation: "offline-validation",
+        settle=settle_failure,
     )
     candidate = replace(runner.candidate_identity(), object_size=1024)
     bound = replace(candidate, validator=ETAG, cdn_host="offline.example")

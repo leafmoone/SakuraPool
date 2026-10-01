@@ -12,6 +12,41 @@ from dataclasses import replace
 from itertools import zip_longest
 
 
+def builder_admission(ledger, object_size, mode, *, binding_needed=False):
+    """Side-effect-free preflight of actual product phase reservations, not a lease.
+
+    ledger.status includes physical allocations AND existing future reservations.
+    Product builders must still perform their own live reservations. Remote never
+    adds object_size to disk; Download does. No convenient TAR-size cutoff.
+    """
+    from sakurapool.storage.production_resources import (
+        NEGATIVE_CONDITION_BODY_CAP,
+        ProductionFootprint,
+    )
+    from sakurapool.storage.remote_index import OFFLINE_BUILD_ALLOWANCE
+
+    footprint = ProductionFootprint.admit(mode, object_size)
+    used = ledger.status()
+    additions = {
+        "disk": max(footprint.admin_peak(OFFLINE_BUILD_ALLOWANCE), OFFLINE_BUILD_ALLOWANCE),
+        "inflight": footprint.memory,
+        "body": object_size
+        + 1
+        + (2 + 2 + NEGATIVE_CONDITION_BODY_CAP + 1 if binding_needed else 0),
+        "attempts": 2 + (6 if binding_needed else 0),
+    }
+    blocked = [key for key, amount in additions.items() if used[key] + amount > ledger.limits[key]]
+    return {
+        "admitted": not blocked,
+        "blocked_resources": blocked,
+        "additional_reservations": additions,
+        "used_including_physical_and_pending": {key: used[key] for key in additions},
+        "hard_limits": {key: ledger.limits[key] for key in additions},
+        "is_live_reservation": False,
+        "product_rechecks_required": True,
+    }
+
+
 def discovery(ledger, token, scheduler, identity, *, repository, roots=("/", "pre")):
     from sakurapool.storage.modelscope import MAX_PAGES, ModelScopeDataset
     from sakurapool.storage.production import ProviderObject
@@ -22,6 +57,7 @@ def discovery(ledger, token, scheduler, identity, *, repository, roots=("/", "pr
             super().__init__(*args, **kwargs)
             self.logical = self.attempts = self.accepted = 0
             self.tree_total = None
+            self.directory_paths = []
 
         def _once(self, *args, **kwargs):
             self.attempts += 1
@@ -33,13 +69,28 @@ def discovery(ledger, token, scheduler, identity, *, repository, roots=("/", "pr
             self.accepted += len(raw)
             data = json.loads(raw).get("Data")
             self.tree_total = None
+            self.directory_paths = []
             if isinstance(data, dict):
+                from sakurapool.storage.modelscope import _is_canonical_path
+
+                files = data.get("Files")
+                if isinstance(files, list) and len(files) <= 200:
+                    self.directory_paths = [
+                        item["Path"]
+                        for item in files
+                        if isinstance(item, dict)
+                        and item.get("Type") in ("tree", "directory")
+                        and isinstance(item.get("Path"), str)
+                        and len(item["Path"]) <= 512
+                        and _is_canonical_path(item["Path"])
+                    ]
                 value = data.get("TotalCount", data.get("Total"))
                 if type(value) is int and value >= 0:
                     self.tree_total = value
             return raw
 
     selected = None
+    observed_tars = 0
     with Control(
         ledger,
         trusted_hosts=frozenset({"modelscope.cn"}),
@@ -75,19 +126,46 @@ def discovery(ledger, token, scheduler, identity, *, repository, roots=("/", "pr
                         hub, "master", root=root, page=page, page_size=200
                     )
                     choices = sorted(
-                        (
-                            f
-                            for f in files
-                            if f.path.endswith(".tar") and 1024 <= f.size <= 64 * (1 << 20)
-                        ),
+                        (f for f in files if f.path.endswith(".tar") and f.size >= 1024),
                         key=lambda f: f.size,
                     )
-                    candidate = ProviderObject.from_tree(provider, choices[0]) if choices else None
+                    # Evaluate ALL candidates in this bounded page, not just the min-five
+                    # displayed in evidence. Keep only typed canonical identity summaries.
+                    evaluated = [
+                        (
+                            f,
+                            builder_admission(
+                                ledger, f.size, "remote-stream-scan", binding_needed=True
+                            ),
+                        )
+                        for f in choices
+                    ]
+                    admitted = [f for f, admission in evaluated if admission["admitted"]]
+                    candidate = (
+                        ProviderObject.from_tree(provider, admitted[0]) if admitted else None
+                    )
                     details = {
                         "status": "PASS",
                         "files_examined": len(files),
                         "listing_complete": complete,
-                        "small_candidates": len(choices),
+                        "tar_candidates": len(choices),
+                        "remote_admitted_candidates": len(admitted),
+                        "minimum_tar_bytes": choices[0].size if choices else None,
+                        "maximum_tar_bytes": choices[-1].size if choices else None,
+                        "minimum_candidates": [
+                            {
+                                "object_path": f.path,
+                                "object_size": f.size,
+                                "revision_candidate": f.revision_candidate,
+                            }
+                            for f in choices[:5]
+                        ],
+                        "candidate_evaluation_complete_for_page": True,
+                        "candidate_size_cutoff": None,
+                        "directory_paths_observed": control.directory_paths,
+                        "directory_coverage_limited": True,
+                        "recursive_listing_requested": True,
+                        "listing_total_declared": control.tree_total,
                         "control_logical_reads": control.logical - before[0],
                         "control_attempts": control.attempts - before[1],
                         "metadata_accepted_bytes": control.accepted - before[2],
@@ -97,7 +175,21 @@ def discovery(ledger, token, scheduler, identity, *, repository, roots=("/", "pr
                             object_path=candidate.object_path,
                             object_size=candidate.object_size,
                             revision_candidate=candidate.revision,
+                            remote_admission=builder_admission(
+                                ledger,
+                                candidate.object_size,
+                                "remote-stream-scan",
+                                binding_needed=True,
+                            ),
+                            download_admission=builder_admission(
+                                ledger,
+                                candidate.object_size,
+                                "download-then-scan",
+                                binding_needed=True,
+                            ),
                         )
+                    elif choices:
+                        details["minimum_remote_admission"] = evaluated[0][1]
                     return candidate, details
 
                 selected, report = scheduler.execute_evidenced(
@@ -109,6 +201,7 @@ def discovery(ledger, token, scheduler, identity, *, repository, roots=("/", "pr
                 )
                 if report["status"] != "PASS":
                     return None, report
+                observed_tars += report.get("tar_candidates", 0)
                 if selected:
                     return selected, report
                 tail = math.ceil((control.tree_total or 0) / 200)
@@ -118,8 +211,9 @@ def discovery(ledger, token, scheduler, identity, *, repository, roots=("/", "pr
     return None, {
         **report,
         "origin_status": report["status"],
-        "status": "DISCOVERY_NOT_IDENTIFIED",
+        "status": "CAPACITY_OR_BUDGET_BLOCKED" if observed_tars else "DISCOVERY_NOT_IDENTIFIED",
         "scope_limited": True,
+        "tar_candidates_examined": observed_tars,
     }
     # Not proof that no small object exists anywhere in the repository.
 
@@ -382,16 +476,20 @@ def identify_adapter(transport, candidate, scheduler, identity):
 
 
 def validate_canary_rows(root, summary):
-    """Stricter small-canary admission, not a change to frozen product limits."""
+    """OFFLINE known-small synthetic fixtures only, never real admission.
+
+    A one-row batch does not bound native Arrow row-group decoder memory. Real
+    builds stop before this function, inventory reload, sampled audit or compiler.
+    """
     import pyarrow.parquet as pq
 
-    from sakurapool.storage.production_resources import LINE_CAP
-
     total = rows = 0
+    counts = {}
     for name in ("objects", "samples", "annotations", "errors"):
         count = summary.get(name)
-        if type(count) is not int or not 0 <= count <= 1000:
+        if type(count) is not int or count < 0:
             raise ValueError("canary decoded record count scope")
+        table_rows = 0
         for path in sorted(root.rglob("*." + name + ".parquet")):
             parquet = pq.ParquetFile(path)
             if parquet.num_row_groups == 0:
@@ -399,18 +497,20 @@ def validate_canary_rows(root, summary):
             for batch in parquet.iter_batches(batch_size=1):
                 for row in batch.to_pylist():
                     size = len(json.dumps(row, ensure_ascii=True).encode("ascii"))
-                    if size > LINE_CAP:
-                        raise ValueError("canary decoded line scope")
                     total += size
                     rows += 1
-                    if total > 1 << 20 or rows > 4000:
-                        raise ValueError("canary aggregate decoded input scope")
+                    table_rows += 1
+        if table_rows != count:
+            raise ValueError("P2 full-table count differs from builder summary")
+        counts[name] = table_rows
     return {
         "rows": rows,
         "serialized_bytes": total,
-        "row_limit": LINE_CAP,
-        "aggregate_limit": 1 << 20,
+        "full_table_counts_verified": counts,
+        "all_rows_streamed": True,
+        "arrow_batch_rows": 1,
         "compiler_general_memory_theorem": False,
+        "offline_functional_fixture_only": True,
     }
 
 
@@ -460,6 +560,14 @@ def build_one(transport, candidate, adapter, mode, scheduler, identity):
     footprint = ProductionFootprint.admit(mode, obj.object_size)
 
     def action():
+        admission = builder_admission(ledger, obj.object_size, mode)
+        if not admission["admitted"]:
+            return None, {
+                "status": "CAPACITY_BLOCKED",
+                "failure_kind": "capacity",
+                "admission": admission,
+                "network_requests": 0,
+            }
         # build_stage/write_staged_v4 each maintain their OWN product admission.
         # Do not claim a reserve-immediately-settle probe covers either lifetime.
         job.mkdir(exist_ok=False)
@@ -481,6 +589,40 @@ def build_one(transport, candidate, adapter, mode, scheduler, identity):
                 production_transport=transport,
             )
             transport.release_committed_downloads(job / "p2")
+            if not ledger.offline_mode:
+                # Formal production scan and write_staged_v4 have finished under
+                # their own bounded gates. Do not run an unproven extra Arrow
+                # row-group decoder, inventory reload, sampled audit or compiler
+                # merely to estimate if those operations might fit 128MiB.
+                good = summary["objects"] == 1 and summary["samples"] > 0 and summary["errors"] == 0
+                return complete(
+                    job / "p2",
+                    {
+                        "status": "COMPILER_INPUT_CAPACITY_BLOCKED" if good else "BLOCKED",
+                        "failure_kind": "runtime_native_workspace_unproven"
+                        if good
+                        else "scan_or_p2_errors",
+                        "summary": {
+                            key: summary[key]
+                            for key in ("objects", "samples", "annotations", "errors")
+                        },
+                        "formal_scan_complete": True,
+                        "formal_p2_write_complete": True,
+                        "scan_p2_verified": good,
+                        "scan_mode": mode,
+                        "p2_format": 4,
+                        "whole_sha256": stage.content_sha256,
+                        "members": stage.members,
+                        "whole_tar_spool": mode == "download-then-scan",
+                        "durable_path": str(job / "p2"),
+                        "runtime_verified": False,
+                        "extra_arrow_decode_performed": False,
+                        "compiler_executed": False,
+                        "inventory_reopened": False,
+                        "sample_metadata_audit_performed": False,
+                        "runtime_bounded_general_proof": False,
+                    },
+                )
             validation_lease = ledger.reserve(
                 Reservation(disk=OFFLINE_BUILD_ALLOWANCE, inflight=footprint.memory)
             )
@@ -505,9 +647,10 @@ def build_one(transport, candidate, adapter, mode, scheduler, identity):
             }
             flags, selected = audit_small_sample(stage, job / "p2", adapter)
             details.update(flags)
-            if summary["samples"] == 0 or summary["samples"] > 1000:
+            if summary["samples"] == 0 or summary["errors"] != 0:
                 details.update(status="BLOCKED", failure_kind="canary_record_scope")
                 return complete(job / "p2", details)
+            details["offline_functional_fixture_only"] = True
             compile_runtime(inventory, job / "runtime")
             with RuntimeSnapshot.open(job / "runtime", full_verify=True) as rt:
                 count = rt.query(RuntimeQuerySpec()).count()
@@ -590,11 +733,16 @@ def closure_result(
     }
 
 
-def closure(initial_transport, initial_candidate, token, scheduler, identity):
+def closure(
+    initial_transport, initial_candidate, token, scheduler, identity, *, resume_discovery=False
+):
     """Ordered closure; terminal control reasons must never become business failure."""
-    report = scheduler.proof_use(initial_transport, initial_candidate, identity)
-    if report["status"] != "PASS":
-        return closure_result(scheduler, report, "initial_registered_range")
+    if not resume_discovery:
+        report = scheduler.proof_use(initial_transport, initial_candidate, identity)
+        if report["status"] != "PASS":
+            return closure_result(scheduler, report, "initial_registered_range")
+    # Resume after prior successful binding+proof-use evidence: never replay the
+    # large initial object's requests; it does NOT authorize the new candidate.
     candidate, report = discovery(
         initial_transport.ledger, token, scheduler, identity, repository=initial_candidate.repo_id
     )
@@ -612,6 +760,61 @@ def closure(initial_transport, initial_candidate, token, scheduler, identity):
     remote, report = build_one(
         transport, candidate, adapter, "remote-stream-scan", scheduler, identity
     )
+    if (
+        report["status"] == "COMPILER_INPUT_CAPACITY_BLOCKED"
+        and report.get("scan_p2_verified") is True
+    ):
+        # Full Remote scan/P2 permits independent Download admission, NOT runtime
+        # execution or a full semantic equivalence certificate.
+        remote_report = report
+        download, download_report = build_one(
+            transport, candidate, adapter, "download-then-scan", scheduler, identity
+        )
+        result = {
+            **download_report,
+            **closure_result(
+                scheduler,
+                download_report,
+                "download_builder",
+                remote=remote_report["status"],
+                download=download_report["status"],
+            ),
+        }
+        result.update(
+            remote_scan_p2_verified=True,
+            download_scan_p2_verified=download_report.get("scan_p2_verified") is True,
+            remote_runtime="NOT_RUN",
+            download_runtime="NOT_RUN",
+            inventory_reopened=False,
+            full_semantic_equivalence_performed=False,
+            scalar_summaries_equal=(
+                remote_report["summary"] == download_report.get("summary")
+                if download_report.get("scan_p2_verified") is True
+                else None
+            ),
+            scalar_summary_equality_is_not_semantic_equivalence=True,
+            runtime_resource_gate_blocked=True,
+        )
+        # Preserve every unexpected/terminal Download cause and its diagnostics.
+        # Only the two deliberately supported nonfatal outcomes are summarized as
+        # runtime-resource BLOCKED. Sticky source/ledger/settlement/operation flags
+        # take precedence even if a draft report incorrectly labels itself capacity.
+        terminal = any(
+            download_report.get(key)
+            for key in (
+                "identity_mismatch",
+                "ledger_snapshot_failed",
+                "settlement_failed",
+                "operation_failed",
+            )
+        )
+        legitimate = download_report["status"] == "CAPACITY_BLOCKED" or (
+            download_report["status"] == "COMPILER_INPUT_CAPACITY_BLOCKED"
+            and download_report.get("scan_p2_verified") is True
+        )
+        if legitimate and not terminal:
+            result.update(status="BLOCKED", origin_phase="runtime_resource_gate")
+        return result
     if report["status"] != "PASS":
         return closure_result(scheduler, report, "remote_builder", remote=report["status"])
     download, report = build_one(
@@ -663,7 +866,7 @@ def equivalent(ledger, remote, download):
 
 
 def _equivalent_rows(remote, download):
-    """Small canary only; compare full typed tables including extent/hash/content."""
+    """Compare ALL typed rows including extent/hash/content with one-row batches."""
     import pyarrow.parquet as pq
 
     names = ("samples", "annotations", "errors", "objects")

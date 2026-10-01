@@ -155,5 +155,5 @@ def test_footer_only_canary_helpers_are_empty_not_iterator_error(tmp_path):
             root, dict.fromkeys(("objects", "samples", "annotations", "errors"), 0)
         )
         assert bounds["rows"] == bounds["serialized_bytes"] == 0
-        assert bounds["row_limit"] == 32 << 10
+        assert bounds["all_rows_streamed"] and bounds["arrow_batch_rows"] == 1
     assert canary._equivalent_rows(*roots)

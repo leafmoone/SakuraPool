@@ -336,9 +336,84 @@ def proof_use(transport, candidate, identity, *, directory=REAL):
     return report
 
 
+def prior_delivery_evidence(ledger):
+    """Authorize discovery-only resumption, never reuse a proof for a new object."""
+    import re
+
+    expected = core.candidate_identity()
+    expected_digest = "cdb4ee2aea69cc6a83331bbe96dc2caa9a299d21329efb0336fc02a82e1839a8"
+    events = []
+    for path in sorted(REAL.glob("round-*.json")):
+        event = json.loads(path.read_text())
+        if event.get("operation") == "verify_conditions" and event.get("status") == "PASS":
+            key = event.get("proof_key")
+            if (
+                event.get("VERSION_BINDING") == "PASS"
+                and event.get("proof_recorded") is True
+                and event.get("object_registered") is True
+                and isinstance(key, str)
+                and re.fullmatch(r"[0-9a-f]{64}", key)
+                and event.get("repo_id") == expected.repo_id
+                and event.get("object_path") == expected.object_path
+                and event.get("object_size") == expected.object_size
+                and event.get("revision_candidate") == expected.revision
+                and event.get("first_byte_sha256") == expected_digest
+                and ledger.condition_proof(key) == expected_digest
+            ):
+                events.append(event)
+        elif event.get("operation") == "registered_proof_range" and event.get("status") == "PASS":
+            for binding in reversed(events):
+                if event.get("accepted_bytes") == 1 and all(
+                    event.get(key) == binding.get(key)
+                    for key in ("repo_id", "object_path", "object_size", "code_commit")
+                ):
+                    commit = binding["code_commit"]
+                    if (
+                        not re.fullmatch(r"[0-9a-f]{40}", commit)
+                        or subprocess.run(
+                            ["git", "merge-base", "--is-ancestor", commit, "HEAD"],
+                            cwd=ROOT,
+                            capture_output=True,
+                        ).returncode
+                        or subprocess.run(
+                            [
+                                "git",
+                                "diff",
+                                "--quiet",
+                                commit,
+                                "HEAD",
+                                "--",
+                                "src",
+                                "rust",
+                                "pyproject.toml",
+                            ],
+                            cwd=ROOT,
+                            capture_output=True,
+                        ).returncode
+                    ):
+                        raise ValueError("prior product identity no longer current")
+                    return {
+                        "status": "PASS",
+                        "prior_binding_round": binding["round"],
+                        "prior_proof_use_round": event["round"],
+                        "prior_code_commit": commit,
+                        "network_requests": 0,
+                        "new_candidate_requires_own_proof": True,
+                        "prior_binding_digest_matches_ledger": True,
+                        "prior_proof_use_full_scope_revalidated": False,
+                        "prior_proof_use_evidence_limitation": (
+                            "historical_event_omits_revision_and_proof_key"
+                        ),
+                        "resume_authorizes_discovery_only": True,
+                        "old_proof_not_reused_for_new_candidate": True,
+                    }
+    raise ValueError("verified prior binding and exact proof use required")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-authorized-c2", action="store_true")
+    parser.add_argument("--resume-canary", action="store_true")
     args = parser.parse_args(argv)
     if not args.run_authorized_c2:
         print("HOLD_FOR_USER_AUTHORIZATION")
@@ -348,18 +423,41 @@ def main(argv=None):
 
         identity = code_identity()  # Entire run fixed BEFORE token/network, checked each round.
         ledger = BudgetLedger()
+        if args.resume_canary:
+            prior = prior_delivery_evidence(ledger)  # Checked BEFORE token/network.
+            _, report = execute_evidenced(
+                ledger, "resume_canary_discovery", identity, lambda: (None, prior)
+            )
+            if report["status"] != "PASS":
+                return 3
         token = load_token()
         candidate = core.candidate_identity()
-        transport, binding = schedule(ledger, token, candidate, identity)
-        if binding["status"] != "PASS":
-            print(json.dumps(binding, sort_keys=True))
-            return 4 if binding["resumable"] else 3
+        if args.resume_canary:
+            transport = core.audited_transport(
+                ledger,
+                core.WORKER,
+                origin=core.ORIGIN,
+                token=token,
+                same_origin_cookie="m_session_id=" + token,
+            )
+        else:
+            transport, binding = schedule(ledger, token, candidate, identity)
+            if binding["status"] != "PASS":
+                print(json.dumps(binding, sort_keys=True))
+                return 4 if binding["resumable"] else 3
         canary_spec = importlib.util.spec_from_file_location(
             "c2_canary", ROOT / "reports/R2C2/canary.py"
         )
         canary = importlib.util.module_from_spec(canary_spec)
         canary_spec.loader.exec_module(canary)
-        result = canary.closure(transport, candidate, token, sys.modules[__name__], identity)
+        result = canary.closure(
+            transport,
+            candidate,
+            token,
+            sys.modules[__name__],
+            identity,
+            resume_discovery=args.resume_canary,
+        )
         _, report = execute_evidenced(
             ledger,
             "canary_closure_summary",
