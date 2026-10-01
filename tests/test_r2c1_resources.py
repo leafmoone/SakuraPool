@@ -137,10 +137,26 @@ def test_large_true_stream_no_tar_disk_and_bounded_rss(
     baseline_disk = _disk_usage(ledger.root)
     peak_disk = [baseline_disk]
     stop = threading.Event()
+    observation_errors = []
+    measurement_lock = threading.Lock()
+    delete_owned = transport._delete_owned
+
+    def synchronized_delete(root, snapshot):
+        # Only this fixture's directory removal shares the measurement lock.
+        # No network/read/scan/stage work is held under it. Stage files are added,
+        # not deleted; fixture teardown happens after observer stop+join below.
+        with measurement_lock:
+            return delete_owned(root, snapshot)
+
+    monkeypatch.setattr(transport, "_delete_owned", synchronized_delete)
 
     def observe():
-        while not stop.wait(0.005):
-            peak_disk[0] = max(peak_disk[0], _disk_usage(ledger.root))
+        try:
+            while not stop.wait(0.005):
+                with measurement_lock:
+                    peak_disk[0] = max(peak_disk[0], _disk_usage(ledger.root))
+        except BaseException as exc:
+            observation_errors.append(exc)  # Main thread must reject damaged evidence.
 
     thread = threading.Thread(target=observe, daemon=True)
     thread.start()
@@ -154,6 +170,8 @@ def test_large_true_stream_no_tar_disk_and_bounded_rss(
     finally:
         stop.set()
         thread.join()
+    assert not thread.is_alive()
+    assert observation_errors == [], "disk sampler failed; observations are invalid"
     assert stage.potential_records == 1 and stage.members == 2
     retained = list(ledger.root.glob("rust-transfer-*"))
     if mode == "remote-stream-scan":

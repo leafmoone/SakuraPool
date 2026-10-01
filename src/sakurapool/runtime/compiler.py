@@ -140,6 +140,9 @@ def _atomic_write(path: Path, data: bytes) -> None:
 
 def _read_batches(path: Path) -> Iterator[list[dict[str, Any]]]:
     with pq.ParquetFile(path) as handle:
+        # Footer-only empty fragments are valid P2 output, not missing input.
+        if handle.num_row_groups == 0:
+            return
         for batch in handle.iter_batches(batch_size=10_000):
             yield batch.to_pylist()
 

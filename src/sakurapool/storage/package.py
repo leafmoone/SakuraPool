@@ -275,6 +275,9 @@ def _validate_package_chain(root: Path, manifest: dict, names: set[str],
             for obj in inventory.objects:
                 sample_fragment = next(f for f in obj.fragments if f.name == "samples")
                 parquet = pq.ParquetFile(sample_fragment.path)
+                if parquet.num_row_groups == 0:
+                    parquet.close()
+                    continue
                 for batch in parquet.iter_batches(batch_size=256, columns=(
                         "record_id", "dataset_id", "object_id", "image_path",
                         "json_path", "offset_data", "size", "json_offset_data",

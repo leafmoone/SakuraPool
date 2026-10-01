@@ -216,12 +216,16 @@ def _release_spool(resource: _SpoolState) -> list[BaseException]:
             resource.db.close()
         except BaseException as exc:
             errors.append(exc)
+    handle_failed = False
     if resource.handle is not None:
         try:
             resource.handle.close()
         except BaseException as exc:
             errors.append(exc)
-    errors.extend(_remove_spool_files(resource.path))
+            handle_failed = True
+    # POSIX can unlink an open temporary handle; preserve it for controlled retry.
+    if not handle_failed:
+        errors.extend(_remove_spool_files(resource.path))
     resource.errors = errors
     if not errors:
         resource.db = None

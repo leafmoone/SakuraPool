@@ -26,6 +26,7 @@ from typing import Any, Iterable, Mapping
 from sakurapool.registry import DatasetAdapter
 from sakurapool.storage.budget import BudgetLedger, Reservation, is_reparse
 from sakurapool.storage.remote_index import (
+    JSON_OFFSET_INDEX_SQL,
     MAX_STAGE_PAGES,
     OFFLINE_STAGE_ALLOWANCE,
     StagedObject,
@@ -204,6 +205,7 @@ def _write_stage(
                 "size INTEGER NOT NULL, sha256 TEXT NOT NULL,"
                 "json_payload BLOB)"
             )
+            db.execute(JSON_OFFSET_INDEX_SQL)
             if callable(rows):
                 # Empty-table index creation has no unbounded sort; inserts maintain order.
                 db.execute("CREATE INDEX members_extents ON members(offset_data,name)")

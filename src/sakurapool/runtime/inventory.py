@@ -139,6 +139,9 @@ def _check_row_ownership(
     Column-projected streaming so the check never loads whole fragments.
     """
     with pq.ParquetFile(path) as handle:
+        # PyArrow 18 iter_batches requests row_group(-1) for footer-only files.
+        if handle.num_row_groups == 0:
+            return
         for batch in handle.iter_batches(
             batch_size=batch_size, columns=["dataset_id", "object_id"]
         ):
