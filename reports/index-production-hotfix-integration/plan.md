@@ -6,15 +6,17 @@ BASE de5b311bf7116e95ec4084f577c7c7cef5147cfa; candidate f89bf7d2baaa6c6823ead20
 Branch integrate-index-production-hotfix-20261001 / worktree D:/SakuraTool/SakuraPool-index-hotfix-integration. Prior C2 dirty remains protected in dev-finalize, never transplanted.
 
 ## Open
-- [ ] No-ff merge fixed candidate, semantic conflicts preserving production bounded resources and both SQLite indexes.
-- [ ] Audit metadata null/invalid matrices, footer-only inventory/compiler/package and controlled cleanup retry with primary preserved.
-- [ ] Targeted synthetic tests including indexed JSON seek 8192 rows, nullable P2/P3 roundtrip, trueRemote/R2C1/package/local regressions.
-- [ ] Exact requested Rust commands, Ruff and origin/dev...HEAD diff check.
-- [ ] Full keeper Python suite with actual import from integration, no PYTHONPATH; fresh external noneditable wheel with explicit current worker.
-- [ ] Explicit merge/fix/evidence commits; push ONLY integration and verify all four remote refs; restore keeper import to dev-finalize.
-- [ ] Complete continuous report and STOP WAITING_REVIEW.
+- [ ] Evidence-only submission commit/push and final four refs/product-zero-diff verification; terminal receipt in continuous delivery. STOP WAITING_REVIEW, no automatic dev/main merge.
 
 ## Done
+- [x] One no-ff merge b17357430356462776650de474c41ef496735dbf/tree5aeedacc4ab4d722b2fae70f066a277eac1b6d4f; semantic3conflicts preserve boundedresources+twoindexes.
+- [x] Required/optionalnull/invalidmatrices, footer-only inventory/compiler/package, primarypreserving controlledcleanupretry PASS. FirstnewtestAPItypo55pass1fail0.59s corrected; targeted234pass34.01s.
+- [x] Wider355pass3skip1warning2579.77s retained, samplerwarningevidence rejected. Integration-only observer/deletionLock+mainexceptionassert repair,4matrixpass115.66s nowarnings; productdiskusage unchanged.
+- [x] Exact Rust61/fmt/clippy/release, Ruff/origin-devdiffcheck PASS.
+- [x] Full frozen b173Python814pass3skip0fail/no warnings2322.29s/wall2323/exit0; freshwheel121pass277.37s/wall309/exit0, external-I/noneditable35files verified. Initialwheelbootstrapmissingpytest12s exit1 preserved, corrected standaloneenv recycled.
+- [x] Implementationpush ONLYintegration;4remoteverified. Keeperrestored dev-finalize actual-Iimport, originalC2dirty unchanged.
+- [x] Complete report drafted with limits/rawlogs/failurehistory; externalreview WAITING_REVIEW after finalreceipt.
+
 - [x] Fetch+actual remote verification matches candidate SHA/tree and BASE/main. New path/branch absent, independent worktree created from origin/dev.
 - [x] Read README/pyproject/AGENTS/common instructions; candidate product delta exactly seven files and five tests; candidate history not squashed.
 

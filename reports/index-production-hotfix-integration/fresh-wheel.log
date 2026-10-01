@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "D:\SakuraTool\SakuraPool-index-hotfix-integration\reports\index-production-hotfix-integration\wheel_verify.py", line 12, in <module>
+    import pytest
+ModuleNotFoundError: No module named 'pytest'
+{"source": "D:\\SakuraTool\\sakurapool-hotfix-wheel-w8vrp4p8\\wheel-env\\Lib\\site-packages\\sakurapool\\__init__.py", "verified_source_files": 35, "isolated": true, "editable": false, "worker": "D:\\SakuraTool\\SakuraPool-Fix3-20260930a\\rust-target\\release\\sakurapool-worker.exe", "runtime_format": 2, "p2_format": 4, "code_commit": "b17357430356462776650de474c41ef496735dbf", "real_requests": 0}
+........................................................................ [ 59%]
+.................................................                        [100%]
+121 passed in 277.37s (0:04:37)
+
+--- Corrected bootstrap: standalone temporary venv with declared dependencies ---
