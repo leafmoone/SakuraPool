@@ -68,6 +68,27 @@ def binding_loop():
                 else "match"
             )
             state["cdn_ops"].append(phase)
+            if phase == "wrong" and "negative" in state:
+                case = state["negative"]
+                body = case["body"]
+                self.send_response(case.get("status", 412))
+                for key, value in case.get("headers", []):
+                    self.send_header(key, value)
+                self.send_header("Connection", "close")
+                self.end_headers()
+                try:
+                    if case.get("chunked"):
+                        for offset in range(0, len(body), 997):
+                            chunk = body[offset : offset + 997]
+                            self.wfile.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+                        self.wfile.write(b"0\r\n\r\n")
+                    else:
+                        self.wfile.write(body)
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    pass  # Expected when fail-closed client rejects framing before body.
+                self.close_connection = True
+                return
             target, mode = state["failure"].split(":") if state["failure"] else (None, None)
             mode = mode if target == phase else None
             code = 412 if phase == "wrong" else 206
@@ -76,6 +97,8 @@ def binding_loop():
             raw = b"" if phase == "wrong" else b"A"
             if mode in ("nonempty", "206", "200") and phase == "wrong":
                 raw = b"A"
+            if mode == "oversized" and phase == "wrong":
+                raw = b"X" * 65537
             if mode == "byte":
                 raw = b"B"
             self.send_response(code)
@@ -246,7 +269,7 @@ def test_verify_conditions_loopback_proof_and_exact_package_lookup(binding_loop)
         "wrong:206",
         "wrong:200",
         "wrong:403",
-        "wrong:nonempty",
+        "wrong:oversized",
     ],
 )
 def test_binding_negative_matrix_fail_closed(binding_loop, failure):

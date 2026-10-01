@@ -36,7 +36,7 @@ def public_result(result):
             result.get("observation", {}),
             (("origin_http_status", 599), ("cdn_http_status", 599), ("content_length", 2**63 - 1)),
         ),
-        (result.get("accounting", {}), (("attempts", 2), ("body", 2))),
+        (result.get("accounting", {}), (("attempts", 2), ("body", 65_537))),
     ):
         for key, maximum in keys:
             value = source.get(key) if isinstance(source, dict) else None
@@ -176,14 +176,17 @@ def candidate_identity():
 def future_real_round():
     """MUST NOT execute in R2C1B prep, even after all offline tests PASS."""
     from sakurapool.storage.budget import BudgetLedger, is_reparse
-    from sakurapool.storage.production_resources import ProductionFootprint
+    from sakurapool.storage.production_resources import (
+        NEGATIVE_CONDITION_BODY_CAP,
+        ProductionFootprint,
+    )
 
     ledger = BudgetLedger()
     footprint = ProductionFootprint.admit("range", 1)
     used = ledger.status()
     additions = {
         "attempts": 6,
-        "body": 6,
+        "body": 2 + 2 + NEGATIVE_CONDITION_BODY_CAP + 1,
         "disk": footprint.transfer_disk,
         "inflight": footprint.memory,
     }
@@ -219,7 +222,7 @@ def future_real_round():
         revision_candidate=REVISION,
         identity_basis="prior_public_identity_not_fresh",
         proposed_http_attempt_cap=6,
-        proposed_body_reservation_cap=6,
+        proposed_body_reservation_cap=2 + 2 + NEGATIVE_CONDITION_BODY_CAP + 1,
         proposed_accepted_body_cap=2,
         proposed_memory=footprint.memory,
         proposed_transfer_disk=footprint.transfer_disk,

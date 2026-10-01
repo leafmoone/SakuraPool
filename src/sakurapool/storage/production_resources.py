@@ -10,6 +10,7 @@ The all-member uniqueness table shares this capped database, then is dropped.
 
 from dataclasses import dataclass
 
+NEGATIVE_CONDITION_BODY_CAP = 65_536
 MAX_RANGE = 8 << 20
 RECORD_CAP = 32 << 20
 METADATA_CAP = 32 << 20

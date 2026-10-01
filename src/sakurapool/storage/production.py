@@ -20,7 +20,12 @@ from pathlib import Path
 from .budget import BudgetLedger, Reservation, _cluster_bytes, _disk_usage, is_reparse
 from .location_gate import normalize_endpoint, two_hop_proof_key
 from .modelscope import ListedFile, ModelScopeDataset
-from .production_resources import STAGE_DISK_CAP, STREAM_MEMORY, ProductionFootprint
+from .production_resources import (
+    NEGATIVE_CONDITION_BODY_CAP,
+    STAGE_DISK_CAP,
+    STREAM_MEMORY,
+    ProductionFootprint,
+)
 from .rust_bridge import RustWorker, RustWorkerError
 from .transport import RemoteIOError
 
@@ -284,8 +289,13 @@ class RustProductionTransport:
         size = length if mode == "range" else obj.object_size
         footprint = ProductionFootprint.admit(mode, size)
         memory, disk = footprint.memory, footprint.artifacts
-        budget = {"body": size + 1, "attempts": 2, "disk": disk, "inflight": memory}
-        lease1 = self.ledger.reserve(Reservation(body=size + 1, attempt=True))
+        body_budget = (
+            NEGATIVE_CONDITION_BODY_CAP + 1
+            if mode == "range" and condition == "wrong"
+            else size + 1
+        )
+        budget = {"body": body_budget, "attempts": 2, "disk": disk, "inflight": memory}
+        lease1 = self.ledger.reserve(Reservation(body=body_budget, attempt=True))
         try:
             lease2 = self.ledger.reserve(Reservation(attempt=True))
         except BaseException:
@@ -346,7 +356,7 @@ class RustProductionTransport:
                 not isinstance(accounting, dict)
                 or set(accounting) != {"body", "attempts", "complete"}
                 or type(accounting["body"]) is not int
-                or not 0 <= accounting["body"] <= size + 1
+                or not 0 <= accounting["body"] <= body_budget
                 or type(accounting["attempts"]) is not int
                 or not 0 <= accounting["attempts"] <= 2
                 or type(accounting["complete"]) is not bool

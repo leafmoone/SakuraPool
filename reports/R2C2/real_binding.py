@@ -131,13 +131,16 @@ def classify(report):
 
 
 def budget_gate(ledger, *, operations=3):
-    from sakurapool.storage.production_resources import ProductionFootprint
+    from sakurapool.storage.production_resources import (
+        NEGATIVE_CONDITION_BODY_CAP,
+        ProductionFootprint,
+    )
 
     footprint = ProductionFootprint.admit("range", 1)
     used = ledger.status()
     additions = {
         "attempts": operations * 2,
-        "body": operations * 2,
+        "body": (2 + 2 + NEGATIVE_CONDITION_BODY_CAP + 1 if operations == 3 else operations * 2),
         "disk": footprint.transfer_disk,
         "inflight": footprint.memory,
     }

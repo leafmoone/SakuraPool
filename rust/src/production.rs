@@ -9,6 +9,9 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// Only wrong-condition CDN 412 entities are streamed and discarded under this cap.
+pub const NEGATIVE_CONDITION_BODY_CAP: u64 = 65_536;
+
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Object {
@@ -517,8 +520,47 @@ fn transfer(t: &Transfer, a: &mut Accounting) -> Result<serde_json::Value, &'sta
         && single(r.headers(), "transfer-encoding")?.is_none();
     let status = r.status().as_u16();
     if t.condition == "wrong" {
-        if status != 412 || !a.complete {
+        a.complete = false;
+        if status != 412 {
             return Err("conditional_unsupported");
+        }
+        // An error entity is not returned business bytes. Never parse/hash/write it.
+        // Require unambiguous framing and identity encoding; chunked is decoded by reqwest.
+        let cl = single(r.headers(), "content-length")?;
+        let te = single(r.headers(), "transfer-encoding")?;
+        if cl.is_some() && te.is_some()
+            || single(r.headers(), "content-encoding")?.unwrap_or("identity") != "identity"
+            || te.is_some_and(|v| !v.eq_ignore_ascii_case("chunked"))
+        {
+            return Err("body_framing");
+        }
+        let declared = cl
+            .map(|v| {
+                if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err("body_framing");
+                }
+                v.parse::<u64>().map_err(|_| "body_framing")
+            })
+            .transpose()?;
+        if declared.is_some_and(|n| n > NEGATIVE_CONDITION_BODY_CAP) {
+            return Err("body_length"); // Do not start reading an over-cap declared entity.
+        }
+        let mut chunk = [0u8; 4096];
+        loop {
+            let left = NEGATIVE_CONDITION_BODY_CAP + 1 - a.body;
+            let take = (left as usize).min(chunk.len());
+            let n = r.read(&mut chunk[..take]).map_err(|_| "body_io")?;
+            a.body += n as u64;
+            if a.body > NEGATIVE_CONDITION_BODY_CAP {
+                return Err("body_length"); // Includes the actually read overflow byte.
+            }
+            if n == 0 {
+                if declared.is_some_and(|n| n != a.body) {
+                    return Err("body_length");
+                }
+                a.complete = true; // Only decoded reader EOF, never Content-Length alone.
+                break;
+            }
         }
         output
             .as_mut()

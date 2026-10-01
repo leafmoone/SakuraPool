@@ -302,7 +302,12 @@ fn dispatch(request: &Request) -> Result<serde_json::Value, &'static str> {
         };
         let (required_memory, required_disk) =
             sakurapool_rust::production::footprint(&transfer.mode, bytes)?;
-        if request.budget.body < bytes.saturating_add(1)
+        let required_body = if transfer.mode == "range" && transfer.condition == "wrong" {
+            sakurapool_rust::production::NEGATIVE_CONDITION_BODY_CAP + 1
+        } else {
+            bytes.saturating_add(1)
+        };
+        if request.budget.body < required_body
             || request.budget.attempts < 2
             || request.budget.disk < required_disk
             || request.budget.inflight < required_memory
