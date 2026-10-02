@@ -4,11 +4,12 @@ Goal: Independently publish runtime-first scalable v2 while preserving P2v4/P3v2
 
 ## Open
 - [x] Implement preliminary bounded manifest/catalog/hash compiler/readonly loader/CLI/fresh-bound fetch; containment/fullverify/profile hardening added.
-- [ ] Validate corruption/security and v1/P2/P3 regressions.
-- [ ] Final-tree revalidation of synthetic scale; intermediate actual 22792 objects / 1002848 records, manifest1194 bytes/catalog8994816/hash32091264, build1051.3704s/RSS298512384 bytes.
-- [ ] Compile retained real121sample P2; digest-gated publication/fetch, no rescan.
-- [ ] FullPython/Rust/freshwheel validation and readonlyreview (Python full and Rust commands running; targeted93PASS/1skip; finalwheel pending).
-- [ ] Implementation/push then reports-only submission/push and finalreport.
+- [x] Final code certification: 998 Python passed/3 skipped; Rust62 passed; isolated fresh-wheel207+48 passed.
+- [x] Final-tree scale:22792 objects/1002848records, build1082.6543696s/peakRSS300142592bytes; full verify+100seedRID checks.
+- [x] Retained real121runtime compiled/fullverified, no rescan. Authorized fresh lookup failed closed after2metadata requests; realpublication/fetch NOT_CERTIFIED, P4_COMPLETE NO; no networkretry.
+- [x] Correct-path readonlyreview closed READY; all final code tests passed at39a71d2 tree decc527. Realcanary failure not disguised as PASS.
+- [x] Implementation39a71d2 normally pushed origin/dev, main unchanged.
+- [ ] Reports-only submission/push, final complete copyable report and WAITING_REVIEW.
 
 ## Done
 - [x] Fetch BASE032f353/mainfixed and create cleanworktree work-r2c3-publication-v2; preserve olddirtytrees.
