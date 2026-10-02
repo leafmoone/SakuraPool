@@ -1,6 +1,8 @@
 # P4-R2C3 certification
 
-WAITING_REVIEW; P4_COMPLETE NO. Real publication/fetch NOT CERTIFIED.
+WAITING_REVIEW; P4_COMPLETE NO. REAL_PUBLICATION_CANARY=BLOCKED(FAIL_CLOSED BEFORE_PUBLICATION); REAL_PROVIDER_SHA_MATCH=NOT_ESTABLISHED, availabilityUNKNOWN; REAL_V2_FETCH=BLOCKED_NOT_ATTEMPTED; ownbinding/imageshaNOTRUN.
+
+Evidence commit8ac29fd57cf84d6f12d855dd07e4d20637a55557 included reports/R2C3/REPORT.md and root plan.md, violating the narrower reports-directory-only closing instruction; calling it strictly reports-only was inaccurate. Its plan changes were phase-status documentation, not product code. A subsequent ordinary correction restores plan.md exactly to implementation39a71d2; cumulative final evidence diff from implementation contains only this report. No amend/reset/forcepush or certification-source drift. Restored plan is the historical implementation snapshot, not current progress.
 
 BASE032f353cf89ab6d20de5e6a6408d365723e3371b; sole implementation39a71d2bb72830ab7dfd8822edec74b4662df0ab, tree decc527d502147e4366c836f6055269876bb1202, normally pushed HEAD:dev and origin/dev verified equal. Main unchanged edc72fbaaddc4dc8f9865ddfa576b737c7b15f5a.
 
