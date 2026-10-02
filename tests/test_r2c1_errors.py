@@ -13,7 +13,8 @@ twohop = _twohop
 
 
 @pytest.mark.parametrize("complete", [True, False])
-def test_ok_true_error_cannot_be_business_success(twohop, monkeypatch, complete):
+@pytest.mark.parametrize("code", ["cdn_status", "metadata_limit", TOKEN + " private raw error"])
+def test_ok_true_error_cannot_be_business_success(twohop, monkeypatch, complete, code):
     _, ledger, transport, obj = twohop
     from sakurapool.storage import production
 
@@ -37,7 +38,7 @@ def test_ok_true_error_cannot_be_business_success(twohop, monkeypatch, complete)
                 "request_id": self.request_id,
                 "ok": True,
                 "result": {
-                    "production_error": "cdn_status",
+                    "production_error": code,
                     "provider_raw": TOKEN,
                     "diagnostic": {
                         "phase": "cdn",
@@ -62,6 +63,10 @@ def test_ok_true_error_cannot_be_business_success(twohop, monkeypatch, complete)
     assert TOKEN not in str(error.value)
     assert error.value.__cause__ is None and error.value.__context__ is None
     assert TOKEN not in json.dumps(transport.last_result)
+    assert transport.last_result["production_error"] == (
+        code if code in ("cdn_status", "metadata_limit") else "rejected"
+    )
+    assert transport.last_result["accounting"]["complete"] is complete
     assert transport.last_result["diagnostic"]["http_status"] == 403
     assert ledger.status()["attempts"] == 2
     assert ledger.status()["body"] == (1 if complete else 2)

@@ -50,6 +50,7 @@ _PUBLIC_ERROR_CODES = frozenset(
         "body_length",
         "body_io",
         "scan_failed",
+        "metadata_limit",  # Fixed Rust observer capacity enum; no raw scanner error.
         "origin_transport",
         "cdn_transport",
     }

@@ -174,8 +174,14 @@ def test_oversized_json_rejected():
         tmp.cleanup()
 
 
-def test_valid_report_stages_and_marker_is_exact():
-    tmp, ledger = _ledger_root()
+def test_valid_report_stages_and_marker_is_exact(monkeypatch):
+    from sakurapool.storage import budget
+
+    tmp = tempfile.TemporaryDirectory(prefix="r1-gate4-", dir=DEFAULT_WORK_ROOT)
+    root = Path(tmp.name)
+    monkeypatch.setattr(budget, "DEFAULT_WORK_ROOT", root)
+    (root / "ledger").mkdir()
+    ledger = BudgetLedger(root / "ledger", _offline_test=True)
     try:
         stage_dir = Path(tmp.name) / "stage"
         stage = build_stage_from_scan(_valid_scan(), RAW, _bound(), _adapter(), stage_dir, ledger)

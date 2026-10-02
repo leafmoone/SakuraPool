@@ -27,6 +27,7 @@ DEPENDENCIES = (
     "reports/R2C1B/binding_probe.py",
     "reports/R2C2/real_binding.py",
     "reports/R2C2/canary.py",
+    "examples/webdataset-danbooru-v3.json",
 )
 
 
@@ -218,6 +219,9 @@ def outcome(status, report=None):
                 "settlement_failed",
                 "primary_status",
                 "failure_kind",
+                "operation_failed",
+                "observation",
+                "identity_check_failed",
             )
             if key in report
         },
@@ -414,6 +418,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-authorized-c2", action="store_true")
     parser.add_argument("--resume-canary", action="store_true")
+    parser.add_argument("--configured-canary", choices=("gamecg_v3",))
     args = parser.parse_args(argv)
     if not args.run_authorized_c2:
         print("HOLD_FOR_USER_AUTHORIZATION")
@@ -423,6 +428,16 @@ def main(argv=None):
 
         identity = code_identity()  # Entire run fixed BEFORE token/network, checked each round.
         ledger = BudgetLedger()
+        canary_spec = importlib.util.spec_from_file_location(
+            "c2_canary", ROOT / "reports/R2C2/canary.py"
+        )
+        canary = importlib.util.module_from_spec(canary_spec)
+        canary_spec.loader.exec_module(canary)
+        adapter = canary.configured_adapter() if args.configured_canary else None
+        if args.configured_canary and args.resume_canary:
+            raise ValueError(
+                "configured discovery requires fresh own binding, not historical resume"
+            )
         if args.resume_canary:
             prior = prior_delivery_evidence(ledger)  # Checked BEFORE token/network.
             _, report = execute_evidenced(
@@ -432,7 +447,7 @@ def main(argv=None):
                 return 3
         token = load_token()
         candidate = core.candidate_identity()
-        if args.resume_canary:
+        if args.resume_canary or args.configured_canary:
             transport = core.audited_transport(
                 ledger,
                 core.WORKER,
@@ -445,18 +460,22 @@ def main(argv=None):
             if binding["status"] != "PASS":
                 print(json.dumps(binding, sort_keys=True))
                 return 4 if binding["resumable"] else 3
-        canary_spec = importlib.util.spec_from_file_location(
-            "c2_canary", ROOT / "reports/R2C2/canary.py"
-        )
-        canary = importlib.util.module_from_spec(canary_spec)
-        canary_spec.loader.exec_module(canary)
         result = canary.closure(
             transport,
             candidate,
             token,
             sys.modules[__name__],
             identity,
-            resume_discovery=args.resume_canary,
+            resume_discovery=args.resume_canary or bool(args.configured_canary),
+            **(
+                {
+                    "repository": canary.CONFIGURED_REPOSITORY,
+                    "roots": canary.CONFIGURED_ROOTS,
+                    "adapter": adapter,
+                }
+                if args.configured_canary
+                else {}
+            ),
         )
         _, report = execute_evidenced(
             ledger,

@@ -33,7 +33,7 @@ twohop = _twohop
 
 
 @pytest.fixture
-def binding_loop():
+def binding_loop(monkeypatch):
     worker = resolve_r1_worker()
     assert worker, "explicit release worker required"
     state = {"failure": None, "calls": [], "cdn_ops": []}
@@ -127,7 +127,12 @@ def binding_loop():
     for thread in threads:
         thread.start()
     with tempfile.TemporaryDirectory(prefix="offline-binding-", dir=DEFAULT_WORK_ROOT) as temp:
-        ledger = BudgetLedger(Path(temp), _offline_test=True)
+        from sakurapool.storage import budget
+
+        monkeypatch.setattr(budget, "DEFAULT_WORK_ROOT", Path(temp))
+        ledger_root = Path(temp) / "ledger"
+        ledger_root.mkdir()
+        ledger = BudgetLedger(ledger_root, _offline_test=True)
         transport = runner.audited_transport(
             ledger,
             worker,
@@ -894,7 +899,7 @@ def test_c2_build_settlement_failure_preserves_scan_primary(tmp_path, monkeypatc
     def settle_failure(*args):
         raise OSError(TOKEN + ETAG)
 
-    def scan_failure(*args):
+    def scan_failure(*args, **kwargs):
         raise RustScanAuditError(TOKEN + ETAG)
 
     ledger = SimpleNamespace(

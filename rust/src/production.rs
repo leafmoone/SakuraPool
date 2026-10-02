@@ -12,6 +12,28 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// Only wrong-condition CDN 412 entities are streamed and discarded under this cap.
 pub const NEGATIVE_CONDITION_BODY_CAP: u64 = 65_536;
 
+// Fixed observer enum only: never expose arbitrary scanner errors or paths.
+fn public_scan_error(error: &'static str) -> &'static str {
+    if error == "metadata_limit" {
+        "metadata_limit"
+    } else {
+        "scan_failed"
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    #[test]
+    fn metadata_capacity_is_public_unknown_is_redacted() {
+        assert_eq!(super::public_scan_error("metadata_limit"), "metadata_limit");
+        assert_eq!(
+            super::public_scan_error("private path or body"),
+            "scan_failed"
+        );
+        assert_eq!(super::public_scan_error("metadata_length"), "scan_failed");
+    }
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Object {
@@ -656,7 +678,7 @@ fn transfer(t: &Transfer, a: &mut Accounting) -> Result<serde_json::Value, &'sta
             complete: &mut a.complete,
         };
         crate::scan_tar_reader_observed(&mut counted, &limits, observer)
-            .map_err(|_| "scan_failed")?
+            .map_err(public_scan_error)?
     } else {
         a.phase = "body";
         let mut tee = CountTee {
@@ -679,7 +701,7 @@ fn transfer(t: &Transfer, a: &mut Accounting) -> Result<serde_json::Value, &'sta
             &limits,
             observer,
         )
-        .map_err(|_| "scan_failed")?
+        .map_err(public_scan_error)?
     };
     if a.body != size || report.size != size || !a.complete {
         return Err("body_length");

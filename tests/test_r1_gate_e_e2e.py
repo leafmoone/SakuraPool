@@ -61,9 +61,12 @@ def _tar_bytes() -> bytes:
 
 
 @pytest.fixture
-def work_root():
+def work_root(monkeypatch):
     # Offline budget roots and fixtures must live under the fixed P4 work root.
     with tempfile.TemporaryDirectory(prefix="r1-gate-e-", dir=DEFAULT_WORK_ROOT) as temp:
+        from sakurapool.storage import budget
+
+        monkeypatch.setattr(budget, "DEFAULT_WORK_ROOT", Path(temp))
         yield Path(temp)
 
 

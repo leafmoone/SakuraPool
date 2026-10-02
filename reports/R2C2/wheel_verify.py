@@ -2,10 +2,12 @@
 
 import argparse
 import importlib.metadata as metadata
+import importlib.util
 import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -34,9 +36,41 @@ def main():
     head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
     assert head == args.code_commit
     drift = subprocess.check_output(
-        ["git", "-C", str(repo), "diff", "HEAD", "--", "src", "rust", "tests"], text=True
+        [
+            "git",
+            "-C",
+            str(repo),
+            "diff",
+            "HEAD",
+            "--",
+            "src",
+            "rust",
+            "tests",
+            "reports/R2C2/canary.py",
+            "reports/R2C2/real_binding.py",
+            "reports/R2C2/wheel_verify.py",
+            "examples/webdataset-danbooru-v3.json",
+        ],
+        text=True,
     )
     assert not drift
+    config_source = repo / "examples/webdataset-danbooru-v3.json"
+    committed_config = subprocess.check_output(
+        ["git", "-C", str(repo), "show", head + ":examples/webdataset-danbooru-v3.json"]
+    )
+    assert config_source.read_bytes().replace(b"\r\n", b"\n") == committed_config.replace(
+        b"\r\n", b"\n"
+    )
+    helper_spec = importlib.util.spec_from_file_location(
+        "wheel_configured_canary", repo / "reports/R2C2/canary.py"
+    )
+    helper = importlib.util.module_from_spec(helper_spec)
+    helper_spec.loader.exec_module(helper)
+    with tempfile.TemporaryDirectory(prefix="c2-wheel-config-") as directory:
+        config_copy = Path(directory) / "registry.json"
+        config_copy.write_bytes(committed_config)
+        adapter = helper.configured_adapter(config_copy)
+        assert adapter.dataset == "gamecg_v3" and adapter.allowed_provenance == ("gamecg-2D",)
     count = 0
     with ZipFile(args.wheel) as wheel:
         for source in (repo / "src/sakurapool").rglob("*.py"):
@@ -63,6 +97,7 @@ def main():
     )
     tests = repo / "tests"
     nodes = [
+        str(tests / "test_r2c2_configured.py"),
         str(tests / "test_r2c2_negative_body.py"),
         str(tests / "test_r2c2_canary_admission.py"),
         str(tests / "test_r2c2_binding.py")

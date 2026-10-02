@@ -10,6 +10,24 @@ import math
 import uuid
 from dataclasses import replace
 from itertools import zip_longest
+from pathlib import Path
+
+CONFIGURED_REPOSITORY = "leafmoone/webdataset_danbooru_v3"
+CONFIGURED_ROOTS = ("gamecg",)
+CONFIGURED_DATASET = "gamecg_v3"
+
+
+def configured_adapter(config_path=None):
+    """Load the checked-in formal registry; override only the remote storage binding."""
+    from sakurapool.registry import AdapterRegistry
+
+    config = (
+        Path(config_path)
+        if config_path is not None
+        else Path(__file__).resolve().parents[2] / "examples/webdataset-danbooru-v3.json"
+    )
+    registry = AdapterRegistry.from_dict(json.loads(config.read_text(encoding="utf-8")))
+    return replace(registry.get(CONFIGURED_DATASET), storage_id="modelscope-c2")
 
 
 def builder_admission(ledger, object_size, mode, *, binding_needed=False):
@@ -260,6 +278,8 @@ def audit_small_sample(stage, p2_root, adapter):
                     if member != (row["offset_data"], row["size"], row["sha256"]):
                         raise ValueError("P2 image extent/hash differs from audited stage")
                     if row["json_path"]:
+                        if not 0 < row["json_size"] <= adapter.max_json_bytes:
+                            raise ValueError("P2 JSON exceeds configured adapter cap")
                         metadata = db.execute(
                             "SELECT offset_data,size,sha256,json_payload FROM members WHERE name=?",
                             (row["json_path"],),
@@ -268,7 +288,7 @@ def audit_small_sample(stage, p2_root, adapter):
                             metadata is None
                             or metadata[:2] != (row["json_offset_data"], row["json_size"])
                             or len(metadata[3]) != metadata[1]
-                            or metadata[1] > 1 << 20
+                            or metadata[1] > adapter.max_json_bytes
                             or hashlib.sha256(metadata[3]).hexdigest() != metadata[2]
                         ):
                             raise ValueError("P2 JSON extent/hash audit missing")
@@ -313,6 +333,8 @@ def audit_small_sample(stage, p2_root, adapter):
                     if checked >= 3:
                         return {
                             "records_audited": checked,
+                            "audit_batch_rows": 3,
+                            "audit_json_cap_bytes": adapter.max_json_bytes,
                             "json_content_sha_independently_verified": True,
                             "image_sha_matches_same_rust_stage": True,
                             "image_pixel_sha_independently_verified": False,
@@ -320,6 +342,8 @@ def audit_small_sample(stage, p2_root, adapter):
                         }, selected
     return {
         "records_audited": checked,
+        "audit_batch_rows": 3,
+        "audit_json_cap_bytes": adapter.max_json_bytes,
         "json_content_sha_independently_verified": checked > 0,
         "image_sha_matches_same_rust_stage": checked > 0,
         "image_pixel_sha_independently_verified": False,
@@ -328,7 +352,9 @@ def audit_small_sample(stage, p2_root, adapter):
 
 
 def identify_adapter(transport, candidate, scheduler, identity):
-    """Read only bounded TAR headers and one JSON via registered-proof Range.
+    """Diagnostic-only, nonauthoritative and not required by configured canaries.
+
+    Read only bounded TAR headers and one JSON via registered-proof Range.
 
     Recognize the formal nested_json_v1 source.dataset/id/image schema only
     after observing a matching actual image header. This limited standard-header
@@ -475,11 +501,11 @@ def identify_adapter(transport, candidate, scheduler, identity):
     )
 
 
-def validate_canary_rows(root, summary):
-    """OFFLINE known-small synthetic fixtures only, never real admission.
+def validate_canary_rows(root, summary, *, offline_fixture=True):
+    """Stream count validation; this is not a native-memory admission theorem.
 
-    A one-row batch does not bound native Arrow row-group decoder memory. Real
-    builds stop before this function, inventory reload, sampled audit or compiler.
+    A one-row batch does not bound native Arrow row-group decoder memory.
+    Configured readiness performs durable reopen and audit without P3 compilation.
     """
     import pyarrow.parquet as pq
 
@@ -510,7 +536,7 @@ def validate_canary_rows(root, summary):
         "all_rows_streamed": True,
         "arrow_batch_rows": 1,
         "compiler_general_memory_theorem": False,
-        "offline_functional_fixture_only": True,
+        "offline_functional_fixture_only": offline_fixture,
     }
 
 
@@ -525,7 +551,18 @@ def settle_preserving(ledger, lease, details):
         details["status"] = "SETTLEMENT_BLOCKED"
 
 
-def build_one(transport, candidate, adapter, mode, scheduler, identity):
+def public_summary(summary):
+    """Keep every nonnegative protocol count without a convenient sample cutoff."""
+    return {
+        key: value
+        for key, value in summary.items()
+        if key in ("objects", "samples", "annotations", "errors")
+        and type(value) is int
+        and value >= 0
+    }
+
+
+def build_one(transport, candidate, adapter, mode, scheduler, identity, *, network_readiness=False):
     from sakurapool.runtime.compiler import compile_runtime
     from sakurapool.runtime.inventory import load_p2_inventory
     from sakurapool.runtime.query import RuntimeQuerySpec
@@ -589,7 +626,7 @@ def build_one(transport, candidate, adapter, mode, scheduler, identity):
                 production_transport=transport,
             )
             transport.release_committed_downloads(job / "p2")
-            if not ledger.offline_mode:
+            if not ledger.offline_mode and not network_readiness:
                 # Formal production scan and write_staged_v4 have finished under
                 # their own bounded gates. Do not run an unproven extra Arrow
                 # row-group decoder, inventory reload, sampled audit or compiler
@@ -626,17 +663,13 @@ def build_one(transport, candidate, adapter, mode, scheduler, identity):
             validation_lease = ledger.reserve(
                 Reservation(disk=OFFLINE_BUILD_ALLOWANCE, inflight=footprint.memory)
             )
-            small_rows = validate_canary_rows(job / "p2", summary)
+            small_rows = validate_canary_rows(
+                job / "p2", summary, offline_fixture=ledger.offline_mode
+            )
             inventory = load_p2_inventory(job / "p2", _row_batch_size=1)
             details = {
                 "status": "PASS",
-                "summary": {
-                    k: v
-                    for k, v in summary.items()
-                    if k in ("objects", "samples", "annotations", "errors")
-                    and type(v) is int
-                    and 0 <= v <= 100000
-                },
+                "summary": public_summary(summary),
                 "small_canary_input_bounds": small_rows,
                 "inventory_verified": True,
                 "whole_sha256": stage.content_sha256,
@@ -649,6 +682,25 @@ def build_one(transport, candidate, adapter, mode, scheduler, identity):
             details.update(flags)
             if summary["samples"] == 0 or summary["errors"] != 0:
                 details.update(status="BLOCKED", failure_kind="canary_record_scope")
+                return complete(job / "p2", details)
+            details.update(
+                inventory_reopened=True,
+                formal_scan_complete=True,
+                formal_p2_write_complete=True,
+                scan_p2_verified=True,
+                p2_format=4,
+            )
+            if network_readiness:
+                details.update(
+                    runtime="NOT_REQUIRED_FOR_NETWORK_READINESS",
+                    compiler_executed=False,
+                    inventory_batch_rows=1,
+                    json_container_memory_bound_proven=False,
+                    validation_memory_reservation_bytes=footprint.memory,
+                    inventory_rows_materialized=False,
+                    inventory_object_fragment_descriptors_materialized=True,
+                    runtime_bounded_general_proof=False,
+                )
                 return complete(job / "p2", details)
             details["offline_functional_fixture_only"] = True
             compile_runtime(inventory, job / "runtime")
@@ -679,11 +731,30 @@ def build_one(transport, candidate, adapter, mode, scheduler, identity):
                     runtime_bounded_general_proof=False,
                 )
             return complete(job / "p2", details)
+        except MemoryError:
+            return complete(
+                None,
+                {
+                    "status": "OOM_BLOCKED",
+                    "failure_kind": "memory_error",
+                    "operation_failed": True,
+                },
+            )
         except BudgetExceeded:
             return complete(None, {"status": "CAPACITY_BLOCKED", "failure_kind": "capacity"})
         except RustScanAuditError:
             return complete(None, {"status": "BLOCKED", "failure_kind": "scan_or_webdataset_audit"})
         except RemoteIOError:
+            if transport.last_result.get("production_error") == "metadata_limit":
+                return complete(
+                    None,
+                    {
+                        "status": "PRODUCTION_METADATA_CAPACITY_BLOCKED",
+                        "failure_kind": "production_metadata_limit",
+                        "production_json_cap_bytes": 1 << 20,
+                        "adapter_json_cap_bytes": adapter.max_json_bytes,
+                    },
+                )
             public = scheduler.core.public_result(transport.last_result)
             kind = (
                 "provider_or_network"
@@ -734,7 +805,16 @@ def closure_result(
 
 
 def closure(
-    initial_transport, initial_candidate, token, scheduler, identity, *, resume_discovery=False
+    initial_transport,
+    initial_candidate,
+    token,
+    scheduler,
+    identity,
+    *,
+    resume_discovery=False,
+    repository=None,
+    roots=("/", "pre"),
+    adapter=None,
 ):
     """Ordered closure; terminal control reasons must never become business failure."""
     if not resume_discovery:
@@ -744,7 +824,12 @@ def closure(
     # Resume after prior successful binding+proof-use evidence: never replay the
     # large initial object's requests; it does NOT authorize the new candidate.
     candidate, report = discovery(
-        initial_transport.ledger, token, scheduler, identity, repository=initial_candidate.repo_id
+        initial_transport.ledger,
+        token,
+        scheduler,
+        identity,
+        repository=repository if repository is not None else initial_candidate.repo_id,
+        roots=roots,
     )
     if report["status"] != "PASS" or candidate is None:
         return closure_result(scheduler, report, "discovery")
@@ -754,11 +839,19 @@ def closure(
     report = scheduler.proof_use(transport, candidate, identity)
     if report["status"] != "PASS":
         return closure_result(scheduler, report, "own_registered_range")
-    adapter, report = identify_adapter(transport, candidate, scheduler, identity)
-    if report["status"] != "PASS":
-        return closure_result(scheduler, report, "schema_identification")
+    adapter_explicit = adapter is not None
+    if adapter is None:
+        adapter, report = identify_adapter(transport, candidate, scheduler, identity)
+        if report["status"] != "PASS":
+            return closure_result(scheduler, report, "schema_identification")
     remote, report = build_one(
-        transport, candidate, adapter, "remote-stream-scan", scheduler, identity
+        transport,
+        candidate,
+        adapter,
+        "remote-stream-scan",
+        scheduler,
+        identity,
+        **({"network_readiness": True} if adapter_explicit else {}),
     )
     if (
         report["status"] == "COMPILER_INPUT_CAPACITY_BLOCKED"
@@ -818,13 +911,27 @@ def closure(
     if report["status"] != "PASS":
         return closure_result(scheduler, report, "remote_builder", remote=report["status"])
     download, report = build_one(
-        transport, candidate, adapter, "download-then-scan", scheduler, identity
+        transport,
+        candidate,
+        adapter,
+        "download-then-scan",
+        scheduler,
+        identity,
+        **({"network_readiness": True} if adapter_explicit else {}),
     )
     if report["status"] != "PASS":
         result = closure_result(
             scheduler, report, "download_builder", remote="PASS", download=report["status"]
         )
-        if report["status"] == "CAPACITY_BLOCKED":
+        if report["status"] == "CAPACITY_BLOCKED" and not any(
+            report.get(key)
+            for key in (
+                "identity_mismatch",
+                "ledger_snapshot_failed",
+                "settlement_failed",
+                "operation_failed",
+            )
+        ):
             result["status"] = "REMOTE_READY_DOWNLOAD_CAPACITY_BLOCKED"
         return result
     _, report = scheduler.execute_evidenced(
@@ -855,6 +962,12 @@ def equivalent(ledger, remote, download):
         # Both inputs must already satisfy validate_canary_rows from build_one.
         matched = _equivalent_rows(remote, download)
         details = {"status": "PASS" if matched else "FAIL", "equivalent": matched}
+    except MemoryError:
+        details = {
+            "status": "OOM_BLOCKED",
+            "failure_kind": "memory_error",
+            "operation_failed": True,
+        }
     except BudgetExceeded:
         details = {"status": "CAPACITY_BLOCKED", "failure_kind": "capacity"}
     except Exception:

@@ -75,7 +75,7 @@ REV = "b" * 40
 
 
 @pytest.fixture
-def twohop():
+def twohop(monkeypatch):
     from conftest import resolve_r1_worker
 
     r1_worker = resolve_r1_worker()
@@ -201,7 +201,15 @@ def twohop():
     for thread in threads:
         thread.start()
     with tempfile.TemporaryDirectory(prefix="offline-r2-", dir=DEFAULT_WORK_ROOT) as temp:
-        ledger = BudgetLedger(Path(temp), _offline_test=True)
+        from sakurapool.storage import budget, package
+
+        monkeypatch.setattr(package, "DEFAULT_WORK_ROOT", Path(temp))
+        # Patch the test-only domain selector BEFORE constructor disk traversal.
+        # Both bootstrap and later admission count this real owned temporary tree.
+        monkeypatch.setattr(budget, "DEFAULT_WORK_ROOT", Path(temp))
+        ledger_root = Path(temp) / "ledger"
+        ledger_root.mkdir()
+        ledger = BudgetLedger(ledger_root, _offline_test=True)
         transport = RustProductionTransport(
             ledger,
             r1_worker,

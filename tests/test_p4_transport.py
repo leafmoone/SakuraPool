@@ -199,8 +199,15 @@ class Handler(BaseHTTPRequestHandler):
 def http_and_budget():
     Handler.calls = []
     Handler.fixture_data = b""
-    with tempfile.TemporaryDirectory(prefix="offline-transport-", dir=DEFAULT_WORK_ROOT) as work:
-        ledger = BudgetLedger(Path(work), _offline_test=True)
+    with tempfile.TemporaryDirectory(prefix="offline-transport-", dir=DEFAULT_WORK_ROOT) as work, \
+            pytest.MonkeyPatch.context() as domain:
+        from sakurapool.storage import budget, package
+
+        domain.setattr(budget, "DEFAULT_WORK_ROOT", Path(work))
+        domain.setattr(package, "DEFAULT_WORK_ROOT", Path(work))
+        root = Path(work) / "ledger"
+        root.mkdir()
+        ledger = BudgetLedger(root, _offline_test=True)
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -696,7 +703,7 @@ def test_offline_mode_external_initial_redirect_ledger_and_proxy_denial(http_and
         client.read_range(bound(base, "evil"), 0, 1)
     assert [name for name, *_ in Handler.calls] == ["evil"]
     assert ledger.status()["attempts"] == before + 1
-    with tempfile.TemporaryDirectory(prefix="offline-mismatch-", dir=DEFAULT_WORK_ROOT) as temp:
+    with tempfile.TemporaryDirectory(prefix="offline-mismatch-", dir=ledger._physical_root) as temp:
         alternate = BudgetLedger(Path(temp), _offline_test=True)
         with pytest.raises(ValueError, match="identical"):
             stage_tar(client, alternate, bound(base, "full"),
