@@ -52,6 +52,21 @@ REMOTE_CODES = {
     "provider_shape": "PROVIDER_SHAPE",
     "provider_rejection": "PROVIDER_REJECTION",
     "retry_policy": "RETRY_POLICY",
+    **{
+        code: code.upper()
+        for code in (
+            "provider_page_shape",
+            "provider_entry_shape",
+            "provider_entry_type",
+            "provider_entry_path",
+            "provider_entry_duplicate",
+            "provider_entry_scope",
+            "provider_entry_size",
+            "provider_entry_revision_shape",
+            "provider_entry_revision_mismatch",
+            "provider_entry_digest",
+        )
+    },
 }
 REMOTE_PHASES = frozenset(
     {
@@ -118,8 +133,10 @@ def record_lookup(result, classification):
 def failure_code(error, phase):
     # The helper phase is authoritative: a strict full-page parser can fail before
     # exact-object classification. Never infer identity/digest failures from text.
-    if isinstance(error, RemoteIOError) and error.phase in REMOTE_PHASES:
-        return REMOTE_CODES.get(error.code, "REMOTE_FAILURE")
+    if isinstance(error, RemoteIOError):
+        diagnostic = error.public_diagnostic()
+        if diagnostic.get("phase") in REMOTE_PHASES:
+            return REMOTE_CODES.get(diagnostic.get("code"), "REMOTE_IO")
     return phase + "_FAILED"
 
 

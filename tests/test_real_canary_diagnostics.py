@@ -81,7 +81,7 @@ def test_safe_exception_codes(monkeypatch, code, fixed):
 def test_untrusted_code_and_exception_are_redacted(monkeypatch):
     error = RemoteIOError(SECRET)
     error.code = SECRET
-    assert canary.failure_code(error, "FETCH_BINDING") == "REMOTE_FAILURE"
+    assert canary.failure_code(error, "FETCH_BINDING") == "REMOTE_IO"
 
     def fail(work, profile, result, state):
         result.update(phase="FETCH_BINDING", code="IN_PROGRESS")

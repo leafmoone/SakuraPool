@@ -144,29 +144,47 @@ class ModelScopeDataset:
                           phase="provider_tree_shape")
         files = info.get("Files") if isinstance(info, dict) else None
         if not isinstance(files, list) or len(files) > page_size:
-            raise RemoteIOError("unrecognized legacy tree page")
+            raise RemoteIOError("unrecognized legacy tree page", code="provider_page_shape",
+                                phase="provider_listing_shape")
         result = []
         seen = set()
         for entry in files:
             if not isinstance(entry, dict):
-                raise RemoteIOError("malformed legacy tree entry")
+                raise RemoteIOError("malformed legacy tree entry", code="provider_entry_shape",
+                                    phase="provider_listing_shape")
             if entry.get("Type") not in ("blob", "file"):
                 if entry.get("Type") in ("tree", "directory"):
                     continue
-                raise RemoteIOError("unrecognized legacy tree entry type")
+                raise RemoteIOError("unrecognized legacy tree entry type",
+                                    code="provider_entry_type",
+                                    phase="provider_listing_shape")
             path, size, candidate = entry.get("Path"), entry.get("Size"), entry.get("Revision")
-            if (not isinstance(path, str) or not _is_canonical_path(path)
-                    or len(path)>512 or path in seen
-                    or (root != "/" and not path.startswith(root.rstrip("/")+"/"))
-                    or type(size) is not int or not 0 <= size <= 1 << 50
-                    or not isinstance(candidate, str) or not _SHA.fullmatch(candidate)
-                    or (revision != "master" and candidate != revision)):
-                raise RemoteIOError("legacy tree object identity invalid")
+            if not isinstance(path, str) or not _is_canonical_path(path) or len(path)>512:
+                raise RemoteIOError("legacy tree path invalid", code="provider_entry_path",
+                                    phase="provider_listing_shape")
+            if path in seen:
+                raise RemoteIOError("legacy tree path duplicate", code="provider_entry_duplicate",
+                                    phase="provider_listing_shape")
+            if root != "/" and not path.startswith(root.rstrip("/")+"/"):
+                raise RemoteIOError("legacy tree scope invalid", code="provider_entry_scope",
+                                    phase="provider_listing_shape")
+            if type(size) is not int or not 0 <= size <= 1 << 50:
+                raise RemoteIOError("legacy tree size invalid", code="provider_entry_size",
+                                    phase="provider_listing_shape")
+            if not isinstance(candidate, str) or not _SHA.fullmatch(candidate):
+                raise RemoteIOError("legacy tree revision invalid",
+                                    code="provider_entry_revision_shape",
+                                    phase="provider_listing_shape")
+            if revision != "master" and candidate != revision:
+                raise RemoteIOError("legacy tree revision differs",
+                                    code="provider_entry_revision_mismatch",
+                                    phase="provider_listing_shape")
             seen.add(path)
             sha = entry.get("Sha256")
             if sha is not None and (not isinstance(sha, str)
                                     or re.fullmatch(r"[0-9a-f]{64}", sha) is None):
-                raise RemoteIOError("legacy tree digest malformed")
+                raise RemoteIOError("legacy tree digest malformed", code="provider_entry_digest",
+                                    phase="provider_listing_shape")
             result.append(ListedFile(path, size, sha, False, candidate))
         total = info.get("TotalCount", info.get("Total"))
         complete = (page == 1 and type(total) is int and total == len(files))

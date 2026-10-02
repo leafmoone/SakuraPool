@@ -48,7 +48,12 @@ _CONTENT_RANGE = re.compile(r"bytes ([0-9]+)-([0-9]+)/([0-9]+)\Z")
 
 _SAFE_CODES = frozenset({"remote_io", "network_ambiguous", "http_status",
                          "metadata_encoding", "redirect_policy", "invalid_json",
-                         "provider_shape", "retry_policy"})
+                         "provider_shape", "retry_policy",
+                         "provider_page_shape", "provider_entry_shape",
+                         "provider_entry_type", "provider_entry_path",
+                         "provider_entry_duplicate", "provider_entry_scope",
+                         "provider_entry_size", "provider_entry_revision_shape",
+                         "provider_entry_revision_mismatch", "provider_entry_digest"})
 _SAFE_PHASES = frozenset({"transport", "metadata_send", "metadata_headers",
                           "metadata_body", "provider_revision_shape",
                           "provider_listing_shape", "response_headers",
