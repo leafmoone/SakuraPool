@@ -5,6 +5,41 @@ read-only runtime (compile committed P2 into a bitmap snapshot, query, resolve).
 No data service access, image decoding, production throughput claims, or model
 execution.
 
+## Publication v2 (runtime-first distribution)
+
+Publication v2 is separate from the historical package v1. It preserves durable
+P2 format 4 and runtime format 2; its default distribution contains no durable
+partitions. Maintainers retain P2 separately for audit and recompilation.
+
+```text
+sakura publication build --runtime RUNTIME --p2-list p2-roots.json --remote-map remote-map.jsonl --output NEW_PUBLICATION
+sakura publication inspect NEW_PUBLICATION
+sakura publication verify NEW_PUBLICATION --full
+sakura publication fetch --publication NEW_PUBLICATION --record-id RECORD_ID --profile PROFILE --output P4_OUTPUT --metadata
+```
+
+The P2 list is `{"format":"sakurapool-p2-root-list-v1","roots":["absolute/path"]}`.
+Each bounded JSONL remote-map row contains `dataset_id`, `endpoint`, `repo_id`,
+`repo_type`, `revision_candidate`, `object_path`, `object_size`, and
+`provider_sha256` (64 lowercase hex or null). Rows must exactly cover runtime
+objects. Only provider SHA equal to the indexed whole-TAR SHA makes an object
+fetchable. Null provider SHA keeps query/location usable but blocks remote fetch.
+
+The publication contains a bounded `PUBLICATION.json`, pinned runtime snapshot,
+read-only `remote_objects.sqlite`, and mmap `image_sha256.npy` (`V32`, indexed by
+rid). Build requires reliable computed image SHA in every P2 sample. Fast open
+checks structure and identity, not complete content hashes; full verify streams
+all hashes and cross-checks catalog identities. Fetch requires a full-verified
+publication, fresh exact provider lookup, then its own positive/negative
+conditional binding before Rust Range reads. Neither live ETag/proof nor signed
+URL is persisted. Publication storage may be outside the network work root;
+fetch outputs and accounting remain governed by the existing production ledger.
+
+Image mismatch prevents delivery. A ledger settlement failure *after* atomic
+rename may leave verified output visible with conservative pending accounting;
+this is an error, not successful settlement, and the output is never overwritten.
+Synthetic million-record measurements are not a production capacity guarantee.
+
 ## Project workflow and boundaries
 
 [Project rules](docs/PROJECT_RULES.md) are the canonical current workflow and

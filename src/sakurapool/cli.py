@@ -32,6 +32,7 @@ def _spec_tags(value: Any) -> tuple:
 def _spec_from_dict(data: dict[str, Any]) -> "RuntimeQuerySpec":
     """Build a RuntimeQuerySpec from a --spec JSON document (any_of included)."""
     from .runtime import RuntimeQuerySpec
+
     if not isinstance(data, dict):
         raise ValueError("spec must be a JSON object")
     branches = []
@@ -39,8 +40,7 @@ def _spec_from_dict(data: dict[str, Any]) -> "RuntimeQuerySpec":
         if not isinstance(branch, dict):
             raise ValueError("any_of branches must be objects")
         branches.append(_spec_from_dict(branch))
-    known = {"sources", "datasets", "namespace", "all_tags", "any_tags",
-             "none_tags", "any_of"}
+    known = {"sources", "datasets", "namespace", "all_tags", "any_tags", "none_tags", "any_of"}
     unknown = set(data) - known
     if unknown:
         raise ValueError(f"unknown spec keys: {sorted(unknown)}")
@@ -62,44 +62,61 @@ def _runtime_command(args: argparse.Namespace) -> int:
         compile_runtime,
         load_p2_inventory,
     )
+
     if args.runtime_command == "compile":
-        combined = combine_inventories(
-            [load_p2_inventory(directory) for directory in args.inputs])
+        combined = combine_inventories([load_p2_inventory(directory) for directory in args.inputs])
         summary = compile_runtime(combined, args.output, chunk_size=args.chunk_size)
-        print(json.dumps({
-            "snapshot_id": summary.snapshot_id,
-            "rid_count": summary.rid_count,
-            "object_count": summary.object_count,
-            "source_count": summary.source_count,
-            "dataset_count": summary.dataset_count,
-            "tag_count": summary.tag_count,
-            "tag_memberships": summary.tag_memberships,
-            "path": str(summary.path),
-        }, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "snapshot_id": summary.snapshot_id,
+                    "rid_count": summary.rid_count,
+                    "object_count": summary.object_count,
+                    "source_count": summary.source_count,
+                    "dataset_count": summary.dataset_count,
+                    "tag_count": summary.tag_count,
+                    "tag_memberships": summary.tag_memberships,
+                    "path": str(summary.path),
+                },
+                sort_keys=True,
+            )
+        )
         return 0
     path = args.snapshot if args.snapshot is not None else args.path
     if path is None:
         raise ValueError("a snapshot path (positional or --snapshot) is required")
     if args.runtime_command == "query" and args.spec:
         from .runtime import RuntimeQuerySpec  # noqa: F401 - import check
-        spec_data = (_load_json(args.spec)
-                     if Path(args.spec).is_file() else json.loads(args.spec))
+
+        spec_data = _load_json(args.spec) if Path(args.spec).is_file() else json.loads(args.spec)
         spec = _spec_from_dict(spec_data)
     else:
         spec = None
     with RuntimeSnapshot.open(path, full_verify=args.full_verify) as rt:
         if args.runtime_command == "inspect":
-            print(json.dumps({
-                "snapshot_id": rt.snapshot_id,
-                "rid_count": rt.rid_count,
-                "root": str(rt.root),
-                "path": str(rt.path),
-            }, sort_keys=True))
+            print(
+                json.dumps(
+                    {
+                        "snapshot_id": rt.snapshot_id,
+                        "rid_count": rt.rid_count,
+                        "root": str(rt.root),
+                        "path": str(rt.path),
+                    },
+                    sort_keys=True,
+                )
+            )
             return 0
         if args.runtime_command == "verify":
-            print(json.dumps({"verified": True,
-                              "full": bool(args.full_verify),
-                              "snapshot_id": rt.snapshot_id}, sort_keys=True))
+            print(
+                json.dumps(
+                    {
+                        "verified": True,
+                        "full": bool(args.full_verify),
+                        "snapshot_id": rt.snapshot_id,
+                    },
+                    sort_keys=True,
+                )
+            )
             return 0
         if args.runtime_command == "lookup":
             if not args.source or not args.post_id:
@@ -107,24 +124,37 @@ def _runtime_command(args: argparse.Namespace) -> int:
             # fall through: lookup returns before the query branch below
             record = rt.resolve_one(args.source, args.post_id, args.dataset)
             location = rt.location(record.rid)
-            print(json.dumps({
-                "rid": record.rid,
-                "record_id": record.record_id,
-                "source_id": record.source_id,
-                "dataset_id": record.dataset_id,
-                "post_id": record.post_id,
-                **location,
-            }, sort_keys=True))
+            print(
+                json.dumps(
+                    {
+                        "rid": record.rid,
+                        "record_id": record.record_id,
+                        "source_id": record.source_id,
+                        "dataset_id": record.dataset_id,
+                        "post_id": record.post_id,
+                        **location,
+                    },
+                    sort_keys=True,
+                )
+            )
             return 0
         if args.runtime_command != "query":
-            raise ValueError(
-                f"unhandled runtime command: {args.runtime_command}")
+            raise ValueError(f"unhandled runtime command: {args.runtime_command}")
         if spec is not None:
-            if any((args.source, args.dataset, args.namespace,
-                    args.all_tags, args.any_tags, args.none_tags)):
+            if any(
+                (
+                    args.source,
+                    args.dataset,
+                    args.namespace,
+                    args.all_tags,
+                    args.any_tags,
+                    args.none_tags,
+                )
+            ):
                 raise ValueError("--spec cannot be combined with term flags")
         else:
             from .runtime import RuntimeQuerySpec
+
             spec = RuntimeQuerySpec(
                 sources=tuple(args.source or ()),
                 datasets=tuple(args.dataset or ()),
@@ -135,20 +165,32 @@ def _runtime_command(args: argparse.Namespace) -> int:
             )
         result = rt.query(spec)
         rids = result.limit(args.limit if args.limit is not None else 10)
-        print(json.dumps({
-            "snapshot_id": result.snapshot_id,
-            "count": result.count(),
-            "rids": rids,
-            "truncated": result.count() > len(rids),
-        }, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "snapshot_id": result.snapshot_id,
+                    "count": result.count(),
+                    "rids": rids,
+                    "truncated": result.count() > len(rids),
+                },
+                sort_keys=True,
+            )
+        )
         return 0
 
 
 def _scan_remote_blocked() -> int:
     """Only scan/compile is blocked until the working-set budget is proven."""
-    print(json.dumps({"status": "BLOCKED", "command": "index scan-remote",
-                      "reason": "explicit production mode/profile/binding/working set required"},
-                     sort_keys=True))
+    print(
+        json.dumps(
+            {
+                "status": "BLOCKED",
+                "command": "index scan-remote",
+                "reason": "explicit production mode/profile/binding/working set required",
+            },
+            sort_keys=True,
+        )
+    )
     print("remote scan/compile blocked before HTTP or artifact creation", file=sys.stderr)
     return 3
 
@@ -157,6 +199,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="sakura")
     parser.add_argument("--version", action="version", version="sakurapool 0.1.0")
     subparsers = parser.add_subparsers(dest="command", required=True)
+    publication = subparsers.add_parser("publication")
+    publication_sub = publication.add_subparsers(dest="publication_command", required=True)
+    publication_build = publication_sub.add_parser("build")
+    for option in ("runtime", "p2-list", "remote-map", "output"):
+        publication_build.add_argument("--" + option, required=True)
+    for operation in ("inspect", "verify"):
+        publication_read = publication_sub.add_parser(operation)
+        publication_read.add_argument("root")
+        if operation == "verify":
+            publication_read.add_argument("--full", action="store_true")
+    publication_fetch = publication_sub.add_parser("fetch")
+    for option in ("publication", "record-id", "profile", "output"):
+        publication_fetch.add_argument("--" + option, required=True)
+    publication_fetch.add_argument("--metadata", action="store_true")
     validate = subparsers.add_parser("validate", help="validate a query JSON document")
     validate.add_argument("query", type=Path)
     evaluate = subparsers.add_parser("evaluate", help="evaluate a query against a JSON row array")
@@ -170,11 +226,20 @@ def main(argv: list[str] | None = None) -> int:
     runtime_sub = runtime.add_subparsers(dest="runtime_command", required=True)
     rc = runtime_sub.add_parser("compile", help="compile P2 indexes into a snapshot")
     rc.add_argument(
-        "paths", type=Path, nargs="*",
+        "paths",
+        type=Path,
+        nargs="*",
         metavar="P2_DIR|RUNTIME_ROOT",
-        help="P2 index dirs; the last positional is RUNTIME_ROOT unless --output")
-    rc.add_argument("--index", dest="index_dirs", action="append",
-                    default=[], type=Path, help="P2 index dir (repeatable)")
+        help="P2 index dirs; the last positional is RUNTIME_ROOT unless --output",
+    )
+    rc.add_argument(
+        "--index",
+        dest="index_dirs",
+        action="append",
+        default=[],
+        type=Path,
+        help="P2 index dir (repeatable)",
+    )
     rc.add_argument("--output", dest="named_output", type=Path)
     rc.add_argument("--chunk-size", type=int, default=500_000)
     ri = runtime_sub.add_parser("inspect", help="show the current snapshot meta")
@@ -204,8 +269,7 @@ def main(argv: list[str] | None = None) -> int:
     rq.add_argument("--all-tag", dest="all_tags", action="append", default=[])
     rq.add_argument("--any-tag", dest="any_tags", action="append", default=[])
     rq.add_argument("--none-tag", dest="none_tags", action="append", default=[])
-    rq.add_argument("--spec",
-                    help="query JSON document (file or inline) incl. any_of")
+    rq.add_argument("--spec", help="query JSON document (file or inline) incl. any_of")
     rq.add_argument("--limit", type=int)
     rq.add_argument("--full-verify", action="store_true")
     rq.add_argument("--full", dest="full_verify", action="store_true")
@@ -214,15 +278,21 @@ def main(argv: list[str] | None = None) -> int:
     inspect = remote_sub.add_parser("inspect", help="guarded metadata inspection")
     inspect.add_argument("--config", type=Path, required=True)
     inspect.add_argument("--output", type=Path, required=True)
-    inspect.add_argument("--offline-fixture", action="store_true",
-                         help="literal 127.0.0.1 fixture only; no credentials")
+    inspect.add_argument(
+        "--offline-fixture",
+        action="store_true",
+        help="literal 127.0.0.1 fixture only; no credentials",
+    )
     fetch = remote_sub.add_parser("fetch", help="fetch a packaged remote record")
     fetch.add_argument("--package", type=Path, required=True)
     fetch.add_argument("--config", type=Path, required=True)
     fetch.add_argument("--record-id", required=True)
     fetch.add_argument("--output", type=Path, required=True)
-    fetch.add_argument("--offline-fixture", action="store_true",
-                       help="literal 127.0.0.1 fixture only; no credentials")
+    fetch.add_argument(
+        "--offline-fixture",
+        action="store_true",
+        help="literal 127.0.0.1 fixture only; no credentials",
+    )
     index = subparsers.add_parser("index", help="build a local index")
     index_subparsers = index.add_subparsers(dest="index_command", required=True)
     scan_command = index_subparsers.add_parser("scan", help="scan uncompressed TAR archives")
@@ -234,60 +304,123 @@ def main(argv: list[str] | None = None) -> int:
     scan_command.add_argument("--dataset", default="local")
     scan_command.add_argument("--hash-images", action="store_true")
     build = index_subparsers.add_parser(
-        "build-partition", help="single-pass local Rust partition build")
+        "build-partition", help="single-pass local Rust partition build"
+    )
     build.add_argument("--config", type=Path, required=True)
     build.add_argument("--manifest", type=Path, required=True)
     build.add_argument("--worker", type=Path, required=True)
     build.add_argument("--work-dir", type=Path, required=True)
     build.add_argument("--output", type=Path, required=True)
-    build.add_argument("--code-sha", required=True,
-                       help="full SHA of the installed candidate/approved build")
+    build.add_argument(
+        "--code-sha", required=True, help="full SHA of the installed candidate/approved build"
+    )
     scan_remote = index_subparsers.add_parser("scan-remote", help="gated P4 scan")
     scan_remote.add_argument("--config", type=Path, required=True)
     scan_remote.add_argument("--plan", type=Path, required=True)
-    scan_remote.add_argument("--output-package", type=Path, required=True,
-                             help="fresh P2 directory; runtime/package scheduled separately")
-    scan_remote.add_argument("--mode", choices=("download-then-scan", "remote-stream-scan"),
-                             help="explicit administrator production pipeline")
+    scan_remote.add_argument(
+        "--output-package",
+        type=Path,
+        required=True,
+        help="fresh P2 directory; runtime/package scheduled separately",
+    )
+    scan_remote.add_argument(
+        "--mode",
+        choices=("download-then-scan", "remote-stream-scan"),
+        help="explicit administrator production pipeline",
+    )
     args = parser.parse_args(argv)
-    if (args.command == "runtime" and args.runtime_command == "compile"
-            and not args.index_dirs and not args.paths):
+    if (
+        args.command == "runtime"
+        and args.runtime_command == "compile"
+        and not args.index_dirs
+        and not args.paths
+    ):
         parser.error("runtime compile requires --index or P2_DIR arguments")
     try:
+        if args.command == "publication":
+            from .storage.publication import build_publication, load_publication
+
+            if args.publication_command == "build":
+                result = build_publication(args.runtime, args.p2_list, args.remote_map, args.output)
+            else:
+                with load_publication(
+                    args.root if args.publication_command != "fetch" else args.publication,
+                    full_verify=(
+                        args.publication_command == "fetch" or getattr(args, "full", False)
+                    ),
+                ) as pub:
+                    if args.publication_command == "fetch":
+                        from .storage.production_cli import load_profile
+                        from .storage.publication_fetch import fetch_publication_sample
+
+                        _config, _object, transport = load_profile(Path(args.profile))
+                        with transport:
+                            result = {
+                                "output": str(
+                                    fetch_publication_sample(
+                                        pub,
+                                        args.record_id,
+                                        transport,
+                                        args.output,
+                                        metadata=args.metadata,
+                                        scope=_object,
+                                    )
+                                )
+                            }
+                    else:
+                        result = pub.inspect()
+            print(json.dumps(result, sort_keys=True))
+            return 0
         if args.command == "remote":
             from .storage.cli_ops import fetch, inspect
+
             try:
                 if args.remote_command == "fetch":
-                    if not args.package.is_dir() or not (
-                            args.package / "index-package.json").is_file():
+                    if (
+                        not args.package.is_dir()
+                        or not (args.package / "index-package.json").is_file()
+                    ):
                         raise ValueError("local package unavailable; fetch never scans")
-                    result = fetch(args.package, args.config, args.record_id, args.output,
-                                   offline_fixture=args.offline_fixture)
+                    result = fetch(
+                        args.package,
+                        args.config,
+                        args.record_id,
+                        args.output,
+                        offline_fixture=args.offline_fixture,
+                    )
                 else:
-                    result = inspect(args.config, args.output,
-                                     offline_fixture=args.offline_fixture)
+                    result = inspect(args.config, args.output, offline_fixture=args.offline_fixture)
             except Exception as exc:
                 # Only vetted static codes cross the public boundary. Raw
                 # exception strings/context, URLs, response bodies and tokens
                 # must never enter either stream (including unexpected errors).
                 from .storage.transport import RemoteIOError
-                public = ({"error": "remote operation failed", "status": "ERROR"}
-                          | (exc.public_diagnostic() if isinstance(exc, RemoteIOError)
-                             else {"code": "local_or_unclassified", "phase": "local"}))
+
+                public = {"error": "remote operation failed", "status": "ERROR"} | (
+                    exc.public_diagnostic()
+                    if isinstance(exc, RemoteIOError)
+                    else {"code": "local_or_unclassified", "phase": "local"}
+                )
                 print(json.dumps(public, sort_keys=True))
-                print("remote operation failed; no implicit scan or fallback",
-                      file=sys.stderr)
+                print("remote operation failed; no implicit scan or fallback", file=sys.stderr)
                 return 2
             print(json.dumps(result, sort_keys=True))
             return 0
         if args.command == "index" and args.index_command == "build-partition":
             from .local_builder import build_partition
             from .partition import PartitionManifest
+
             manifest = PartitionManifest.from_dict(_load_json(str(args.manifest)))
             registry = AdapterRegistry.from_dict(_load_json(str(args.config)))
-            result = build_partition(manifest, registry.get(manifest.dataset), args.worker,
-                                     args.work_dir, args.output, code_sha=args.code_sha,
-                                     completion=lambda value: print(json.dumps(value), flush=True))
+            result = build_partition(
+                manifest,
+                registry.get(manifest.dataset),
+                args.worker,
+                args.work_dir,
+                args.output,
+                code_sha=args.code_sha,
+                completion=lambda value: print(json.dumps(value), flush=True),
+            )
             print(json.dumps(result, sort_keys=True))
             return 0 if result["counts"]["errors"] == 0 else 1
         if args.command == "index" and args.index_command == "scan-remote":
@@ -306,13 +439,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "runtime":
             if args.runtime_command == "compile":
                 if args.index_dirs and args.paths[:-1]:
-                    raise ValueError(
-                        "--index cannot be mixed with positional P2 dirs")
+                    raise ValueError("--index cannot be mixed with positional P2 dirs")
                 if args.index_dirs:
                     if args.named_output:
                         if args.paths:
-                            raise ValueError(
-                                "--index + --output takes no positional args")
+                            raise ValueError("--index + --output takes no positional args")
                         args.inputs = list(args.index_dirs)
                         args.output = args.named_output
                     elif args.paths:
@@ -325,8 +456,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.output = args.named_output
                 else:
                     if len(args.paths) < 2:
-                        raise ValueError(
-                            "compile requires at least one P2_DIR and an output root")
+                        raise ValueError("compile requires at least one P2_DIR and an output root")
                     args.inputs = list(args.paths[:-1])
                     args.output = args.paths[-1]
             return _runtime_command(args)
@@ -343,7 +473,8 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("index scan requires --input and --output")
             registry = (
                 AdapterRegistry.from_dict(_load_json(str(args.config)))
-                if args.config else AdapterRegistry.local()
+                if args.config
+                else AdapterRegistry.local()
             )
             summary = scan(
                 root, output, hash_images=args.hash_images, dataset=args.dataset, registry=registry
@@ -358,7 +489,12 @@ def main(argv: list[str] | None = None) -> int:
             result = ReferenceEvaluator().evaluate(_load_json(str(args.rows)), query)
             print(json.dumps(result.to_pylist(), sort_keys=True))
         return 0
-    except (OSError, ValueError, TypeError, KeyError, tarfile.TarError) as exc:
+    except Exception as exc:
+        if args.command == "publication":
+            print(json.dumps({"error": "publication_failed", "code": "FAIL_CLOSED"}))
+            return 2
+        if not isinstance(exc, (OSError, ValueError, TypeError, KeyError, tarfile.TarError)):
+            raise
         if args.command in ("index", "config", "runtime"):
             print(json.dumps({"error": str(exc)}, sort_keys=True))
             return 2
