@@ -201,9 +201,11 @@ def twohop(monkeypatch):
     for thread in threads:
         thread.start()
     with tempfile.TemporaryDirectory(prefix="offline-r2-", dir=DEFAULT_WORK_ROOT) as temp:
-        from sakurapool.storage import budget, package
+        from sakurapool.storage import budget, package, remote_index
 
         monkeypatch.setattr(package, "DEFAULT_WORK_ROOT", Path(temp))
+        # Lazy stage reopen imports must follow this fixture's owned domain lifetime.
+        monkeypatch.setattr(remote_index, "DEFAULT_WORK_ROOT", Path(temp))
         # Patch the test-only domain selector BEFORE constructor disk traversal.
         # Both bootstrap and later admission count this real owned temporary tree.
         monkeypatch.setattr(budget, "DEFAULT_WORK_ROOT", Path(temp))

@@ -13,7 +13,8 @@ from itertools import zip_longest
 from pathlib import Path
 
 CONFIGURED_REPOSITORY = "leafmoone/webdataset_danbooru_v3"
-CONFIGURED_ROOTS = ("gamecg",)
+# Repository API prefix intentionally differs from logical adapter source "gamecg".
+CONFIGURED_ROOTS = ("gc5m",)
 CONFIGURED_DATASET = "gamecg_v3"
 
 

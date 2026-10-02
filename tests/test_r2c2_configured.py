@@ -28,6 +28,52 @@ def test_configured_adapter_changes_only_storage():
     assert adapter.allowed_provenance == ("gamecg-2D",)
 
 
+def test_configured_prefix_uses_existing_provider_canonical_gate():
+    from sakurapool.storage.modelscope import ModelScopeDataset
+
+    class Control:
+        def __init__(self):
+            self.calls = []
+
+        def _host(self, url):
+            return "modelscope.cn"
+
+        def read_metadata(self, url):
+            self.calls.append(url)
+            if "/repo/tree?" in url:
+                return json.dumps({"Code": 200, "Data": {"Files": [], "TotalCount": 0}}).encode()
+            return json.dumps(
+                {
+                    "Code": 200,
+                    "Data": {
+                        "Namespace": "leafmoone",
+                        "Name": "webdataset_danbooru_v3",
+                        "Id": 17,
+                        "Type": 4,
+                    },
+                }
+            ).encode()
+
+    control = Control()
+    provider = ModelScopeDataset(
+        control, "https://modelscope.cn", "leafmoone/webdataset_danbooru_v3"
+    )
+    assert provider.legacy_hub_id() == 17
+    assert provider.legacy_tree_page(17, "master", root="gc5m") == ([], True)
+    with pytest.raises(ValueError):
+        provider.legacy_tree_page(17, "master", root="gc5m/")
+
+
+def test_configured_repository_prefix_differs_from_logical_source():
+    _, canary = load_c2_helpers()
+    adapter = canary.configured_adapter()
+    assert canary.CONFIGURED_ROOTS == ("gc5m",)
+    assert canary.CONFIGURED_DATASET == "gamecg_v3"
+    assert adapter.source == "gamecg"
+    assert adapter.allowed_provenance == ("gamecg-2D",)
+    assert canary.CONFIGURED_ROOTS[0] != adapter.source
+
+
 @pytest.mark.parametrize("proof_status", ["PASS", "SOURCE_OR_LEDGER_BLOCKED"])
 @pytest.mark.parametrize(
     "download_status,terminal",
@@ -47,7 +93,10 @@ def test_configured_closure_uses_own_proof_without_inference(
     calls = []
 
     def discovery(*args, **kwargs):
-        assert kwargs == {"repository": canary.CONFIGURED_REPOSITORY, "roots": ("gamecg",)}
+        assert kwargs == {
+            "repository": canary.CONFIGURED_REPOSITORY,
+            "roots": canary.CONFIGURED_ROOTS,
+        }
         calls.append("discovery")
         return candidate, {"status": "PASS"}
 
@@ -88,7 +137,7 @@ def test_configured_closure_uses_own_proof_without_inference(
         {},
         resume_discovery=True,
         repository=canary.CONFIGURED_REPOSITORY,
-        roots=("gamecg",),
+        roots=canary.CONFIGURED_ROOTS,
         adapter=adapter,
     )
     assert calls[:3] == ["discovery", "own_binding", "own_proof"]
@@ -274,7 +323,7 @@ def test_configured_cli_routes_without_old_binding(monkeypatch):
 
             def closure(*a, **k):
                 assert k["repository"] == "leafmoone/webdataset_danbooru_v3"
-                assert k["roots"] == ("gamecg",)
+                assert k["roots"] == module.CONFIGURED_ROOTS
                 assert k["adapter"].dataset == "gamecg_v3"
                 assert k["resume_discovery"]
                 calls.append(True)
