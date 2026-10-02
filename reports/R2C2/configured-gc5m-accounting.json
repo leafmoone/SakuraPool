@@ -1,0 +1,82 @@
+[
+  {
+    "round": 25,
+    "operation": "canary_discovery_hub",
+    "attempts": 1,
+    "body": 2183,
+    "metadata": 2183,
+    "records": 0
+  },
+  {
+    "round": 26,
+    "operation": "canary_discovery_page",
+    "attempts": 1,
+    "body": 101997,
+    "metadata": 101997,
+    "records": 0
+  },
+  {
+    "round": 27,
+    "operation": "canary_discovery_hub",
+    "attempts": 1,
+    "body": 2183,
+    "metadata": 2183,
+    "records": 0
+  },
+  {
+    "round": 28,
+    "operation": "canary_discovery_page",
+    "attempts": 1,
+    "body": 101997,
+    "metadata": 101997,
+    "records": 0
+  },
+  {
+    "round": 29,
+    "operation": "verify_conditions",
+    "attempts": 6,
+    "body": 441,
+    "metadata": 0,
+    "records": 0
+  },
+  {
+    "round": 30,
+    "operation": "registered_proof_range",
+    "attempts": 2,
+    "body": 1,
+    "metadata": 0,
+    "records": 0
+  },
+  {
+    "round": 31,
+    "operation": "real_network_builder",
+    "attempts": 2,
+    "body": 5201920,
+    "metadata": 0,
+    "records": 121
+  },
+  {
+    "round": 32,
+    "operation": "real_network_builder",
+    "attempts": 2,
+    "body": 5201920,
+    "metadata": 0,
+    "records": 121
+  },
+  {
+    "round": 33,
+    "operation": "canary_equivalence",
+    "attempts": 0,
+    "body": 0,
+    "metadata": 0,
+    "records": 0
+  },
+  {
+    "round": 34,
+    "operation": "canary_closure_summary",
+    "attempts": 0,
+    "body": 0,
+    "metadata": 0,
+    "records": 0
+  }
+]
