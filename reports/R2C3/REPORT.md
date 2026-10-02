@@ -1,5 +1,19 @@
 # P4-R2C3 certification
 
+## REAL PUBLICATION CLOSURE (current authorized round)
+
+BASE1bccbc2dabb3bb118856669b49bb917601e0d3b4; diagnostic implementation217fd10ba80c0ce4fa15817d623de04daec3dec4, normal push origin/dev verified. Only real_canary.py and diagnostic tests changed, no src/rust/product semantics. Fixed safe phases/codes, seven-case pure classifier, null-SHA supported publication path, safe ledger before/after and output redaction. Correct-path readonly review PASS. Target `python -m pytest tests/test_publication.py tests/test_real_canary_diagnostics.py -q -p no:cacheprovider`:75passed25.99s exit0; ruff/diffcheck exit0. Full998/3 and Rust62 NOT_RERUN_HELPER_ONLY / NOT_RERUN_NO_CHANGE; previously approved scaling/wheel remain PASS.
+
+Pre-execution publication/p2-list.json/remote-map.jsonl all absent; no concurrent release worker observed. Exactly one authorized same pinned lookup executed via externalpython-I approved wheel product+committed helper. Exit1 STOP phasePROVIDER_LISTING codeREMOTE_IO, provider_pages0 (no page successfully parsed). No retry. This is a typed listing-stage failure, not evidence of network transport failure, target identity mismatch or unavailable SHA; provider parser may raise default remote_io for shape/identity/digest rejection. Underlying specific rejection is NOT_ESTABLISHED; no raw exception/response/digest/URL/headers emitted or recovered.
+
+EXACT_OBJECT_FOUND=NOT_ESTABLISHED (not NO); size/revisionNOT_ESTABLISHED; PROVIDER_SHA_PRESENT=NOT_ESTABLISHED; REAL_PROVIDER_SHA_MATCH=NOT_ESTABLISHED; REAL_PUBLICATION_CANARY=BLOCKED; REAL_V2_FETCH=NOT_ATTEMPTED; ownbinding/imageSHA/metadataNOT_RUN. P4_COMPLETE NO. No proof/Range/whole TAR GET/saved sample/publication after control lookup failure. Publication product integrity and null-SHA support unchanged; offline null branch tested, not certified real.
+
+Ledger before settled attempts107/body11077072/meta671380/records242/saved0, pendingcount16 unknownbody16,totalbody11077088,disk1610067968,inflight0. After109/body11181422/meta775730/records242/saved0,pending16 unknownbody16,totalbody11181438,disk1610067968,inflight0. HTTPdelta2; settledbodydelta104350; metadatadelta104350; pendingdelta0/unknownbodydelta0/savedsampledelta0/savedbytesdelta0/diskdelta0.
+
+P2=4/P3=2/publication=2; INDEX_MACHINE_OPERATIONS0/mainmodifiedNO/P5startedNO. Stop WAITING_REVIEW. Earlier sections below are previous-stage evidence, not the new lookup result.
+
+## Previous-stage certification (historical)
+
 WAITING_REVIEW; P4_COMPLETE NO. REAL_PUBLICATION_CANARY=BLOCKED(FAIL_CLOSED BEFORE_PUBLICATION); REAL_PROVIDER_SHA_MATCH=NOT_ESTABLISHED, availabilityUNKNOWN; REAL_V2_FETCH=BLOCKED_NOT_ATTEMPTED; ownbinding/imageshaNOTRUN.
 
 Evidence commit8ac29fd57cf84d6f12d855dd07e4d20637a55557 included reports/R2C3/REPORT.md and root plan.md, violating the narrower reports-directory-only closing instruction; calling it strictly reports-only was inaccurate. Its plan changes were phase-status documentation, not product code. A subsequent ordinary correction restores plan.md exactly to implementation39a71d2; cumulative final evidence diff from implementation contains only this report. No amend/reset/forcepush or certification-source drift. Restored plan is the historical implementation snapshot, not current progress.
