@@ -175,17 +175,16 @@ class ModelScopeDataset:
                 raise RemoteIOError("legacy tree revision invalid",
                                     code="provider_entry_revision_shape",
                                     phase="provider_listing_shape")
-            if revision != "master" and candidate != revision:
-                raise RemoteIOError("legacy tree revision differs",
-                                    code="provider_entry_revision_mismatch",
-                                    phase="provider_listing_shape")
+            # Entry Revision identifies the entry's commit; a pinned request
+            # identifies the dataset snapshot whose tree was requested.
+            effective_revision = candidate if revision == "master" else revision
             seen.add(path)
             sha = entry.get("Sha256")
             if sha is not None and (not isinstance(sha, str)
                                     or re.fullmatch(r"[0-9a-f]{64}", sha) is None):
                 raise RemoteIOError("legacy tree digest malformed", code="provider_entry_digest",
                                     phase="provider_listing_shape")
-            result.append(ListedFile(path, size, sha, False, candidate))
+            result.append(ListedFile(path, size, sha, False, effective_revision))
         total = info.get("TotalCount", info.get("Total"))
         complete = (page == 1 and type(total) is int and total == len(files))
         return result, complete

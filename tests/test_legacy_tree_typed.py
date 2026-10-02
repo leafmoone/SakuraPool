@@ -49,7 +49,6 @@ def entry(**changes):
         ([entry(Path="outside/test.tar")], "provider_entry_scope"),
         ([entry(Size=True)], "provider_entry_size"),
         ([entry(Revision="private-revision")], "provider_entry_revision_shape"),
-        ([entry(Revision=B)], "provider_entry_revision_mismatch"),
         ([entry(Sha256="private-digest")], "provider_entry_digest"),
     ],
 )
@@ -63,7 +62,9 @@ def test_typed_rejections(monkeypatch, files, code):
         assert value not in exposed
 
 
-@pytest.mark.parametrize("revision,candidate", [("master", A), (A, A), ("master", "d" * 64)])
+@pytest.mark.parametrize(
+    "revision,candidate", [("master", B), (A, A), (A, B), ("master", "d" * 64)]
+)
 @pytest.mark.parametrize("sha", [None, DIGEST])
 def test_accepted_unchanged(monkeypatch, revision, candidate, sha):
     rows, complete = parse(
@@ -71,9 +72,20 @@ def test_accepted_unchanged(monkeypatch, revision, candidate, sha):
         [entry(Revision=candidate, Sha256=sha), {"Type": "directory"}, {"Type": "tree"}],
         revision=revision,
     )
-    assert rows[0].revision_candidate == candidate
+    assert rows[0].revision_candidate == (candidate if revision == "master" else revision)
+    assert rows[0].path == "gc5m/test.tar" and rows[0].size == 12
     assert rows[0].provider_sha256 == sha
     assert len(rows) == 1 and complete
+
+
+@pytest.mark.parametrize("bad", ["master", "", "garbage", "a" * 39])
+def test_pinned_still_requires_entry_revision_syntax(monkeypatch, bad):
+    with pytest.raises(RemoteIOError) as caught:
+        parse(monkeypatch, [entry(Revision=bad)])
+    assert caught.value.public_diagnostic() == {
+        "code": "provider_entry_revision_shape",
+        "phase": "provider_listing_shape",
+    }
 
 
 def test_guard_order(monkeypatch):

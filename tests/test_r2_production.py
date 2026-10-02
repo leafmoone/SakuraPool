@@ -56,8 +56,14 @@ def test_modelscope_legacy_control_plane_exact_identity_and_live_candidates():
     assert "PageSize=20" in control.calls[-1]
     again, complete = dataset.legacy_tree_page(17, REV, root="pre")
     assert again == files and not complete  # echo is candidate metadata, not conditional proof
+    control.payload["Files"][0]["Revision"] = "c" * 40
+    pinned, _ = dataset.legacy_tree_page(17, REV, root="pre")
+    assert pinned[0].revision_candidate == REV
+    discovered, _ = dataset.legacy_tree_page(17, "master", root="pre")
+    assert discovered[0].revision_candidate == "c" * 40
+    control.payload["Files"][0]["Revision"] = REV
     for field, invalid in [
-        ("Revision", "c" * 40),
+        ("Revision", "master"),
         ("Path", "other/a.tar"),
         ("Path", "pre/../outside.tar"),
         ("Size", -1),

@@ -53,7 +53,7 @@ _SAFE_CODES = frozenset({"remote_io", "network_ambiguous", "http_status",
                          "provider_entry_type", "provider_entry_path",
                          "provider_entry_duplicate", "provider_entry_scope",
                          "provider_entry_size", "provider_entry_revision_shape",
-                         "provider_entry_revision_mismatch", "provider_entry_digest"})
+                         "provider_entry_digest"})
 _SAFE_PHASES = frozenset({"transport", "metadata_send", "metadata_headers",
                           "metadata_body", "provider_revision_shape",
                           "provider_listing_shape", "response_headers",

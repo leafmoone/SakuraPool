@@ -63,7 +63,6 @@ REMOTE_CODES = {
             "provider_entry_scope",
             "provider_entry_size",
             "provider_entry_revision_shape",
-            "provider_entry_revision_mismatch",
             "provider_entry_digest",
         )
     },
