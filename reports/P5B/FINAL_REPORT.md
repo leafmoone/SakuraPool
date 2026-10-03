@@ -2,7 +2,7 @@
 
 ## 范围、提交与停止边界
 
-仅完成授权 P5-B 可恢复串行下载任务及其依赖的错误/清理语义修复。24 个实现/文档/测试路径，2643 insertions、25 deletions。sole reviewer 对最终实现 tree 稳定认证门 PASS；不代表用户阶段验收通过。真实任务确定性服务错误 BLOCKED，不能伪报 PASS。报告独立提交，不再改实现/计划。
+仅完成授权 P5-B 可恢复串行下载任务及其依赖的错误/清理语义修复。24 个实现/文档/测试路径，2643 insertions、25 deletions。sole reviewer 对最终实现 tree 稳定认证门 PASS；不代表用户阶段验收通过。真实任务观测到 HTTP400，原因未验证，状态 BLOCKED，不能伪报 PASS。报告独立提交，不再改实现/计划。
 
 ```text
 P5_B = WAITING_REVIEW
@@ -16,7 +16,13 @@ origin/dev = push本报告提交后核验，应等于SUBMISSION_SHA
 origin/main = 479bc3a1caf2b432b5abb643428fdc1b5b6fcbb2
 ```
 
-全部持久提交：前置修复5ed9004d58720f21cbcf4d011385a4544d8eeb32；实现a7fc37ab8bf511ff46ccd77dedf40acebe39acd9；本报告独立提交。实现已普通push，远端dev实核实现SHA，main实核基线；报告push后的最终完整SHA在最终回复核验。候选741a4ab/34cf4ab/8d6708c/8aeb996是tree，不是中间提交。无amend/reset/rebase/force push，未自动合并main，未启动P5-C。仅显式暂存本轮文件，数据/TAR/任务/环境/cache不入Git。
+全部持久提交：前置修复5ed9004d58720f21cbcf4d011385a4544d8eeb32；实现a7fc37ab8bf511ff46ccd77dedf40acebe39acd9；初次报告23df35cb1c59323b7486376050dd1586af69f432；本次reports-only普通补正提交（完整SHA在最终回复给出，不回写自身SHA）。实现已普通push，远端dev实核实现SHA，main实核基线；报告push后的最终完整SHA在最终回复核验。候选741a4ab/34cf4ab/8d6708c/8aeb996是tree，不是中间提交。无amend/reset/rebase/force push，未自动合并main，未启动P5-C。仅显式暂存本轮文件，数据/TAR/任务/环境/cache不入Git。
+
+### 分支元数据偏差：违反执行单，不冒称合规
+
+root 漏核执行单第26行“不移动已占用分支”的约束，指示将旧 dev 重命名为 `preserve-dev-finalize-dirty-de5b311` 并普通 push。旧 HEAD 为 `de5b311bf7116e95ec4084f577c7c7cef5147cfa`；此前核查旧 dirty 内容、index、untracked 保持不变，当前 dev 与原 workref 保留。该元数据操作违反规定，责任在 root 的错误指示；保护了文件内容不等于操作合规。本次不反向重命名、删除 preservation ref 或清理旧工作树，避免进一步破坏。实际本地/远端 preservation ref 均为上述完整 SHA。
+
+实际本地 `main = edc72fbaaddc4dc8f9865ddfa576b737c7b15f5a`，不同于远端 `origin/main = 479bc3a1caf2b432b5abb643428fdc1b5b6fcbb2`。本轮未修改本地 main；不得以“main基线”笼统描述两者。本报告补正前已用 `git rev-parse main preserve-dev-finalize-dirty-de5b311 HEAD` 和 `git ls-remote origin refs/heads/main refs/heads/dev refs/heads/preserve-dev-finalize-dirty-de5b311` 实核，退出码0；最终补正 push 后再次用 ls-remote 核远端，而非只依赖 tracking ref。
 
 ## 契约与验收矩阵
 
@@ -111,7 +117,7 @@ SAVED_SAMPLES_AND_BYTES = 本任务0/0；全局前后均2/144762
 NEW_PROOFS = 0
 ```
 
-Allowlist https://modelscope.cn / leafmoone/webdataset_danbooru_v3；明确已认证worker。first2、metadata=false、max_output_bytes8MiB。计划在SETTLED hook后使用真实guarded控制请求做pause/partial export/resume/final export；HTTP400发生前无SETTLED，不能假称这些真实步骤执行成功。确定性错误停止受影响任务，未盲重试、未绕过UNKNOWN恢复门。
+Allowlist https://modelscope.cn / leafmoone/webdataset_danbooru_v3；明确已认证worker。first2、metadata=false、max_output_bytes8MiB。计划在SETTLED hook后使用真实guarded控制请求做pause/partial export/resume/final export；HTTP400发生前无SETTLED，不能假称这些真实步骤执行成功。观测到 HTTP400 后停止受影响任务；未验证其根因，也未将其定性为完整性错误，未盲重试、未绕过UNKNOWN恢复门。
 
 正式ledger before→after：attempts137→139/body11744478→11746062/metadata1193130→1194714/disk1799258112→1799299072/records242→242/inflight0→0/saved_samples2→2/saved_bytes144762→144762；disk+40960是本地task storage，不是图片保存。实际开始remaining：attempts1863/body8578190114/metadata65915734/disk2495709184/saved_samples998/saved_bytes536726150/records99758/inflight268435456。
 
@@ -119,8 +125,10 @@ Allowlist https://modelscope.cn / leafmoone/webdataset_danbooru_v3；明确已�
 
 ## 性能、限制与安全
 
+历史具体成本证据来自 `bash_39f69deb` 的11文件组合（171passed/1skipped，372.82s），对应当时实际冻结候选 tree `34cf4ab0365b4dc1e946cfe1cbc9caa773ce08be`：10k选择创建1.2360483s，重开0.0523077s，record batch SQL20次、重开runtime query0次；隔离ledger reserve0.5480932s、consume0.0263579s、settle0.5314184s，slot writes3MiB、fsync6次、entries3→3。来源是该轮已返回的成本输出及当轮ready回执，不是最终8aeb树的独立计时；不与741候选数据混合。此次记忆检索工具未重新找回完整原始stdout，精度以当轮保留回执为准，不声称重新跑过benchmark。
+
 最终源码/wheel的10k选择、跨batch/恢复SQL成本和ledger slot write/fsync合成测试通过。合成小数据不是生产吞吐；最终-q没有打印独立benchmark时间，不把旧候选timing套新树，不承诺倍数。
 
-仍为串行单runner，不支持并行/跨机器锁/P5-C；大member受8MiB Range/任务output和legacy预算限制，未放宽cap。Windows当前有真实锁/中断故障覆盖，但部分权限负例skip，不声称所有OS认证。真实400具体根因未验证，不能断言凭证缺失是原因。
+仍为串行单runner，不支持并行/跨机器锁/P5-C；大member受8MiB Range/任务output和legacy预算限制，未放宽cap。Windows当前有真实锁/中断故障覆盖，但部分权限负例skip，不声称所有OS认证。真实400具体根因未验证，不能断言匿名、凭证、服务端或完整性问题是原因。本次未完成请求endpoint/参数构造与正式调用契约的只读逐项排除，因此不声称已排除产品参数回归；未重试网络、未读取新秘密、未重测预算或修改产品。
 
 Rust/ledger/P2/P3/publication格式不变；main和索引机不动，不清历史dirty worktrees/数据/账本，不启动大规模任务。短期env已核本轮拥有且无reparse，回收Include/Lib/Scripts/pyvenv.cfg，仅保留fresh-wheel/sakurapool-0.1.0-py3-none-any.whl；keeper和worker未删。本报告-only提交不冒称重跑所有测试。停止P5_B=WAITING_REVIEW，真实限制待外部审查，不自动合并main或进C。
