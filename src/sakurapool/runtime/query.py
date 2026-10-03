@@ -111,7 +111,7 @@ class QueryResult:
     def iter_location_batches(self,
                               batch_size: int = 8192) -> Iterator[LocationBatch]:
         self._snapshot._check_open()
-        if batch_size <= 0:
+        if type(batch_size) is not int or batch_size <= 0:
             raise ValueError("batch_size must be positive")
         locations = self._snapshot._locations
         for chunk in _chunked(self._bitmap, batch_size):
@@ -132,10 +132,11 @@ class QueryResult:
     def iter_record_batches(
             self, batch_size: int = 8192) -> Iterator[RecordBatch]:
         self._snapshot._check_open()
-        if batch_size <= 0:
+        if type(batch_size) is not int or batch_size <= 0:
             raise ValueError("batch_size must be positive")
         catalog = self._snapshot._catalog
-        for chunk in _chunked(self._bitmap, batch_size):
+        limit = catalog.getlimit(__import__('sqlite3').SQLITE_LIMIT_VARIABLE_NUMBER)
+        for chunk in _chunked(self._bitmap, min(batch_size, limit)):
             placeholders = ",".join("?" for _ in chunk)
             rows = catalog.execute(
                 "SELECT r.rid, r.record_id, r.source_id, r.dataset_id,"
@@ -143,7 +144,6 @@ class QueryResult:
                 " FROM records r JOIN sources s ON s.source_id = r.source_id"
                 " JOIN datasets d ON d.dataset_id = r.dataset_id"
                 f" WHERE r.rid IN ({placeholders}) ORDER BY r.rid", chunk).fetchall()
-            rows.sort(key=lambda row: row[0])
             yield RecordBatch(
                 self._snapshot.snapshot_id,
                 [row[0] for row in rows],

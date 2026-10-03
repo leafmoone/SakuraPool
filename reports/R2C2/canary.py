@@ -374,7 +374,10 @@ def identify_adapter(transport, candidate, scheduler, identity):
     from sakurapool.storage.production_stage import _json_bounded
     from sakurapool.storage.transport import BoundObject, RemoteIOError
 
-    obj = transport._objects[candidate.object_path]
+    try:
+        obj = transport.verified_object(candidate)
+    except RemoteIOError as exc:
+        raise ValueError("own verified proof scope required") from exc
     bound = BoundObject(
         ModelScopeDataset(transport, obj.origin, obj.repo_id).download_url(
             obj.revision, obj.object_path
@@ -576,7 +579,10 @@ def build_one(transport, candidate, adapter, mode, scheduler, identity, *, netwo
     from sakurapool.storage.transport import BoundObject, RemoteIOError
 
     ledger = transport.ledger
-    obj = transport._objects[candidate.object_path]
+    try:
+        obj = transport.verified_object(candidate)
+    except RemoteIOError as exc:
+        raise ValueError("own verified proof scope required") from exc
     if (
         replace(candidate, validator=obj.validator, cdn_host=obj.cdn_host) != obj
         or candidate.validator is not None

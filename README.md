@@ -1,9 +1,18 @@
 # SakuraPool
 
-Typed P1 reference queries, a P2 local uncompressed TAR index builder, and a P3
-read-only runtime (compile committed P2 into a bitmap snapshot, query, resolve).
-No data service access, image decoding, production throughput claims, or model
-execution.
+SakuraPool builds reusable P2 TAR indexes, compiles read-only P3 query snapshots,
+and distributes runtime-first publication v2 for verified selective Range retrieval.
+Local, download and remote builders and explicit budgeted Rust production profiles
+are available; credentials and live binding proofs are never distributed.
+No image decoding, model execution or production throughput claim.
+
+P5-A adds bounded publication construction and a serial Python reader:
+`from sakurapool.storage.publication_session import PublicationSession`.
+A session fully verifies once, serves multiple record fetches and closes its bounded
+binding cache. It owns the publication handle, not the caller's transport/ledger.
+No cross-thread SQLite use or concurrent scheduler is supported.
+See [P5 roadmap and task design](docs/P5_ROADMAP.md); P5-B implementation and
+budget migration have **not started**.
 
 ## Publication v2 (runtime-first distribution)
 

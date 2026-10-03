@@ -117,10 +117,16 @@ def fetch_bounded_samples(transport: GuardedTransport, ledger: BudgetLedger,
     if type(workers) is not int or not 1 <= workers <= 8:
         raise ValueError("worker count must be between 1 and 8")
     root = _real_output_root(output_root, ledger)
+    candidate = (transport.verified_bound_object(bound)
+                 if isinstance(transport, RustProductionTransport) else None)
     pending: list = []
     results: list[Path] = []
     def run(sample: AuditedSample) -> Path:
         with transport.clone() as client:
+            if candidate is not None:
+                verified = client.verify_conditions(candidate)
+                if verified != candidate or client.verified_bound_object(bound) != candidate:
+                    raise RemoteIOError("worker fresh binding differs from parent scope")
             return fetch_bound_sample(client, ledger, bound, sample, root, merged=merged)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         try:

@@ -48,7 +48,7 @@ def test_negative_discard_complete_network_accounting_no_business_payload(
     assert report["budget_after"]["pending_leases"] == 0
     wrong = report["observations"]["wrong"]
     assert wrong["body"] == size and wrong["bytes"] == 0 and wrong["accounting_complete"]
-    bound = transport._objects[candidate.object_path]
+    bound = transport.verified_object(candidate)
     assert ledger.condition_proof(proof_key(bound, test=True)) is not None
     persisted = json.dumps(report).encode() + b"".join(p.read_bytes() for p in ledger.slots)
     for secret in (

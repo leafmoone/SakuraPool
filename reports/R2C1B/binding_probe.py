@@ -120,7 +120,7 @@ def verify_round(transport, candidate):
         bound = transport.verify_conditions(candidate)
         key = proof_key(bound, test=transport.ledger.offline_mode)
         digest = transport.ledger.condition_proof(key)
-        if digest is None or transport._objects.get(bound.object_path) != bound:
+        if digest is None or transport.verified_object(bound) != bound:
             raise ValueError("formal proof registration missing")
         report.update({gate: "PASS" for gate in GATES.values()})
         report.update(

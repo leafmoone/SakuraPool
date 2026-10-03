@@ -242,6 +242,52 @@ def twohop(monkeypatch):
         t.join(2)
 
 
+@pytest.mark.parametrize("fresh_condition_ok", [True, False])
+def test_rust_bounded_fetch_clone_acquires_fresh_own_proof(twohop, monkeypatch, fresh_condition_ok):
+    from sakurapool.storage.retrieval import AuditedSample, Extent, fetch_bounded_samples
+
+    state, ledger, transport, candidate = twohop
+    verified = transport.verify_conditions(candidate)
+    bound = BoundObject(
+        ModelScopeDataset(transport, candidate.origin, candidate.repo_id).download_url(
+            REV, candidate.object_path), candidate.object_size, REV, verified.validator,
+        repository=candidate.repo_id,
+    )
+    image = state["raw"][512:527]
+    sample = AuditedSample("1" * 32, Extent(512, 15, hashlib.sha256(image).hexdigest()),
+                           None, ".png")
+    children = []
+    original = transport.clone
+
+    def clone():
+        child = original()
+        with pytest.raises(RemoteIOError):
+            child.verified_object(verified)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(transport, "clone", clone)
+    before = len(state["calls"])
+    (ledger.root / "delivery").mkdir()
+    if fresh_condition_ok:
+        paths = fetch_bounded_samples(transport, ledger, bound, [sample], ledger.root / "delivery",
+                                      workers=1)
+        assert len(paths) == 1 and (paths[0] / "image.png").read_bytes() == image
+        assert len(state["calls"]) - before == 8  # fresh three conditional probes + fetch, two hops
+    else:
+        state["mode"] = "ignore-condition"
+        with pytest.raises(RemoteIOError):
+            fetch_bounded_samples(transport, ledger, bound, [sample], ledger.root / "delivery",
+                                  workers=1)
+        assert not list((ledger.root / "delivery").iterdir())
+        assert state["calls"][before:]
+        assert all({k.lower(): v for k, v in headers.items()}.get("range") == "bytes=0-0"
+                   for _, headers in state["calls"][before:])
+    assert len(children) == 1 and children[0]._closed
+    assert transport.verified_bound_object(bound) == verified
+    assert ledger.status()["inflight"] == 0
+
+
 def test_rust_auth_stripping_conditional_proof_and_real_bytes(twohop):
     state, ledger, transport, obj = twohop
     verified = transport.verify_conditions(obj)

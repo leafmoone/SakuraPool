@@ -8,8 +8,8 @@ import os
 import re
 import shutil
 import sqlite3
-import stat
 import tempfile
+from collections import OrderedDict
 from contextlib import closing
 from pathlib import Path
 
@@ -19,7 +19,6 @@ import pyarrow.parquet as pq
 from ..runtime import RUNTIME_COMPILER
 from ..runtime.inventory import combine_inventories, load_p2_inventory
 from ..runtime.snapshot import RuntimeSnapshot
-from .budget import is_reparse
 from .location_gate import _is_canonical_path, parse_repository
 
 FORMAT = "sakurapool-publication-v2"
@@ -45,17 +44,12 @@ class PublicationCorrupt(ValueError):
 
 
 def plain(path, directory=False):
-    path = Path(path).absolute()
-    for p in (path, *path.parents):
-        if p.is_symlink() or is_reparse(p):
-            raise PublicationCorrupt("reparse entry")
+    from ..fs_safety import plain_entry
+
     try:
-        mode = path.stat().st_mode
-    except OSError as exc:
-        raise PublicationCorrupt("missing publication entry") from exc
-    if not (stat.S_ISDIR(mode) if directory else stat.S_ISREG(mode)):
-        raise PublicationCorrupt("not plain entry")
-    return path
+        return plain_entry(path, directory=directory)
+    except (OSError, ValueError) as exc:
+        raise PublicationCorrupt("publication entry containment/type") from exc
 
 
 def sha(path):
@@ -194,6 +188,28 @@ def validate_schema(db):
                 raise PublicationCorrupt("catalog schema columns")
 
 
+def fetchable_rids(db, locations, object_count):
+    """Object-sized state, bounded location blocks; never allocate by an untrusted max idx."""
+    flags = np.zeros(object_count, dtype=np.uint8)
+    seen = 0
+    for idx, fetchable in db.execute(
+        "SELECT object_idx,fetchable FROM objects ORDER BY object_idx"
+    ):
+        if type(idx) is not int or idx != seen or fetchable not in (0, 1):
+            raise PublicationCorrupt("object index/fetchability")
+        flags[idx] = fetchable
+        seen += 1
+    if seen != object_count:
+        raise PublicationCorrupt("object index coverage")
+    total = 0
+    for start in range(0, len(locations), 4096):
+        indexes = locations[start : start + 4096]["object_idx"]
+        if len(indexes) and (indexes.min() < 0 or indexes.max() >= object_count):
+            raise PublicationCorrupt("location object index")
+        total += int(flags[indexes.astype(np.intp)].sum())
+    return total
+
+
 def build_publication(runtime, p2_list, remote_map, output):
     runtime = plain(runtime, True)
     output = Path(output).absolute()
@@ -220,28 +236,55 @@ def build_publication(runtime, p2_list, remote_map, output):
         if inv.source_fingerprint != rt.manifest["source_fingerprint"]:
             raise PublicationCorrupt("P2 fingerprint mismatch")
         sid, count = rt.snapshot_id, rt.rid_count
+        from ..fs_safety import OwnedStage, cleanup_owned_tree, sync_directory
+
         stage = Path(tempfile.mkdtemp(prefix=".publication-", dir=output.parent))
+        owned = OwnedStage(stage)
         try:
             dest = stage / "runtime"
-            (dest / "snapshots").mkdir(parents=True)
+            owned.create("runtime", directory=True)
+            owned.create("runtime/snapshots", directory=True)
+            owned.create(Path("runtime/snapshots") / sid, directory=True)
             for base, dirs, files in os.walk(rt.path, followlinks=False):
                 for n in dirs:
                     plain(Path(base) / n, True)
                 for n in files:
                     plain(Path(base) / n)
-            shutil.copy2(runtime / "current.json", dest / "current.json")
-            shutil.copytree(rt.path, dest / "snapshots" / sid)
-            cat = stage / "remote_objects.sqlite"
+            shutil.copy2(runtime / "current.json", owned.create("runtime/current.json"))
+            for base, dirs, files in os.walk(rt.path, followlinks=False):
+                relative = Path("runtime/snapshots") / sid / Path(base).relative_to(rt.path)
+                for name in dirs:
+                    owned.create(relative / name, directory=True)
+                for name in files:
+                    shutil.copy2(Path(base) / name, owned.create(relative / name))
+            cat = owned.create("remote_objects.sqlite")
             with closing(sqlite3.connect(cat)) as db:
+                db.execute("PRAGMA journal_mode=OFF")
                 db.executescript(SCHEMA)
                 objects = rt._catalog.execute("SELECT count(*) FROM objects").fetchone()[0]
                 db.execute(
                     "INSERT INTO meta VALUES(2,?,?,?,?)",
                     (sid, inv.source_fingerprint, count, objects),
                 )
+                db.execute(
+                    "CREATE TEMP TABLE runtime_objects(dataset_id TEXT,object_path TEXT,"
+                    "object_idx INTEGER,object_id TEXT,object_size BLOB,object_version TEXT,"
+                    "PRIMARY KEY(dataset_id,object_path)) WITHOUT ROWID"
+                )
+                try:
+                    db.executemany(
+                        "INSERT INTO runtime_objects VALUES(?,?,?,?,?,?)",
+                        rt._catalog.execute(
+                            "SELECT dataset_id,object_path,object_idx,object_id,"
+                            "object_size,object_version FROM objects"
+                        ),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    raise PublicationCorrupt("duplicate runtime object path") from exc
                 for r in map_rows(remote_map):
-                    found = rt._catalog.execute(
-                        "SELECT object_idx,object_id,object_size,object_version FROM objects "
+                    found = db.execute(
+                        "SELECT object_idx,object_id,object_size,object_version "
+                        "FROM runtime_objects "
                         "WHERE dataset_id=? AND object_path=?",
                         (r["dataset_id"], r["object_path"]),
                     ).fetchall()
@@ -281,8 +324,10 @@ def build_publication(runtime, p2_list, remote_map, output):
                 if db.execute("SELECT count(*) FROM objects").fetchone()[0] != objects:
                     raise PublicationCorrupt("missing map object")
                 db.commit()
-            temp = stage / "hashes.sqlite"
-            with closing(sqlite3.connect(temp)) as db:
+            temp = owned.create("hashes.sqlite")
+            arr = None
+            with closing(sqlite3.connect(temp, uri=True)) as db:
+                db.execute("PRAGMA journal_mode=OFF")
                 db.execute("PRAGMA cache_size=-8192")
                 db.execute(
                     "CREATE TABLE hashes(record_id BLOB PRIMARY KEY,image_sha BLOB NOT NULL) "
@@ -304,42 +349,40 @@ def build_publication(runtime, p2_list, remote_map, output):
                                     or not SHA.fullmatch(r["sha256"])
                                 ):
                                     raise PublicationCorrupt("reliable image SHA required")
-                                db.execute(
-                                    "INSERT INTO hashes VALUES(?,?)",
-                                    (bytes.fromhex(r["record_id"]), bytes.fromhex(r["sha256"])),
-                                )
+                            db.executemany(
+                                "INSERT INTO hashes VALUES(?,?)",
+                                [
+                                    (bytes.fromhex(r["record_id"]), bytes.fromhex(r["sha256"]))
+                                    for r in batch.to_pylist()
+                                ],
+                            )
                 db.commit()
                 if db.execute("SELECT count(*) FROM hashes").fetchone()[0] != count:
                     raise PublicationCorrupt("hash count mismatch")
-                arr = np.lib.format.open_memmap(
-                    stage / "image_sha256.npy", mode="w+", dtype="V32", shape=(count,)
-                )
+                hash_path = owned.create("image_sha256.npy")
+                arr = np.lib.format.open_memmap(hash_path, mode="w+", dtype="V32", shape=(count,))
                 seen = 0
-                for rid, record in rt._catalog.execute(
-                    "SELECT rid,record_id FROM records ORDER BY rid"
+                db.execute(
+                    "ATTACH DATABASE ? AS runtime",
+                    (rt.path.joinpath("catalog.sqlite").as_uri() + "?mode=ro&immutable=1",),
+                )
+                for rid, image_sha in db.execute(
+                    "SELECT r.rid,h.image_sha FROM runtime.records AS r "
+                    "LEFT JOIN hashes AS h ON h.record_id=r.record_id ORDER BY r.rid"
                 ):
-                    row = db.execute(
-                        "SELECT image_sha FROM hashes WHERE record_id=?", (record,)
-                    ).fetchone()
-                    if rid != seen or row is None:
+                    if rid != seen or image_sha is None:
                         raise PublicationCorrupt("missing hash/noncontiguous rid")
-                    arr[rid] = np.void(row[0])
+                    arr[rid] = np.void(image_sha)
                     seen += 1
                 if seen != count:
                     raise PublicationCorrupt("runtime record count")
                 arr.flush()
                 arr._mmap.close()
-                del arr
-            temp.unlink()
+                arr = None
+            owned.remove("hashes.sqlite")
             with closing(readonly(cat)) as db:
                 fc = db.execute("SELECT count(*) FROM objects WHERE fetchable=1").fetchone()[0]
-                fr = sum(
-                    db.execute(
-                        "SELECT fetchable FROM objects WHERE object_idx=?",
-                        (int(loc["object_idx"]),),
-                    ).fetchone()[0]
-                    for loc in rt._locations
-                )
+                fr = fetchable_rids(db, rt._locations, objects)
             m = dict(
                 format=FORMAT,
                 publication_format_version=2,
@@ -369,24 +412,57 @@ def build_publication(runtime, p2_list, remote_map, output):
             raw = json.dumps(m, sort_keys=True).encode()
             if len(raw) > MAX_MANIFEST:
                 raise PublicationCorrupt("manifest cap")
-            (stage / "PUBLICATION.json").write_bytes(raw)
-            (stage / "READY").write_text(hashlib.sha256(raw).hexdigest(), encoding="ascii")
+            owned.create("PUBLICATION.json").write_bytes(raw)
+            owned.create("READY").write_text(hashlib.sha256(raw).hexdigest(), encoding="ascii")
+            owned.complete()
             with load_publication(stage, full_verify=True):
                 pass
-            stage.rename(output)
+            from .retrieval import _publish_directory
+
+            owned.complete()
+            for relative, (_, _, directory) in owned.entries.items():
+                file = stage / relative
+                if not directory:
+                    with file.open("r+b") as stream:
+                        os.fsync(stream.fileno())
+            for directory in sorted(
+                (p for p in stage.rglob("*") if p.is_dir()),
+                key=lambda p: len(p.parts),
+                reverse=True,
+            ):
+                sync_directory(directory)
+            sync_directory(stage)
+            owned.complete()
+            _publish_directory(stage, output)
+            sync_directory(output.parent)
             return m
         except Exception:
-            shutil.rmtree(stage)
+            if "arr" in locals() and arr is not None:
+                try:
+                    arr._mmap.close()
+                except Exception:
+                    pass
+            cleanup_owned_tree(stage, owned.entries)
             raise
 
 
 class Publication:
     def __init__(self, root, m, rt, db, arr):
         self.root, self.manifest, self.runtime, self.catalog, self.hashes = root, m, rt, db, arr
-        self._verified = {}
+        self._verified = OrderedDict()
+        self._closed = False
         self.full_verified = False
 
+    def expected_image_sha(self, rid):
+        if self._closed or type(rid) is not int or not 0 <= rid < self.runtime.rid_count:
+            raise PublicationCorrupt("publication rid/lifecycle")
+        return self.hashes[rid].tobytes()
+
     def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        self._verified.clear()
         self.runtime.close()
         self.catalog.close()
         self.hashes._mmap.close()
@@ -416,7 +492,12 @@ class Publication:
 
 def load_publication(root, full_verify=False):
     root = plain(root, True)
-    m = bounded(root / "PUBLICATION.json")
+    with plain(root / "PUBLICATION.json").open("rb") as stream:
+        manifest_raw = stream.read(MAX_MANIFEST + 1)
+    if len(manifest_raw) > MAX_MANIFEST:
+        raise PublicationCorrupt("JSON hard cap")
+    content_digest = hashlib.sha256(manifest_raw).hexdigest()
+    m = decode(manifest_raw)
     if (
         not isinstance(m, dict)
         or set(m) != KEYS
@@ -459,7 +540,7 @@ def load_publication(root, full_verify=False):
         raise PublicationCorrupt("manifest paths")
     with plain(root / "READY").open("rb") as stream:
         publication_ready = stream.read(65)
-    if publication_ready != sha(root / "PUBLICATION.json").encode("ascii"):
+    if publication_ready != content_digest.encode("ascii"):
         raise PublicationCorrupt("not READY")
     if m["publication_id"] != m["snapshot_id"]:
         raise PublicationCorrupt("publication identity mismatch")
@@ -582,16 +663,12 @@ def load_publication(root, full_verify=False):
                 != m["fetchable_object_count"]
             ):
                 raise PublicationCorrupt("fetchable objects")
-            n = sum(
-                db.execute(
-                    "SELECT fetchable FROM objects WHERE object_idx=?", (int(loc["object_idx"]),)
-                ).fetchone()[0]
-                for loc in rt._locations
-            )
+            n = fetchable_rids(db, rt._locations, m["object_count"])
             if n != m["fetchable_rid_count"]:
                 raise PublicationCorrupt("fetchable rids")
         publication = Publication(root, m, rt, db, arr)
         publication.full_verified = full_verify
+        publication.content_digest = content_digest
         return publication
     except Exception:
         rt.close()

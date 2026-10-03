@@ -193,17 +193,29 @@ class RustProductionTransport:
         self.offline_only = _test
         self.production_profile = not _test
         self.allowed_hosts = {normalize_endpoint(origin)} if not _test else {"127.0.0.1"}
-        self._objects: dict[str, ProviderObject] = {}
+        from collections import OrderedDict
+
+        self._objects = OrderedDict()
+        self._closed = False
 
     max_range_bytes = MAX_RANGE
 
+    def close(self):
+        self._objects.clear()
+        self._closed = True
+
     def __enter__(self):
+        if self._closed:
+            raise RemoteIOError("closed production transport")
         return self
 
     def __exit__(self, *_exc):
+        self.close()
         return False
 
     def clone(self):
+        if self._closed:
+            raise RemoteIOError("closed production transport")
         copy = RustProductionTransport(
             self.ledger,
             self.worker,
@@ -212,7 +224,6 @@ class RustProductionTransport:
             same_origin_cookie=self._cookie,
             _test=self._test,
         )
-        copy._objects = dict(self._objects)
         return copy
 
     def _host(self, url):
@@ -228,7 +239,29 @@ class RustProductionTransport:
     def ensure_verified_condition(
         self, bound, *, endpoint, repository, path, expected_probe_sha256
     ):
-        obj = self._objects.get(path)
+        matches = [
+            o
+            for o in self._objects.values()
+            if (
+                o.origin,
+                o.repo_id,
+                o.repo_type,
+                o.object_path,
+                o.revision,
+                o.object_size,
+                o.validator,
+            )
+            == (
+                endpoint,
+                repository,
+                "modelscope_dataset_legacy",
+                path,
+                bound.immutable_revision,
+                bound.size,
+                bound.strong_etag,
+            )
+        ]
+        obj = matches[0] if len(matches) == 1 else None
         if (
             obj is None
             or obj.origin != endpoint
@@ -240,14 +273,59 @@ class RustProductionTransport:
         ):
             raise RemoteIOError("package requires independently verified Rust conditional binding")
 
+    def verified_object(self, candidate: ProviderObject):
+        """Resolve only this transport's live proof, matching full candidate identity."""
+        if self._closed:
+            raise RemoteIOError("closed production transport")
+        candidate.validate(test=self._test)
+        identity = (
+            candidate.origin,
+            candidate.repo_id,
+            candidate.repo_type,
+            candidate.revision,
+            candidate.object_path,
+            candidate.object_size,
+        )
+        matches = [
+            (key, obj)
+            for key, obj in self._objects.items()
+            if key[:6] == identity
+            and (candidate.validator is None or candidate.validator == obj.validator)
+        ]
+        if len(matches) != 1:
+            raise RemoteIOError("fresh transport verified object absent or ambiguous")
+        key, obj = matches[0]
+        if self.ledger.condition_proof(proof_key(obj, test=self._test)) is None:
+            raise RemoteIOError("verified object proof unavailable")
+        self._objects.move_to_end(key)
+        return obj
+
+    def verified_bound_object(self, bound):
+        """Resolve an exact provider URL and bound scope using this live transport."""
+        return self.verified_object(self._bound_object(bound))
+
     def register(self, obj: ProviderObject):
+        if self._closed:
+            raise RemoteIOError("closed production transport")
         obj.validate(test=self._test)
         if (
             obj.origin != self.origin
             or self.ledger.condition_proof(proof_key(obj, test=self._test)) is None
         ):
             raise RemoteIOError("production object lacks verified conditional binding")
-        self._objects[obj.object_path] = obj
+        key = (
+            obj.origin,
+            obj.repo_id,
+            obj.repo_type,
+            obj.revision,
+            obj.object_path,
+            obj.object_size,
+            obj.validator,
+        )
+        self._objects[key] = obj
+        self._objects.move_to_end(key)
+        while len(self._objects) > 64:
+            self._objects.popitem(last=False)
 
     def _owned_dir(self):
         root = self.ledger.root / ("rust-transfer-" + secrets.token_hex(16))
@@ -257,6 +335,8 @@ class RustProductionTransport:
     def _call(
         self, obj, root, *, start=0, length=1, condition="match", mode="range", json_limit=1 << 20
     ):
+        if self._closed:
+            raise RemoteIOError("closed production transport")
         try:
             return self._call_accounted(
                 obj,
@@ -389,7 +469,13 @@ class RustProductionTransport:
                 )
             if not msg.get("ok") or "production_error" in result:
                 # Account first even when ok=true: the envelope is not business success.
-                raise RemoteIOError("Rust production request rejected")
+                diagnostic = self.last_result["diagnostic"]
+                raise RemoteIOError(
+                    "Rust production request rejected",
+                    code=self.last_result.get("production_error", "rejected"),
+                    phase=diagnostic["phase"],
+                    http_status=diagnostic["http_status"],
+                )
             if not accounting["complete"]:
                 raise RustWorkerError("production body uncertain; leases pending")
             return result
@@ -640,7 +726,20 @@ class RustProductionTransport:
         from urllib.parse import parse_qs, urlsplit
 
         paths = parse_qs(urlsplit(bound.url).query).get("FilePath", [])
-        obj = self._objects.get(paths[0]) if len(paths) == 1 else None
+        matches = [
+            o
+            for o in self._objects.values()
+            if len(paths) == 1
+            and o.object_path == paths[0]
+            and o.origin == self.origin
+            and o.revision == bound.immutable_revision
+            and o.object_size == bound.size
+            and o.validator == bound.strong_etag
+            and bound.repository_id is not None
+            and o.repo_id == bound.repository_id.id
+            and o.repo_type == "modelscope_dataset_legacy"
+        ]
+        obj = matches[0] if len(matches) == 1 else None
         if (
             obj is None
             or obj.object_size != bound.size

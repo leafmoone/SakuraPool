@@ -129,7 +129,7 @@ def test_capacity_rejection_does_not_start_builder_or_make_attempt(tmp_path, mon
     obj = replace(candidate, validator='"synthetic"', cdn_host="cdn.synthetic.invalid")
     transport = SimpleNamespace(
         ledger=ledger,
-        _objects={obj.object_path: obj},
+        verified_object=lambda candidate: obj,
         _host=lambda url: "modelscope.cn",
         build_stage=lambda *a, **k: pytest.fail("must reject before stage/network"),
     )
@@ -197,7 +197,7 @@ def test_real_profile_stops_before_unbounded_extra_decode_or_compile(tmp_path, m
     stage = SimpleNamespace(content_sha256="c" * 64, members=4002)
     transport = SimpleNamespace(
         ledger=ledger,
-        _objects={obj.object_path: obj},
+        verified_object=lambda candidate: obj,
         _host=lambda url: "modelscope.cn",
         build_stage=lambda *a, **k: stage,
         release_committed_downloads=lambda *a: None,

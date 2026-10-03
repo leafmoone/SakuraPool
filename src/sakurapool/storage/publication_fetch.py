@@ -41,7 +41,7 @@ def exact_provider_lookup(control, endpoint, repo_id, revision, path, size, dige
 def fetch_publication_sample(
     pub, record_id, transport, output, metadata=False, control=None, scope=None
 ):
-    if not pub.full_verified:
+    if pub._closed or not pub.full_verified:
         raise PublicationCorrupt("fetch requires full verified publication")
     if not isinstance(record_id, str) or len(record_id) != 32:
         raise PublicationCorrupt("record identity")
@@ -50,10 +50,7 @@ def fetch_publication_sample(
     except ValueError as e:
         raise PublicationCorrupt("record identity") from e
     rt = pub.runtime
-    r = rt._catalog.execute("SELECT rid FROM records WHERE record_id=?", (record,)).fetchone()
-    if r is None:
-        raise PublicationCorrupt("record absent")
-    rid = r[0]
+    rid = rt.resolve_record(record.hex()).rid
     loc = rt.location(rid)
     idx = loc["object_idx"]
     r = pub.catalog.execute(
@@ -94,8 +91,17 @@ def fetch_publication_sample(
         if control is not None:
             raise PublicationCorrupt("external production control rejected")
     output = _real_output_root(Path(output), ledger)
-    key = (idx, id(transport), id(ledger))
+    key = (pub.content_digest, rt.snapshot_id, idx, transport, ledger)
     obj = pub._verified.get(key)
+    if getattr(transport, '_closed', False):
+        raise RemoteIOError("closed production transport")
+    if obj is not None and isinstance(transport, RustProductionTransport):
+        try:
+            if transport.verified_object(obj) != obj:
+                raise RemoteIOError("publication verified object changed")
+        except RemoteIOError:
+            pub._verified.pop(key, None)
+            obj = None
     if obj is None:
         owned = control is None
         if owned:
@@ -115,6 +121,10 @@ def fetch_publication_sample(
             raise PublicationCorrupt("repository type mismatch")
         obj = transport.verify_conditions(obj)
         pub._verified[key] = obj
+        while len(pub._verified) > 64:
+            pub._verified.popitem(last=False)
+    else:
+        pub._verified.move_to_end(key)
     bound = BoundObject(
         ModelScopeDataset(transport, obj.origin, obj.repo_id).download_url(
             obj.revision, obj.object_path
@@ -128,10 +138,7 @@ def fetch_publication_sample(
     limit = getattr(transport, "max_range_bytes", 8 << 20)
     if image_size <= 0 or image_size > limit or offset + image_size > size:
         raise PublicationCorrupt("image extent")
-    fmt = rt._catalog.execute(
-        "SELECT format FROM formats WHERE format_id=?", (loc["format_id"],)
-    ).fetchone()
-    suffix = "." + fmt[0] if fmt else ""
+    suffix = "." + rt.image_format(loc["format_id"])
     if suffix not in EXTENSIONS:
         raise PublicationCorrupt("image format")
     meta_size = loc["metadata_size"] if metadata and loc["flags"] & 1 else 0
@@ -152,7 +159,7 @@ def fetch_publication_sample(
         with transport.read_range_owned(bound, offset, image_size) as payload:
             if (
                 len(payload) != image_size
-                or hashlib.sha256(payload).digest() != pub.hashes[rid].tobytes()
+                or hashlib.sha256(payload).digest() != pub.expected_image_sha(rid)
             ):
                 raise RemoteIOError("image SHA mismatch; no delivery")
             with (stage / ("image" + suffix)).open("xb") as f:

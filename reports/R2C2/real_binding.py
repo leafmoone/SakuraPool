@@ -299,7 +299,7 @@ def proof_use(transport, candidate, identity, *, directory=REAL):
     from sakurapool.storage.modelscope import ModelScopeDataset
     from sakurapool.storage.transport import BoundObject
 
-    bound = transport._objects[candidate.object_path]
+    bound = transport.verified_object(candidate)
     retrieval = BoundObject(
         ModelScopeDataset(transport, bound.origin, bound.repo_id).download_url(
             bound.revision, bound.object_path

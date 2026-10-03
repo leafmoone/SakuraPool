@@ -202,7 +202,7 @@ def test_verify_conditions_loopback_proof_and_exact_package_lookup(binding_loop)
             assert "if-match" not in headers
         else:
             assert not any(k in headers for k in ("authorization", "cookie", "referer"))
-    bound = transport._objects[candidate.object_path]
+    bound = transport.verified_object(candidate)
     key = proof_key(bound, test=True)
     digest = hashlib.sha256(b"A").hexdigest()
     assert proofs(ledger) == {key: digest}
@@ -920,7 +920,7 @@ def test_c2_build_settlement_failure_preserves_scan_primary(tmp_path, monkeypatc
     transport = SimpleNamespace(
         ledger=ledger,
         _host=offline_host,
-        _objects={bound.object_path: bound},
+        verified_object=lambda candidate: bound,
         last_result={},
         build_stage=lambda *args, **kwargs: None,
         release_committed_downloads=lambda *args: None,
