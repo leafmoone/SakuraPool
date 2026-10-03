@@ -230,10 +230,10 @@ class RuntimeSnapshot:
                     raise SnapshotCorruptError(f"leftover sidecar for {name}: {sidecar}")
 
         catalog = sqlite3.connect(
-            f"file:{(snap_dir / 'catalog.sqlite').as_posix()}?mode=ro", uri=True
+            (snap_dir / "catalog.sqlite").as_uri() + "?mode=ro", uri=True
         )
         bitmaps = sqlite3.connect(
-            f"file:{(snap_dir / 'bitmaps.sqlite').as_posix()}?mode=ro", uri=True
+            (snap_dir / "bitmaps.sqlite").as_uri() + "?mode=ro", uri=True
         )
         try:
             for sql in (

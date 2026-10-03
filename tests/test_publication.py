@@ -22,7 +22,9 @@ from sakurapool.storage.publication import build_publication, load_publication, 
 
 @pytest.mark.parametrize(
     "failure",
-    ["none", "provider", "proof", "image", "metadata", "empty_metadata", "publish", "settle"],
+    ["none", "provider", "proof", "image", "metadata", "empty_metadata", "publish", "settle",
+     "image_settle", "write_cleanup", "network_unknown", "range_exit", "write_exit",
+     "keyboard_exit", "system_exit"],
 )
 def test_fresh_fetch_requires_own_proof_and_sha(inputs, monkeypatch, failure):
     from sakurapool.storage import publication_fetch as fetch
@@ -32,15 +34,57 @@ def test_fresh_fetch_requires_own_proof_and_sha(inputs, monkeypatch, failure):
     rt, roots, mapping, out, _ = inputs
     build_publication(rt, roots, mapping, out)
     calls = []
+    range_leases = []
+    interrupt = KeyboardInterrupt() if failure == "keyboard_exit" else SystemExit(73)
+    interrupt_fault = failure in ("keyboard_exit", "system_exit")
     with tempfile.TemporaryDirectory(dir=DEFAULT_WORK_ROOT, prefix="offline-publication-") as temp:
         ledger = BudgetLedger(temp, _offline_test=True)
 
-        if failure == "settle":
+        if failure in ("settle", "image_settle"):
 
             def reject_settle(*args, **kwargs):
-                raise RemoteIOError("settlement failed after rename")
+                raise OSError("SECRET_SETTLE https://secret.invalid/?token=CREDENTIAL_SENTINEL")
 
             monkeypatch.setattr(ledger, "settle", reject_settle)
+
+        if failure in ("write_cleanup", "write_exit") or interrupt_fault:
+            from pathlib import Path
+
+            original_open = Path.open
+            original_unlink = Path.unlink
+
+            class BrokenWriter:
+                def __init__(self, stream):
+                    self.stream = stream
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    self.stream.close()
+
+                def fileno(self):
+                    return self.stream.fileno()
+
+                def write(self, payload):
+                    if interrupt_fault:
+                        raise interrupt
+                    raise OSError("SECRET_WRITE D:/private/path CREDENTIAL_SENTINEL")
+
+            def broken_open(path, mode="r", *args, **kwargs):
+                stream = original_open(path, mode, *args, **kwargs)
+                if mode == "xb" and path.name.startswith("image."):
+                    return BrokenWriter(stream)
+                return stream
+
+            def broken_unlink(path, *args, **kwargs):
+                if path.name.startswith("image."):
+                    raise OSError("SECRET_CLEANUP https://secret.invalid/?cookie=CREDENTIAL_SENTINEL")
+                return original_unlink(path, *args, **kwargs)
+
+            monkeypatch.setattr(Path, "open", broken_open)
+            if failure == "write_cleanup":
+                monkeypatch.setattr(Path, "unlink", broken_unlink)
 
         class FakeTransport:
             max_range_bytes = 8 << 20
@@ -61,7 +105,19 @@ def test_fresh_fetch_requires_own_proof_and_sha(inputs, monkeypatch, failure):
             def read_range_owned(self, bound, offset, size):
                 assert calls[:2] == ["provider", "own-proof"]
                 calls.append("range")
-                yield b"wrong" if failure == "image" else b"image"
+                if failure in ("network_unknown", "range_exit", "write_exit") or interrupt_fault:
+                    from sakurapool.storage.budget import Reservation
+
+                    network_lease = ledger.reserve(Reservation(body=5, attempt=True))
+                    range_leases.append(network_lease)
+                    ledger.consume_body(network_lease, 2)
+                    if failure == "network_unknown":
+                        raise OSError("SECRET_NETWORK CREDENTIAL_SENTINEL")
+                try:
+                    yield b"wrong" if failure in ("image", "image_settle") else b"image"
+                finally:
+                    if failure in ("range_exit", "write_exit") or interrupt_fault:
+                        raise OSError("SECRET_RANGE_EXIT https://secret.invalid/CREDENTIAL_SENTINEL")
 
         def lookup(*args):
             calls.append("provider")
@@ -113,10 +169,68 @@ def test_fresh_fetch_requires_own_proof_and_sha(inputs, monkeypatch, failure):
                         b"image" if failure == "metadata" else b""
                     )
             else:
-                with pytest.raises(RemoteIOError):
+                expected_error = {
+                    "image_settle": "image SHA mismatch",
+                    "write_cleanup": "publication write failed",
+                }.get(failure)
+                expected_type = type(interrupt) if interrupt_fault else RemoteIOError
+                with pytest.raises(expected_type, match=expected_error) as caught:
                     fetch.fetch_publication_sample(
                         pub, record, FakeTransport(), temp, control=object()
                     )
+                if failure in ("image_settle", "write_cleanup", "settle"):
+                    import traceback
+
+                    code = {"image_settle": "publication_image_sha",
+                            "write_cleanup": "publication_write",
+                            "settle": "publication_accounting"}[failure]
+                    secondary = {"image_settle": ["ACCOUNTING_UNKNOWN"],
+                                 "write_cleanup": ["CLEANUP_FAILED"], "settle": []}[failure]
+                    assert caught.value.public_diagnostic() == {
+                        "code": code, "phase": "publication_fetch",
+                        "delivery": "PUBLISHED" if failure == "settle" else "NOT_PUBLISHED",
+                        "accounting": "UNKNOWN", "output_lease": "UNKNOWN",
+                        "accounting_scope": "OPERATION",
+                        "cleanup": "SAFE" if failure == "image_settle" else "PRESERVED",
+                        "secondary": secondary, "recoverable": False,
+                    }
+                    exposed = (str(caught.value) + json.dumps(caught.value.public_diagnostic())
+                               + "".join(traceback.format_exception(caught.value)))
+                    for secret in ("SECRET_WRITE", "SECRET_SETTLE", "SECRET_CLEANUP",
+                                   "secret.invalid", "D:/private/path", "CREDENTIAL_SENTINEL"):
+                        assert secret not in exposed
+                if failure in ("image_settle", "write_cleanup"):
+                    assert len(caught.value.finalization_errors) == 1
+                    assert not caught.value.delivery_published
+                    assert caught.value.cleanup_safe == (failure == "image_settle")
+                if failure in ("network_unknown", "range_exit", "write_exit") or interrupt_fault:
+                    if interrupt_fault:
+                        assert caught.value is interrupt
+                        diagnostic = caught.value.publication_state
+                    else:
+                        diagnostic = caught.value.public_diagnostic()
+                    assert diagnostic == {
+                        "code": ("publication_write" if failure == "write_exit" or interrupt_fault
+                                 else "publication_range"),
+                        "phase": "publication_fetch", "delivery": "NOT_PUBLISHED",
+                        "accounting": "UNKNOWN", "accounting_scope": "OPERATION",
+                        "output_lease": "CONFIRMED", "cleanup": "SAFE", "recoverable": False,
+                        "secondary": (["RANGE_FINALIZATION_FAILED"]
+                                      if failure == "write_exit" or interrupt_fault else []),
+                    }
+                    with ledger._locked():
+                        _, (_, _, pending, _) = ledger._read_pair()
+                    assert list(pending) == range_leases
+                    assert pending[range_leases[0]]["consumed_body"] == 2
+                    assert pending[range_leases[0]]["body"] == 5
+                    import traceback
+
+                    exposed = str(caught.value) + json.dumps(diagnostic) + "".join(
+                        traceback.format_exception(caught.value)
+                    )
+                    for secret in ("SECRET_NETWORK", "SECRET_RANGE_EXIT", "SECRET_WRITE",
+                                   "secret.invalid", "CREDENTIAL_SENTINEL"):
+                        assert secret not in exposed
                 delivered = (__import__("pathlib").Path(temp) / record).exists()
                 assert delivered == (failure == "settle")
                 # Rename succeeded before accounting failure: preserve verified output and pending.
@@ -142,7 +256,11 @@ def test_exact_lookup_rejects_changed_provider(monkeypatch, field):
     }[field]
     altered[key] = value
 
+    from sakurapool.storage.modelscope import ModelScopeDataset
+
     class Provider:
+        find_legacy_file = ModelScopeDataset.find_legacy_file
+
         def __init__(self, *args):
             pass
 

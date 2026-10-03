@@ -69,7 +69,9 @@ def test_typed_rejections(monkeypatch, files, code):
 def test_accepted_unchanged(monkeypatch, revision, candidate, sha):
     rows, complete = parse(
         monkeypatch,
-        [entry(Revision=candidate, Sha256=sha), {"Type": "directory"}, {"Type": "tree"}],
+        [entry(Revision=candidate, Sha256=sha),
+         {"Type": "directory", "Path": "gc5m/sub"},
+         {"Type": "tree", "Path": "gc5m/other"}],
         revision=revision,
     )
     assert rows[0].revision_candidate == (candidate if revision == "master" else revision)

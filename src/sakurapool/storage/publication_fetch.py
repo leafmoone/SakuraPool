@@ -5,37 +5,84 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
+import stat
+from contextlib import contextmanager
 from pathlib import Path
 
 from .budget import BudgetExceeded, BudgetLedger, Reservation
-from .modelscope import MAX_PAGES, ModelScopeDataset
+from .modelscope import ModelScopeDataset
 from .production import ProviderObject, RustProductionTransport
 from .publication import PublicationCorrupt
 from .retrieval import EXTENSIONS, _publish_directory, _real_output_root
 from .transport import BoundObject, GuardedTransport, RemoteIOError
 
 
+class PublicationFetchError(RemoteIOError):
+    """Safe operation failure; no raw underlying exception or secret text."""
+
+    _MESSAGES = {
+        "publication_image_sha": "image SHA mismatch; no delivery",
+        "publication_write": "publication write failed",
+        "publication_publish": "publication publish failed",
+        "publication_accounting": "publication settlement unconfirmed",
+        "publication_range": "publication range failed",
+    }
+
+    def __init__(self, code, *, delivered, cleanup_safe, output_lease, secondary):
+        super().__init__(self._MESSAGES[code], code=code, phase="publication_fetch")
+        self.delivery_published = delivered
+        self.cleanup_safe = cleanup_safe
+        self.accounting_state = "UNKNOWN"
+        self.output_lease_state = output_lease
+        self.finalization_errors = tuple(secondary)
+
+    def public_diagnostic(self):
+        return {
+            **super().public_diagnostic(),
+            "delivery": "PUBLISHED" if self.delivery_published else "NOT_PUBLISHED",
+            "accounting": self.accounting_state,
+            "output_lease": self.output_lease_state,
+            "accounting_scope": "OPERATION",
+            "cleanup": "SAFE" if self.cleanup_safe else "PRESERVED",
+            "secondary": list(self.finalization_errors),
+            "recoverable": False,
+        }
+
+
+@contextmanager
+def _owned_range(transport, bound, offset, size, state):
+    """Keep body-primary classification even if transport exit also fails."""
+    state["code"] = "publication_range"
+    body_primary = None
+    try:
+        with transport.read_range_owned(bound, offset, size) as payload:
+            try:
+                yield payload
+            except BaseException as error:
+                body_primary = error
+                state["body_error_code"] = state["code"]
+                raise
+            finally:
+                # Exit/settle failure is not a successful body's write error.
+                state["code"] = "publication_range"
+    except BaseException as error:
+        if body_primary is not None and error is not body_primary:
+            state["range_secondary"] = True
+            # Retain the real body exception, including process-control
+            # BaseExceptions; an exit failure must not turn an interrupt into IO.
+            raise body_primary from None
+        raise
+
+
 def exact_provider_lookup(control, endpoint, repo_id, revision, path, size, digest):
     provider = ModelScopeDataset(control, endpoint, repo_id)
     hub = provider.legacy_hub_id()
     root = path.rpartition("/")[0] or "/"
-    for page in range(1, MAX_PAGES + 1):
-        files, complete = provider.legacy_tree_page(
-            hub, revision, root=root, page=page, page_size=200
-        )
-        found = [f for f in files if f.path == path]
-        if found:
-            if (
-                len(found) != 1
-                or found[0].size != size
-                or found[0].revision_candidate != revision
-                or found[0].provider_sha256 != digest
-            ):
-                raise RemoteIOError("provider exact identity/digest mismatch")
-            return ProviderObject.from_tree(provider, found[0])
-        if complete or not files:
-            break
-    raise RemoteIOError("provider exact object unavailable")
+    found = provider.find_legacy_file(hub, revision, root=root, path=path)
+    if (found.size != size or found.revision_candidate != revision
+            or found.provider_sha256 != digest):
+        raise RemoteIOError("provider exact identity/digest mismatch")
+    return ProviderObject.from_tree(provider, found)
 
 
 def fetch_publication_sample(
@@ -153,48 +200,119 @@ def fetch_publication_sample(
         )
     )
     stage = output / (".publication-fetch-" + secrets.token_hex(16))
-    created = set()
+    created = {}
+    stage_identity = None
+    delivered = False
+    state = {"code": "publication_write", "body_error_code": None}
     try:
         stage.mkdir()
-        with transport.read_range_owned(bound, offset, image_size) as payload:
+        stage_stat = stage.lstat()
+        stage_identity = (stage_stat.st_dev, stage_stat.st_ino)
+        state["code"] = "publication_range"
+        with _owned_range(transport, bound, offset, image_size, state) as payload:
             if (
                 len(payload) != image_size
                 or hashlib.sha256(payload).digest() != pub.expected_image_sha(rid)
             ):
+                state["code"] = "publication_image_sha"
                 raise RemoteIOError("image SHA mismatch; no delivery")
+            state["code"] = "publication_write"
             with (stage / ("image" + suffix)).open("xb") as f:
-                created.add("image" + suffix)
+                created["image" + suffix] = _file_identity(f)
                 f.write(payload)
                 f.flush()
                 os.fsync(f.fileno())
         if metadata and loc["flags"] & 1:
             if meta_size:
-                with transport.read_range_owned(
-                    bound, loc["metadata_offset"], meta_size
+                state["code"] = "publication_range"
+                with _owned_range(
+                    transport, bound, loc["metadata_offset"], meta_size, state
                 ) as payload:
                     if len(payload) != meta_size:
                         raise RemoteIOError("metadata exact extent")
+                    state["code"] = "publication_write"
                     with (stage / "metadata.json").open("xb") as f:
-                        created.add("metadata.json")
+                        created["metadata.json"] = _file_identity(f)
                         f.write(payload)
                         f.flush()
                         os.fsync(f.fileno())
             else:
+                state["code"] = "publication_write"
                 with (stage / "metadata.json").open("xb") as f:
-                    created.add("metadata.json")
+                    created["metadata.json"] = _file_identity(f)
                     f.flush()
                     os.fsync(f.fileno())
+        state["code"] = "publication_publish"
         _publish_directory(stage, final)
+        delivered = True
+        state["code"] = "publication_accounting"
         ledger.settle(lease, saved_samples=1, saved_bytes=image_size + meta_size)
         return final
-    except BaseException:
-        if (
-            stage.is_dir()
-            and not stage.is_symlink()
-            and {p.name for p in stage.iterdir()} == created
-        ):
-            for name in created:
-                (stage / name).unlink()
-            stage.rmdir()
-            ledger.settle(lease)
+    except BaseException as primary:
+        # Delivery and accounting are independent. Never refund a renamed
+        # output, nor hide the original I/O/hash failure with a cleanup error.
+        finalization_errors = (
+            ["RANGE_FINALIZATION_FAILED"] if state.get("range_secondary") else []
+        )
+        safe = False
+        if not delivered:
+            try:
+                safe = _cleanup_owned_stage(stage, stage_identity, created)
+            except BaseException:
+                finalization_errors.append("CLEANUP_FAILED")
+            if safe:
+                try:
+                    ledger.settle(lease)
+                except BaseException:
+                    finalization_errors.append("ACCOUNTING_UNKNOWN")
+        output_lease = (
+            "UNKNOWN" if delivered or not safe or "ACCOUNTING_UNKNOWN" in finalization_errors
+            else "CONFIRMED"
+        )
+        if isinstance(primary, Exception):
+            raise PublicationFetchError(
+                state["body_error_code"] or state["code"],
+                delivered=delivered, cleanup_safe=safe,
+                output_lease=output_lease, secondary=finalization_errors,
+            ) from None
+        # Preserve the actual interrupt object and attach only fixed public state.
+        primary.publication_state = PublicationFetchError(
+            state["body_error_code"] or state["code"],
+            delivered=delivered, cleanup_safe=safe,
+            output_lease=output_lease, secondary=finalization_errors,
+        ).public_diagnostic()
         raise
+
+
+def _file_identity(stream):
+    value = os.fstat(stream.fileno())
+    return value.st_dev, value.st_ino
+
+
+def _cleanup_owned_stage(stage, identity, created):
+    """Remove only still-owned plain entries, preserving unknown/replaced files."""
+    if identity is None:
+        return False
+    from ..fs_safety import plain_entry
+
+    try:
+        plain_entry(stage, directory=True)
+    except ValueError:
+        return False
+    value = stage.lstat()
+    if (not stat.S_ISDIR(value.st_mode)
+            or (value.st_dev, value.st_ino) != identity):
+        return False
+    entries = {entry.name: entry for entry in stage.iterdir()}
+    if set(entries) != set(created):
+        return False
+    for name, entry in entries.items():
+        value = entry.lstat()
+        if (not stat.S_ISREG(value.st_mode)
+                or getattr(value, "st_file_attributes", 0) & 0x400
+                or (value.st_dev, value.st_ino) != created[name]):
+            return False
+    for entry in entries.values():
+        entry.unlink()
+    stage.rmdir()
+    return True

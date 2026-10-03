@@ -293,14 +293,14 @@ def _run(work, profile, result, state):
             hub = provider.legacy_hub_id()
             matches = []
             result["provider_pages"] = 0
-            for page in range(1, MAX_PAGES + 1):
-                result["phase"] = "PROVIDER_LISTING"
-                rows, complete = provider.legacy_tree_page(
-                    hub, REV, root="gc5m", page=page, page_size=200
-                )
+            from sakurapool.storage.modelscope import ModelScopeDataset as PageProvider
+
+            result["phase"] = "PROVIDER_LISTING"
+            for tree_page in PageProvider.iter_legacy_pages(
+                    provider, hub, REV, root="gc5m", max_pages=MAX_PAGES):
                 result["provider_pages"] += 1
-                matches = [row for row in rows if row.path == OBJECT]
-                if matches or complete or not rows:
+                matches = [row for row in tree_page.files if row.path == OBJECT]
+                if matches:
                     break
             result["phase"] = "EXACT_OBJECT"
             classification = classify_provider_object(matches, OBJECT, 5201920, REV, WHOLE)

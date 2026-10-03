@@ -42,6 +42,30 @@ class ListedFile:
     revision_candidate: str = ""
 
 
+class TreePage(tuple):
+    """Legacy two-tuple compatibility with unfiltered pagination evidence.
+
+    `complete` is page-local scoped completeness; a walk must additionally
+    account for all raw entries and stable totals across its requested scope.
+    """
+
+    def __new__(cls, files, complete, *, raw_count, total, raw_paths, continuation):
+        result = super().__new__(cls, (files, complete))
+        result.raw_count = raw_count
+        result.total = total
+        result.raw_paths = tuple(raw_paths)
+        result.continuation = continuation
+        return result
+
+    @property
+    def files(self):
+        return self[0]
+
+    @property
+    def complete(self):
+        return self[1]
+
+
 @dataclass(frozen=True)
 class TwoHopProbe:
     """Sanitized two-hop result bound to the tree object identity it probed.
@@ -128,7 +152,7 @@ class ModelScopeDataset:
         return info["Id"]
 
     def legacy_tree_page(self, hub_id: int, revision: str, *, root: str,
-                         page: int = 1, page_size: int = 20) -> tuple[list[ListedFile], bool]:
+                         page: int = 1, page_size: int = 20) -> TreePage:
         """Bounded SDK legacy tree; master only discovers candidates, never proves binding."""
         if (type(hub_id) is not int or hub_id != getattr(self, "_legacy_verified_id", None)
                 or not 0 < hub_id < 1 << 63
@@ -154,6 +178,18 @@ class ModelScopeDataset:
                                     phase="provider_listing_shape")
             if entry.get("Type") not in ("blob", "file"):
                 if entry.get("Type") in ("tree", "directory"):
+                    directory = entry.get("Path")
+                    if (not isinstance(directory, str)
+                            or not _is_canonical_path(directory) or len(directory) > 512
+                            or (root != "/" and not directory.startswith(root + "/"))):
+                        raise RemoteIOError("legacy tree directory scope invalid",
+                                            code="provider_entry_path",
+                                            phase="provider_listing_shape")
+                    if directory in seen:
+                        raise RemoteIOError("legacy tree path duplicate",
+                                            code="provider_entry_duplicate",
+                                            phase="provider_listing_shape")
+                    seen.add(directory)
                     continue
                 raise RemoteIOError("unrecognized legacy tree entry type",
                                     code="provider_entry_type",
@@ -186,8 +222,72 @@ class ModelScopeDataset:
                                     phase="provider_listing_shape")
             result.append(ListedFile(path, size, sha, False, effective_revision))
         total = info.get("TotalCount", info.get("Total"))
-        complete = (page == 1 and type(total) is int and total == len(files))
-        return result, complete
+        if ("Total" in info and "TotalCount" in info
+                and info["Total"] != info["TotalCount"]):
+            raise RemoteIOError("provider listing total fields disagree",
+                                    code="provider_total_conflict", phase="provider_listing_shape")
+        if total is not None and (type(total) is not int or total < len(files)
+                                  or (not files and total > 0)):
+            raise RemoteIOError("provider listing total contradicts raw entries",
+                                code="provider_total_conflict", phase="provider_listing_shape")
+        complete = (page == 1 and total == len(files)) or (total is None and not files)
+        return TreePage(result, complete, raw_count=len(files), total=total,
+                        raw_paths=seen, continuation=bool(files) and not complete)
+
+    def find_legacy_file(self, hub_id, revision, *, root, path,
+                         page_size=PAGE_SIZE, max_pages=MAX_PAGES):
+        """One bounded exact lookup; filtered-empty pages never establish EOF."""
+        for page in ModelScopeDataset.iter_legacy_pages(
+                self, hub_id, revision, root=root, page_size=page_size, max_pages=max_pages):
+            matches = [row for row in page.files if row.path == path]
+            if len(matches) > 1:
+                raise RemoteIOError("provider exact object duplicate")
+            if matches:
+                return matches[0]
+        raise RemoteIOError("provider exact object unavailable", code="provider_object_absent",
+                            phase="provider_exact_lookup")
+
+    def iter_legacy_pages(self, hub_id, revision, *, root,
+                          page_size=PAGE_SIZE, max_pages=MAX_PAGES):
+        """Shared scope walk, yielding bounded pages with consistent raw evidence."""
+        if type(max_pages) is not int or not 1 <= max_pages <= MAX_PAGES:
+            raise ValueError("tree page bound invalid")
+        raw_count = 0
+        paths = set()
+        total_profile = None
+        for number in range(1, max_pages + 1):
+            page = self.legacy_tree_page(hub_id, revision, root=root,
+                                         page=number, page_size=page_size)
+            if not isinstance(page, TreePage):
+                # Compatibility for old complete tuple providers; an incomplete
+                # filtered page has insufficient evidence, never means absent.
+                rows, complete = page
+                if not complete:
+                    raise RemoteIOError("provider listing incomplete: raw evidence unavailable",
+                                        code="provider_listing_incomplete",
+                                        phase="provider_exact_lookup")
+                page = TreePage(rows, True, raw_count=len(rows), total=len(rows),
+                                raw_paths=[row.path for row in rows], continuation=False)
+            profile = (page.total is not None, page.total)
+            if total_profile is not None and profile != total_profile:
+                raise RemoteIOError("provider listing total changed",
+                                    code="provider_total_conflict", phase="provider_listing_shape")
+            total_profile = profile
+            if paths.intersection(page.raw_paths):
+                raise RemoteIOError("provider listing repeated page path",
+                                    code="provider_page_repeat", phase="provider_listing_shape")
+            paths.update(page.raw_paths)
+            raw_count += page.raw_count
+            if page.total is not None and raw_count > page.total:
+                raise RemoteIOError("provider listing raw count exceeds total",
+                                    code="provider_total_conflict", phase="provider_listing_shape")
+            yield page
+            if page.complete or (page.total is not None and raw_count == page.total):
+                return
+            if not page.continuation:
+                return
+        raise RemoteIOError("provider exact listing incomplete: page bound reached",
+                            code="provider_listing_incomplete", phase="provider_exact_lookup")
 
     def revisions(self) -> list[str]:
         """List commit-id-shaped candidates; syntax does NOT verify immutability."""
@@ -237,7 +337,8 @@ class ModelScopeDataset:
             if (isinstance(data, dict) and "Total" in data
                     and "TotalCount" in data
                     and data["Total"] != data["TotalCount"]):
-                raise RemoteIOError("provider listing total fields disagree")
+                raise RemoteIOError("provider listing total fields disagree",
+                                    code="provider_total_conflict", phase="provider_listing_shape")
             entries = (data.get("Files", data.get("files"))
                        if isinstance(data, dict) else data)
             has_total = isinstance(data, dict) and "Total" in data

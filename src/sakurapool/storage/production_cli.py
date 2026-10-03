@@ -73,11 +73,10 @@ def verify_tree_object(config, obj, transport):
         dataset = ModelScopeDataset(control, obj.origin, obj.repo_id)
         hub_id = dataset.legacy_hub_id()
         root = obj.object_path.rpartition("/")[0] or "/"
-        files, _complete = dataset.legacy_tree_page(hub_id, obj.revision, root=root, page_size=200)
-        matches = [entry for entry in files if entry.path == obj.object_path]
-        if len(matches) != 1 or matches[0].size != obj.object_size:
+        match = dataset.find_legacy_file(hub_id, obj.revision, root=root, path=obj.object_path)
+        if match.size != obj.object_size:
             raise RemoteIOError("current provider tree object differs from configured binding")
-        described = ProviderObject.from_tree(dataset, matches[0])
+        described = ProviderObject.from_tree(dataset, match)
         if asdict(described) | {"validator": obj.validator, "cdn_host": obj.cdn_host} != asdict(
             obj
         ):
