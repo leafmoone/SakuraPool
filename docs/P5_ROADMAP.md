@@ -1,8 +1,9 @@
 # P5 roadmap and B task design
 
 A: publication construction, serial reader, safe diagnostics and foundations.
-B: recoverable serial task plan/state; implementation in development, not phase-certified.
-C: bounded local pipeline/concurrency; NOT STARTED.
+B: recoverable serial task plan/state; certified real closure complete, see
+[REAL_CLOSURE_REPORT](../reports/P5B/REAL_CLOSURE_REPORT.md).
+C: bounded local pipeline/concurrency; authorized implementation in progress, not certified.
 D: production-scale validation; NOT STARTED. Directions, not approvals.
 
 ## B design contract

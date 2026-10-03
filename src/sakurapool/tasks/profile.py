@@ -17,6 +17,12 @@ def read_profile(path):
     if path.stat().st_size > 65536:
         raise TaskError("PROFILE_TOO_LARGE", "profile")
     profile = json.loads(path.read_bytes())
+    _validate_profile(profile)
+    plain_entry(Path(profile["worker"]))
+    return profile
+
+
+def _validate_profile(profile):
     if (not isinstance(profile, dict) or set(profile) - {
             "format", "origin", "repositories", "worker", "credential_ref"}
             or profile.get("format") != FORMAT
@@ -29,11 +35,13 @@ def read_profile(path):
     for repo in repos:
         parse_repository(repo)
     ref = profile.get("credential_ref")
-    if ref is not None and (not isinstance(ref, dict) or len(ref) != 1
-                            or not set(ref).issubset({"env", "file"})):
+    if "credential_ref" in profile and (
+            not isinstance(ref, dict) or len(ref) != 1
+            or not set(ref).issubset({"env", "file"})
+            or not isinstance(next(iter(ref.values()), None), str)
+            or not next(iter(ref.values()), "").strip()
+            or ("env" in ref and ref["env"] != "MODELSCOPE_API_TOKEN")):
         raise TaskError("PROFILE_CREDENTIAL_REF_INVALID", "profile")
-    plain_entry(Path(profile["worker"]))
-    return profile
 
 
 def validate_allowlist(profile, publication):
@@ -43,20 +51,22 @@ def validate_allowlist(profile, publication):
 
 
 def connect_profile(profile, ledger):
+    _validate_profile(profile)
     ref = profile.get("credential_ref")
     token = None
     if ref is not None:
-        if "env" in ref:
-            if ref["env"] != "MODELSCOPE_API_TOKEN":
-                raise TaskError("PROFILE_CREDENTIAL_REF_INVALID", "profile")
-            token = os.environ.get(ref["env"]) or None
-        else:
-            path = plain_entry(ref["file"])
-            if path.stat().st_size > 4096:
-                raise TaskError("PROFILE_CREDENTIAL_INVALID", "profile")
-            token = path.read_text(encoding="utf-8").strip()
-    if token and (len(token) > 4096 or any(ord(c) < 0x21 or ord(c) >= 0x7f for c in token)):
-        raise TaskError("PROFILE_CREDENTIAL_INVALID", "profile")
+        try:
+            if "env" in ref:
+                token = os.environ.get(ref["env"])
+            else:
+                path = plain_entry(ref["file"])
+                if path.stat().st_size > 4096:
+                    raise ValueError("credential exceeds bound")
+                token = path.read_text(encoding="utf-8").strip()
+        except (OSError, ValueError, TypeError):
+            token = None
+        if not token or len(token) > 4096 or any(ord(c) < 0x21 or ord(c) >= 0x7f for c in token):
+            raise TaskError("PROFILE_CREDENTIAL_INVALID", "profile")
     return RustProductionTransport(ledger, Path(profile["worker"]), origin=profile["origin"],
                                    token=token, same_origin_cookie=("m_session_id=" + token)
                                    if token else None)

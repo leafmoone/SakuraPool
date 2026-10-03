@@ -8,6 +8,7 @@ import secrets
 import stat
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .budget import BudgetExceeded, BudgetLedger, Reservation
 from .modelscope import ModelScopeDataset, _io_error
@@ -158,7 +159,7 @@ def fetch_publication_sample(
         if owned:
             control = GuardedTransport(
                 ledger,
-                trusted_hosts=frozenset({"modelscope.cn"}),
+                trusted_hosts=frozenset({urlsplit(endpoint).hostname}),
                 token=transport._token,
                 credential_origin=endpoint,
                 same_origin_cookie=transport._cookie,

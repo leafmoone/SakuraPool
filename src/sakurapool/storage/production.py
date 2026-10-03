@@ -485,7 +485,13 @@ class RustProductionTransport:
             return result
 
     @contextmanager
-    def transfer(
+    def transfer(self, obj, **kwargs):
+        """Public two-field artifact interface retained for administrative callers."""
+        with self._transfer_owned(obj, **kwargs) as (root, result, _):
+            yield root, result
+
+    @contextmanager
+    def _transfer_owned(
         self,
         obj,
         *,
@@ -531,6 +537,7 @@ class RustProductionTransport:
                 json_limit=json_limit,
             )
             body = root / "body"
+            raw = b""
             if mode == "range":
                 if condition == "wrong":
                     if body.stat().st_size != 0 or result.get("status") != 412:
@@ -551,7 +558,7 @@ class RustProductionTransport:
             delivered_snapshot = self._owned_snapshot(root)
             if delivered_snapshot is None:
                 raise RemoteIOError("production artifact ownership unconfirmed")
-            yield root, result
+            yield root, result, raw
             completed = True
         finally:
             primary = sys.exc_info()[1]
@@ -814,8 +821,8 @@ class RustProductionTransport:
             return
         if not 0 < length <= MAX_RANGE:
             raise RemoteIOError("production Range exceeds bound")
-        with self.transfer(obj, start=start, length=length) as (root, _):
-            yield (root / "body").read_bytes()
+        with self._transfer_owned(obj, start=start, length=length) as (_, _, raw):
+            yield raw
 
     def build_stage(self, obj, adapter, stage_dir: Path, *, mode: str):
         """Existing stage contract via capped scanner sidecars; only Download keeps TAR."""

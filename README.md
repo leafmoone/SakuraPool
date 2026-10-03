@@ -11,10 +11,13 @@ P5-A adds bounded publication construction and a serial Python reader:
 A session fully verifies once, serves multiple record fetches and closes its bounded
 binding cache. It owns the publication handle, not the caller's transport/ledger.
 No cross-thread SQLite use or concurrent scheduler is supported.
-See [P5 roadmap and task design](docs/P5_ROADMAP.md). P5-B task implementation
-is in development; budget/ledger v2 migration is not implemented.
+See [P5 roadmap and task design](docs/P5_ROADMAP.md). P5-B serial task and real
+closure certification is complete; see the [closure report](reports/P5B/REAL_CLOSURE_REPORT.md).
+P5-C bounded pipeline work is in progress, not yet certified. Budget/ledger v2
+migration is not implemented. Earlier P3/P4 CLI examples below are historical/admin
+interfaces, not the default task workflow.
 
-## P5-B task API (development, not yet phase-certified)
+## P5-B task API (certified serial task workflow)
 
 Task creation freezes the publication content/snapshot identity, normalized P3
 query and deterministic selection into a SQLite TaskDB. Resume uses those exact
