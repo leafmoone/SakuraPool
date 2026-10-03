@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass, field
 from itertools import islice
 from typing import Iterator, Union
@@ -135,25 +136,43 @@ class QueryResult:
         if type(batch_size) is not int or batch_size <= 0:
             raise ValueError("batch_size must be positive")
         catalog = self._snapshot._catalog
-        limit = catalog.getlimit(__import__('sqlite3').SQLITE_LIMIT_VARIABLE_NUMBER)
-        for chunk in _chunked(self._bitmap, min(batch_size, limit)):
-            placeholders = ",".join("?" for _ in chunk)
-            rows = catalog.execute(
-                "SELECT r.rid, r.record_id, r.source_id, r.dataset_id,"
-                " s.name, d.name, r.post_id"
-                " FROM records r JOIN sources s ON s.source_id = r.source_id"
-                " JOIN datasets d ON d.dataset_id = r.dataset_id"
-                f" WHERE r.rid IN ({placeholders}) ORDER BY r.rid", chunk).fetchall()
-            yield RecordBatch(
-                self._snapshot.snapshot_id,
-                [row[0] for row in rows],
-                [row[1].hex() for row in rows],
-                [row[2] for row in rows],
-                [row[3] for row in rows],
-                [row[4] for row in rows],
-                [row[5] for row in rows],
-                [row[6] for row in rows],
-            )
+        getlimit = getattr(catalog, "getlimit", None)
+        if getlimit is not None:
+            limit = getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+            if limit <= 0:
+                raise ValueError("SQLite variable limit must be positive")
+            size = min(batch_size, limit)
+        else:
+            size = min(batch_size, 999)
+        for pending in _chunked(self._bitmap, size):
+            offset = 0
+            while offset < len(pending):
+                chunk = pending[offset:offset + size]
+                placeholders = ",".join("?" for _ in chunk)
+                try:
+                    rows = catalog.execute(
+                        "SELECT r.rid, r.record_id, r.source_id, r.dataset_id,"
+                        " s.name, d.name, r.post_id"
+                        " FROM records r JOIN sources s ON s.source_id = r.source_id"
+                        " JOIN datasets d ON d.dataset_id = r.dataset_id"
+                        f" WHERE r.rid IN ({placeholders}) ORDER BY r.rid", chunk).fetchall()
+                except sqlite3.OperationalError as exc:
+                    if (getlimit is not None or str(exc) != "too many SQL variables"
+                            or len(chunk) == 1):
+                        raise
+                    size = max(1, len(chunk) // 2)
+                    continue
+                offset += len(chunk)
+                yield RecordBatch(
+                    self._snapshot.snapshot_id,
+                    [row[0] for row in rows],
+                    [row[1].hex() for row in rows],
+                    [row[2] for row in rows],
+                    [row[3] for row in rows],
+                    [row[4] for row in rows],
+                    [row[5] for row in rows],
+                    [row[6] for row in rows],
+                )
 
 
 def _chunked(bitmap: BitMap, size: int) -> Iterator[list[int]]:
