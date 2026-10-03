@@ -11,8 +11,68 @@ P5-A adds bounded publication construction and a serial Python reader:
 A session fully verifies once, serves multiple record fetches and closes its bounded
 binding cache. It owns the publication handle, not the caller's transport/ledger.
 No cross-thread SQLite use or concurrent scheduler is supported.
-See [P5 roadmap and task design](docs/P5_ROADMAP.md); P5-B implementation and
-budget migration have **not started**.
+See [P5 roadmap and task design](docs/P5_ROADMAP.md). P5-B task implementation
+is in development; budget/ledger v2 migration is not implemented.
+
+## P5-B task API (development, not yet phase-certified)
+
+Task creation freezes the publication content/snapshot identity, normalized P3
+query and deterministic selection into a SQLite TaskDB. Resume uses those exact
+seq rows, never repeats selection or sampling. `task_id` distinguishes instances;
+`plan_digest` binds the reproducible plan. Modes are `all`, `first`, explicit
+`records`, and versioned SHA256 top-K `sample` with an explicit seed.
+
+```text
+sakura task create --publication PUB --query QUERY.json --selection first --limit 3 --task-dir TASK
+sakura task create --publication PUB --query QUERY.json --selection sample --limit 3 --seed seed --task-dir TASK
+sakura task inspect TASK
+sakura task run TASK --profile TASK_PROFILE.json
+sakura task pause TASK
+sakura task cancel TASK
+sakura task resume TASK --profile TASK_PROFILE.json
+sakura task export TASK --manifest OUTPUT.jsonl
+```
+
+Creation/inspection are local: no HTTP or token reading. Task/output/export paths
+must be contained in the existing production work root; publication can be read
+outside it. TaskDB uses DELETE journal and FULL synchronization with short explicit
+transactions, plus a real single-runner OS file lock. One serial session fully
+verifies the publication once per runner process. Pause/cancel CLI returns a
+**requested** state: the bounded current item finishes before another is claimed.
+Cancellation preserves deliveries and requires explicit resume.
+
+Task connection profiles are separate from strict old single-object profiles:
+`{"format":"sakurapool-task-connection-v1","origin":"https://modelscope.cn",
+"repositories":["owner/dataset"],"worker":"ABSOLUTE_WORKER_PATH"}`.
+Optional `credential_ref` is `{"env":"MODELSCOPE_API_TOKEN"}` or a bounded
+`{"file":"ABSOLUTE_TOKEN_FILE"}` reference, not an embedded credential.
+Object paths/revisions/digests come from the pinned publication, not this profile.
+
+Successful durable per-attempt delivery/settlement receipts recover without
+re-downloading or incrementing saved counts. An output with unknown settlement
+is preserved and blocked, not retried or refunded. Lease absence and global
+counter differences are not proof. There is no end-to-end exactly-once claim.
+Exports stream only verified confirmed deliveries with source/plan identity,
+relative task paths and delivery hashes, without image copies or archives.
+The manifest must be directly inside TASK (for example TASK/subset.jsonl), so
+its `output/<record_id>/...` paths resolve relative to the manifest's directory;
+a different export base is explicitly rejected.
+Legacy root, saved/body/attempt caps and binary ledger format remain unchanged;
+RESOURCE_BLOCKED does not mean a user's authorized real request was exhausted.
+Local resource diagnostics state effective limits, actual remaining and required
+admission. Network body/attempt estimates before listing are **lower bounds**;
+each later request still needs the legacy ledger's own reservation. No exact
+per-task network consumption is inferred from global counters.
+
+Explicit current task bounds: 100,000 frozen entries, 10,000 in-memory sample
+heap entries, 512-record identity batches, 32 MiB TaskDB, 33 MiB journal allowance,
+64 KiB plan header and 32 MiB exported manifest. SQLite temp work uses memory;
+the maximum DB page count is derived from its actual page size. Task admission
+also reserves growth/journal overhead under the legacy physical-root budget.
+Windows file/SQLite fsync is used; portable Windows directory power-loss durability
+is not claimed. Larger than 8 MiB members remain unsupported, concurrency and
+ledger/workspace v2 are not implemented. Remaining certification is tracked
+separately.
 
 ## Publication v2 (runtime-first distribution)
 

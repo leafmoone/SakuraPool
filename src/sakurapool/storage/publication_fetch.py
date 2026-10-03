@@ -86,7 +86,8 @@ def exact_provider_lookup(control, endpoint, repo_id, revision, path, size, dige
 
 
 def fetch_publication_sample(
-    pub, record_id, transport, output, metadata=False, control=None, scope=None
+    pub, record_id, transport, output, metadata=False, control=None, scope=None,
+    attempt_hook=None,
 ):
     if pub._closed or not pub.full_verified:
         raise PublicationCorrupt("fetch requires full verified publication")
@@ -149,6 +150,8 @@ def fetch_publication_sample(
         except RemoteIOError:
             pub._verified.pop(key, None)
             obj = None
+    if attempt_hook is not None:
+        attempt_hook("NETWORK_START", {})
     if obj is None:
         owned = control is None
         if owned:
@@ -205,6 +208,8 @@ def fetch_publication_sample(
     delivered = False
     state = {"code": "publication_write", "body_error_code": None}
     try:
+        if attempt_hook is not None:
+            attempt_hook("OUTPUT_RESERVED", {"lease": lease})
         stage.mkdir()
         stage_stat = stage.lstat()
         stage_identity = (stage_stat.st_dev, stage_stat.st_ino)
@@ -243,10 +248,23 @@ def fetch_publication_sample(
                     f.flush()
                     os.fsync(f.fileno())
         state["code"] = "publication_publish"
+        if attempt_hook is not None:
+            receipt = {}
+            for name in sorted(created):
+                path = stage / name
+                receipt[name] = {"sha256": _content_sha(path),
+                                 "bytes": path.stat().st_size,
+                                 "identity": list(created[name])}
+            attempt_hook("PREPARED", {"receipt": receipt,
+                                      "directory_identity": list(stage_identity)})
         _publish_directory(stage, final)
         delivered = True
+        if attempt_hook is not None:
+            attempt_hook("PUBLISHED", {})
         state["code"] = "publication_accounting"
         ledger.settle(lease, saved_samples=1, saved_bytes=image_size + meta_size)
+        if attempt_hook is not None:
+            attempt_hook("SETTLED", {"output_lease": "CONFIRMED"})
         return final
     except BaseException as primary:
         # Delivery and accounting are independent. Never refund a renamed
@@ -282,6 +300,14 @@ def fetch_publication_sample(
             output_lease=output_lease, secondary=finalization_errors,
         ).public_diagnostic()
         raise
+
+
+def _content_sha(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _file_identity(stream):

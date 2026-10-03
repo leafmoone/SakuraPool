@@ -379,8 +379,12 @@ class RustProductionTransport:
         lease1 = self.ledger.reserve(Reservation(body=body_budget, attempt=True))
         try:
             lease2 = self.ledger.reserve(Reservation(attempt=True))
-        except BaseException:
-            self.ledger.settle(lease1)  # No network started; admitted attempts stay charged.
+        except BaseException as primary:
+            try:
+                self.ledger.settle(lease1)  # No network; admitted attempts stay charged.
+            except BaseException:
+                primary.finalization_secondary = (
+                    *getattr(primary, "finalization_secondary", ()), "reservation_rollback")
             raise
         payload = dict(
             profile="twohop_test" if self._test else "modelscope_https_v1",
@@ -505,11 +509,16 @@ class RustProductionTransport:
         lease = self.ledger.reserve(Reservation(disk=disk))
         try:
             memory_lease = self.ledger.reserve(Reservation(inflight=memory))
-        except BaseException:
-            self.ledger.settle(lease)
+        except BaseException as primary:
+            try:
+                self.ledger.settle(lease)
+            except BaseException:
+                primary.finalization_secondary = (
+                    *getattr(primary, "finalization_secondary", ()), "reservation_rollback")
             raise
         root = None
         completed = False
+        delivered_snapshot = None
         try:
             root = self._owned_dir()
             result = self._call(
@@ -539,6 +548,9 @@ class RustProductionTransport:
                     or _disk_usage(root) > disk
                 ):
                     raise RemoteIOError("Rust stream artifact budget mismatch")
+            delivered_snapshot = self._owned_snapshot(root)
+            if delivered_snapshot is None:
+                raise RemoteIOError("production artifact ownership unconfirmed")
             yield root, result
             completed = True
         finally:
@@ -553,6 +565,8 @@ class RustProductionTransport:
                         self.ledger.settle(lease)
                     else:
                         snapshot = self._owned_snapshot(root)
+                        if delivered_snapshot is not None and snapshot != delivered_snapshot:
+                            snapshot = None
                         if snapshot is not None and retain:
                             self._retained_download = getattr(self, "_retained_download", {})
                             self._retained_download[str(root)] = {
@@ -564,11 +578,21 @@ class RustProductionTransport:
                         elif snapshot is not None:
                             self._delete_owned(root, snapshot)
                             self.ledger.settle(lease)
+                        else:
+                            # A successful body is not successful finalization:
+                            # unowned artifacts retain quota and fail explicitly.
+                            raise RemoteIOError("production artifact ownership unconfirmed")
                         # Unknown/reparse/failed ownership stays on disk with quota.
-            except Exception:
+            except BaseException as secondary:
+                if primary is None and not isinstance(secondary, Exception):
+                    raise
                 failed = True
-            if failed and primary is None:
-                raise RemoteIOError("production resource finalization incomplete; quota retained")
+            if failed:
+                if primary is None:
+                    raise RemoteIOError(
+                        "production resource finalization incomplete; quota retained")
+                primary.finalization_secondary = (
+                    *getattr(primary, "finalization_secondary", ()), "production_finalization")
 
     def _owned_snapshot(self, root):
         try:
@@ -636,7 +660,15 @@ class RustProductionTransport:
         try:
             return self._release_verified_downloads(p2_root)
         finally:
-            self.ledger.settle(lease)
+            primary = sys.exc_info()[1]
+            try:
+                self.ledger.settle(lease)
+            except BaseException:
+                if primary is None:
+                    raise RemoteIOError("download release finalization incomplete") from None
+                primary.finalization_secondary = (
+                    *getattr(primary, "finalization_secondary", ()),
+                    "download_release_finalization")
 
     def _release_verified_downloads(self, p2_root):
         from ..runtime.inventory import load_p2_inventory
@@ -680,10 +712,15 @@ class RustProductionTransport:
         lease = self.ledger.reserve(Reservation(disk=footprint.transfer_disk))
         try:
             memory_lease = self.ledger.reserve(Reservation(inflight=footprint.memory))
-        except BaseException:
-            self.ledger.settle(lease)
+        except BaseException as primary:
+            try:
+                self.ledger.settle(lease)
+            except BaseException:
+                primary.finalization_secondary = (
+                    *getattr(primary, "finalization_secondary", ()), "reservation_rollback")
             raise
         root = None
+        delivered_snapshot = None
         self._correct_worker = None
         self._track_correct_worker = True
         try:
@@ -692,6 +729,9 @@ class RustProductionTransport:
             raw = (root / "body").read_bytes()
             if len(raw) != 1 or hashlib.sha256(raw).hexdigest() != result.get("sha256"):
                 raise RemoteIOError("conditional capability bytes invalid")
+            delivered_snapshot = self._owned_snapshot(root)
+            if delivered_snapshot is None or set(delivered_snapshot[1]) != {"body"}:
+                raise RemoteIOError("conditional artifact ownership unconfirmed")
             yield result
         finally:
             primary = sys.exc_info()[1]
@@ -711,16 +751,26 @@ class RustProductionTransport:
                             self.ledger.settle(lease)
                         else:
                             snapshot = self._owned_snapshot(root)
-                            if snapshot is not None and set(snapshot[1]) <= {"body"}:
+                            if (snapshot is not None and set(snapshot[1]) <= {"body"}
+                                    and (delivered_snapshot is None
+                                         or snapshot == delivered_snapshot)):
                                 self._delete_owned(root, snapshot)
                                 self.ledger.settle(lease)
+                            else:
+                                failed = True
                             # Unknown artifacts retain disk quota, never dead worker RAM.
                 else:
                     failed = True  # Live/unknown worker retains both quota and artifacts.
-            except Exception:
+            except BaseException as secondary:
+                if primary is None and not isinstance(secondary, Exception):
+                    raise
                 failed = True
-            if failed and primary is None:
-                raise RemoteIOError("conditional resource finalization incomplete; quota retained")
+            if failed:
+                if primary is None:
+                    raise RemoteIOError(
+                        "conditional resource finalization incomplete; quota retained")
+                primary.finalization_secondary = (
+                    *getattr(primary, "finalization_secondary", ()), "conditional_finalization")
 
     def _bound_object(self, bound):
         from urllib.parse import parse_qs, urlsplit

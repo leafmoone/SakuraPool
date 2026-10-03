@@ -31,7 +31,7 @@ class PublicationSession:
         ):
             raise PublicationCorrupt("serial session lifecycle/ledger mismatch")
 
-    def fetch(self, record_id, output, *, metadata=False):
+    def fetch(self, record_id, output, *, metadata=False, attempt_hook=None):
         self._check()
         return fetch_publication_sample(
             self.publication,
@@ -41,6 +41,7 @@ class PublicationSession:
             metadata=metadata,
             control=self.control,
             scope=self.scope,
+            attempt_hook=attempt_hook,
         )
 
     def close(self):
@@ -55,5 +56,11 @@ class PublicationSession:
         self._check()
         return self
 
-    def __exit__(self, *args):
-        self.close()
+    def __exit__(self, exc_type, primary, traceback):
+        try:
+            self.close()
+        except BaseException:
+            if primary is None:
+                raise
+            primary.task_secondary = (*getattr(primary, "task_secondary", ()),
+                                      "PUBLICATION_SESSION_CLOSE_FAILED")

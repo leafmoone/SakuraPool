@@ -783,6 +783,161 @@ def test_stage_traversal_and_scope_changes_rejected_before_network(twohop):
     assert len(state["calls"]) == before
 
 
+@pytest.mark.parametrize("failure", ["snapshot_none", "unknown_file", "replaced_body"])
+@pytest.mark.parametrize("primary", [False, True])
+def test_success_body_unknown_finalization_preserves_artifact_and_quota(
+        twohop, monkeypatch, failure, primary):
+    _, ledger, transport, obj = twohop
+    kept = []
+    marker = RuntimeError("PRIMARY_SENTINEL")
+    with pytest.raises(RuntimeError if primary else RemoteIOError) as caught:
+        with transport.transfer(obj, condition="observe") as (root, result):
+            kept.append(root)
+            assert result["bytes"] == 1
+            if failure == "snapshot_none":
+                monkeypatch.setattr(transport, "_owned_snapshot", lambda path: None)
+            elif failure == "unknown_file":
+                (root / "foreign").write_bytes(b"keep unknown")
+            else:
+                replacement = root / "replacement"
+                replacement.write_bytes((root / "body").read_bytes())
+                replacement.replace(root / "body")
+            if primary:
+                raise marker
+    if primary:
+        assert caught.value is marker
+    else:
+        assert "finalization incomplete" in str(caught.value)
+    assert kept[0].exists() and (kept[0] / "body").exists()
+    if failure == "unknown_file":
+        assert (kept[0] / "foreign").read_bytes() == b"keep unknown"
+    with ledger._locked():
+        _, (_, used, pending, _) = ledger._read_pair()
+    assert used["body"] == 1
+    assert any(row["disk"] > 0 for row in pending.values())
+
+
+@pytest.mark.parametrize("failure", ["none", "unknown", "replacement"])
+def test_positive_probe_unknown_finalization_cannot_record_proof(twohop, monkeypatch, failure):
+    _, ledger, transport, obj = twohop
+    original_call = transport._call
+    kept = []
+
+    def call(candidate, root, **kwargs):
+        result = original_call(candidate, root, **kwargs)
+        if kwargs.get("condition") == "match":
+            kept.append(root)
+            if failure == "unknown":
+                (root / "foreign").write_bytes(b"preserve")
+            elif failure == "none":
+                monkeypatch.setattr(transport, "_owned_snapshot", lambda path: None)
+        return result
+
+    monkeypatch.setattr(transport, "_call", call)
+    if failure == "replacement":
+        original_snapshot = transport._owned_snapshot
+        seen = []
+
+        def snapshot(root):
+            result = original_snapshot(root)
+            if kept and root == kept[0] and not seen:
+                seen.append(root)
+                path = root / "replacement"
+                path.write_bytes((root / "body").read_bytes())
+                path.replace(root / "body")
+            return result
+
+        monkeypatch.setattr(transport, "_owned_snapshot", snapshot)
+    with pytest.raises(RemoteIOError):
+        transport.verify_conditions(obj)
+    assert not transport._objects
+    assert kept[0].exists() and (kept[0] / "body").exists()
+    with ledger._locked():
+        _, (_, _, pending, proofs) = ledger._read_pair()
+    assert not proofs and any(row["disk"] > 0 for row in pending.values())
+
+
+def test_positive_probe_primary_and_cleanup_failure_both_preserved(twohop, monkeypatch):
+    _, ledger, transport, obj = twohop
+    marker = RuntimeError("PRIMARY_SECRET")
+    with transport.transfer(obj, condition="observe") as (_, observed):
+        bound = replace(obj, validator=observed["etag"], cdn_host=observed["cdn_host"])
+    kept = []
+    with pytest.raises(RuntimeError) as caught:
+        with transport._capability_match(bound):
+            kept.extend(ledger.root.glob("rust-transfer-*"))
+            monkeypatch.setattr(transport, "_delete_owned", lambda *args: (_ for _ in ()).throw(
+                OSError("CLEANUP_SECRET")))
+            raise marker
+    assert caught.value is marker
+    assert marker.finalization_secondary == ("conditional_finalization",)
+    assert kept and (kept[0] / "body").exists()
+    with ledger._locked():
+        _, (_, _, pending, proofs) = ledger._read_pair()
+    assert not proofs and any(row["disk"] > 0 for row in pending.values())
+
+
+@pytest.mark.parametrize("operation", ["transfer", "capability"])
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+@pytest.mark.parametrize("has_primary", [False, True])
+def test_finalizer_interrupt_preserves_first_failure(
+        twohop, monkeypatch, operation, interrupt, has_primary):
+    _, ledger, transport, obj = twohop
+    marker = RuntimeError("PRIMARY_SECRET")
+    secondary = interrupt()
+    with transport.transfer(obj, condition="observe") as (_, observed):
+        bound = replace(obj, validator=observed["etag"], cdn_host=observed["cdn_host"])
+    expected = RuntimeError if has_primary else interrupt
+    with pytest.raises(expected) as caught:
+        context = (transport.transfer(obj, condition="observe") if operation == "transfer"
+                   else transport._capability_match(bound))
+        with context:
+            monkeypatch.setattr(transport, "_delete_owned", lambda *args: (_ for _ in ()).throw(
+                secondary))
+            if has_primary:
+                raise marker
+    assert caught.value is (marker if has_primary else secondary)
+    if has_primary:
+        assert marker.finalization_secondary
+    with ledger._locked():
+        _, (_, _, pending, proofs) = ledger._read_pair()
+    assert not proofs and any(row["disk"] > 0 for row in pending.values())
+
+
+@pytest.mark.parametrize("operation", ["transfer", "capability", "release"])
+def test_admission_or_release_secondary_preserves_primary(twohop, monkeypatch, operation):
+    _, ledger, transport, obj = twohop
+    marker = RuntimeError("PRIMARY_SECRET")
+    reserve = ledger.reserve
+
+    def reject_memory(request):
+        if request.inflight:
+            raise marker
+        return reserve(request)
+
+    def reject_settle(*args, **kwargs):
+        raise OSError("SECONDARY_SECRET")
+
+    monkeypatch.setattr(ledger, "settle", reject_settle)
+    if operation == "release":
+        monkeypatch.setattr(transport, "_release_verified_downloads",
+                            lambda root: (_ for _ in ()).throw(marker))
+        with pytest.raises(RuntimeError) as caught:
+            transport.release_committed_downloads(ledger.root)
+    else:
+        monkeypatch.setattr(ledger, "reserve", reject_memory)
+        with pytest.raises(RuntimeError) as caught:
+            context = (transport.transfer(obj, condition="observe") if operation == "transfer"
+                       else transport._capability_match(obj))
+            with context:
+                pytest.fail("failed admission yielded")
+    assert caught.value is marker
+    assert marker.finalization_secondary
+    with ledger._locked():
+        _, (_, _, pending, _) = ledger._read_pair()
+    assert pending
+
+
 def test_proxy_environment_not_used_by_either_hop(twohop, monkeypatch):
     state, _ledger, transport, obj = twohop
     for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):

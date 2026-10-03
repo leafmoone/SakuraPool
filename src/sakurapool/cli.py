@@ -199,6 +199,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="sakura")
     parser.add_argument("--version", action="version", version="sakurapool 0.1.0")
     subparsers = parser.add_subparsers(dest="command", required=True)
+    from .tasks.cli import add_parser as add_task_parser
+
+    add_task_parser(subparsers)
     publication = subparsers.add_parser("publication")
     publication_sub = publication.add_subparsers(dest="publication_command", required=True)
     publication_build = publication_sub.add_parser("build")
@@ -337,6 +340,10 @@ def main(argv: list[str] | None = None) -> int:
     ):
         parser.error("runtime compile requires --index or P2_DIR arguments")
     try:
+        if args.command == "task":
+            from .tasks.cli import command as task_command
+
+            return task_command(args)
         if args.command == "publication":
             from .storage.publication import build_publication, load_publication
 
