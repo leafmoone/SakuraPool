@@ -290,35 +290,97 @@ def test_attempt_limit_exhaustion_refuses_next_reserve(worker_path, work_root,
 # Cancel: kill + wait; stderr bounded tail
 # ------------------------------------------------------------------
 
+def _retain_live_worker_resources(worker):
+    proc = worker._proc
+    readers = (worker._reader, worker._stderr_reader)
+    pipes = (proc.stdin, proc.stdout, proc.stderr)
+    assert proc.returncode is None and proc.poll() is None, "worker must initially be running"
+    assert worker.pid == proc.pid
+    return proc, readers, pipes
+
+
+def _assert_worker_exited(worker, resources):
+    proc, readers, pipes = resources
+    # Observe the retained Popen, not a PID lookup or only a cleared bridge reference.
+    returncode = proc.returncode
+    polled = proc.poll()
+    state = {"returncode_before_poll": returncode, "poll": polled,
+             "worker_pid": worker.pid,
+             "reader_alive": [reader.is_alive() for reader in readers],
+             "pipes_closed": [pipe.closed if pipe is not None else None for pipe in pipes]}
+    assert returncode is not None, state
+    assert polled is not None, state
+    assert worker.pid is None, state
+    assert not any(state["reader_alive"]), state
+    assert all(pipe is None or pipe.closed for pipe in pipes), state
+
+
 @NEEDS_WORKER
 def test_cancel_kills_and_waits(worker_path):
     worker = RustWorker(worker_path, job_budget=WORKER_JOB_BUDGET)
-    pid = worker.pid
-    assert pid is not None
-    worker.close()
-
-    def gone() -> bool:
-        try:
-            os.kill(pid, 0)
-            return False
-        except OSError:
-            return True
-
-    assert gone(), "worker process must be killed and reaped by close()"
+    resources = _retain_live_worker_resources(worker)
+    try:
+        worker.close()
+        _assert_worker_exited(worker, resources)
+    finally:
+        worker.close()
+        proc = resources[0]
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
 
 
 @NEEDS_WORKER
-def test_cancel_is_immediate_kill_and_wait(worker_path):
+def test_cancel_is_immediate_kill_and_wait(worker_path, monkeypatch):
     worker = RustWorker(worker_path, job_budget=WORKER_JOB_BUDGET)
-    pid = worker.pid
-    assert pid is not None
-    worker.cancel()
+    resources = _retain_live_worker_resources(worker)
+    proc = resources[0]
+    calls = []
+    original_kill, original_wait = proc.kill, proc.wait
+
+    def kill():
+        calls.append("kill")
+        return original_kill()
+
+    def wait(*args, **kwargs):
+        calls.append("wait")
+        return original_wait(*args, **kwargs)
+
+    monkeypatch.setattr(proc, "kill", kill)
+    monkeypatch.setattr(proc, "wait", wait)
     try:
-        os.kill(pid, 0)
-        alive = True
-    except OSError:
-        alive = False
-    assert not alive, "cancel() must kill the worker and wait for exit"
+        worker.cancel()
+        _assert_worker_exited(worker, resources)
+        assert calls[:2] == ["kill", "wait"], calls
+    finally:
+        worker.close()
+        if proc.poll() is None:
+            original_kill()
+            original_wait()
+
+
+@NEEDS_WORKER
+@pytest.mark.parametrize("shutdown", ["close", "cancel"])
+def test_exit_assertion_rejects_live_worker_and_repeated_shutdown(worker_path, shutdown):
+    worker = RustWorker(worker_path, job_budget=WORKER_JOB_BUDGET)
+    resources = _retain_live_worker_resources(worker)
+    try:
+        with pytest.raises(AssertionError, match="returncode_before_poll"):
+            _assert_worker_exited(worker, resources)
+        assert resources[0].poll() is None, "negative assertion must not terminate the worker"
+        getattr(worker, shutdown)()
+        _assert_worker_exited(worker, resources)
+        worker.close()
+        worker.cancel()
+        worker.close()
+        worker.cancel()
+        _assert_worker_exited(worker, resources)
+    finally:
+        worker.close()
+        proc = resources[0]
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
 
 
 @NEEDS_WORKER
