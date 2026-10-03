@@ -24,6 +24,18 @@ fn public_scan_error(error: &'static str) -> &'static str {
 #[cfg(test)]
 mod diagnostic_tests {
     #[test]
+    fn reusable_clients_have_bounded_host_set() {
+        let mut context = super::ExecutionContext::default();
+        for port in 10000..10020 {
+            let url = reqwest::Url::parse(&format!("http://127.0.0.1:{port}/object")).unwrap();
+            context.cdn_client(&url).unwrap();
+            assert!(context.cdn_hosts.len() <= 8);
+        }
+        assert_eq!(context.cdn_hosts.len(), 4);
+        assert!(context.origin_client.is_none());
+    }
+
+    #[test]
     fn metadata_capacity_is_public_unknown_is_redacted() {
         assert_eq!(super::public_scan_error("metadata_limit"), "metadata_limit");
         assert_eq!(
@@ -261,6 +273,8 @@ fn client() -> Result<Client, &'static str> {
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
         .http1_only()
+        .pool_max_idle_per_host(1)
+        .pool_idle_timeout(Duration::from_secs(15))
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
         .build()
@@ -451,7 +465,45 @@ impl Read for CountTee<'_> {
         Ok(n)
     }
 }
-fn transfer(t: &Transfer, a: &mut Accounting) -> Result<serde_json::Value, &'static str> {
+/// Single-request-at-a-time context: credential-free defaults and bounded host pools.
+#[derive(Default)]
+pub struct ExecutionContext {
+    origin_client: Option<Client>,
+    origin_identity: Option<String>,
+    cdn_client: Option<Client>,
+    cdn_hosts: std::collections::BTreeSet<String>,
+}
+impl ExecutionContext {
+    fn origin_client(&mut self, identity: &str) -> Result<Client, &'static str> {
+        if self.origin_identity.as_deref() != Some(identity) {
+            self.origin_client = Some(client()?);
+            self.origin_identity = Some(identity.to_owned());
+        }
+        self.origin_client.clone().ok_or("client_failed")
+    }
+    fn cdn_client(&mut self, target: &Url) -> Result<Client, &'static str> {
+        let authority = format!(
+            "{}:{}",
+            target.host_str().ok_or("location_invalid")?,
+            target.port_or_known_default().ok_or("location_invalid")?
+        );
+        if !self.cdn_hosts.contains(&authority) && self.cdn_hosts.len() >= 8 {
+            self.cdn_client = None;
+            self.cdn_hosts.clear();
+        }
+        if self.cdn_client.is_none() {
+            self.cdn_client = Some(client()?);
+        }
+        self.cdn_hosts.insert(authority);
+        self.cdn_client.clone().ok_or("client_failed")
+    }
+}
+
+fn transfer(
+    t: &Transfer,
+    a: &mut Accounting,
+    context: &mut ExecutionContext,
+) -> Result<serde_json::Value, &'static str> {
     // Validate output ownership before making any request. Files remain job-owned until Python audits.
     let url = origin(t)?;
     let mut output = if t.mode == "remote-stream-scan" {
@@ -471,7 +523,7 @@ fn transfer(t: &Transfer, a: &mut Accounting) -> Result<serde_json::Value, &'sta
             t.json_limit,
         )?)
     };
-    let origin_client = client()?;
+    let origin_client = context.origin_client(&t.object.origin)?;
     let mut req = origin_client.get(url).header("accept-encoding", "identity");
     let range = format!("bytes={}-{}", t.start, t.start + t.length.saturating_sub(1));
     if t.mode == "range" {
@@ -510,8 +562,8 @@ fn transfer(t: &Transfer, a: &mut Accounting) -> Result<serde_json::Value, &'sta
     )?;
     drop(r);
     drop(origin_client);
-    // A new client, not a redirected Request: no origin auth, cookie jar, proxy or Referer.
-    let cdn = client()?;
+    // Distinct credential-free CDN pool; every new Location is validated above.
+    let cdn = context.cdn_client(&target)?;
     let mut req = cdn
         .get(target.clone())
         .header("accept-encoding", "identity");
@@ -715,12 +767,15 @@ fn transfer(t: &Transfer, a: &mut Accounting) -> Result<serde_json::Value, &'sta
     Ok(result)
 }
 pub fn run(t: Transfer) -> Outcome {
+    run_with_context(t, &mut ExecutionContext::default())
+}
+pub fn run_with_context(t: Transfer, context: &mut ExecutionContext) -> Outcome {
     let mut accounting = Accounting {
         phase: "origin",
         complete: true,
         ..Accounting::default()
     };
-    match transfer(&t, &mut accounting) {
+    match transfer(&t, &mut accounting, context) {
         Ok(result) => Outcome {
             result,
             error: None,

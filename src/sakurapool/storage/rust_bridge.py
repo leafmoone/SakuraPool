@@ -68,13 +68,8 @@ class RustWorker:
         self.capabilities: tuple[str, ...] = ()
         self.worker_version: str = ""
         normalized_budget = _normalize_budget(job_budget)
-        self._proc = subprocess.Popen(
-            [str(binary)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            bufsize=0,  # no buffered pipe lock held by a blocked operation
-        )
+        self._proc = None
+        self._reader = self._stderr_reader = None
         self._lines: queue.Queue[bytes] = queue.Queue(maxsize=_STDOUT_QUEUE_LINES)
         self._response_line_bytes = MAX_LINE_BYTES
         self._stop = threading.Event()
@@ -86,14 +81,21 @@ class RustWorker:
         self._stderr_tail = bytearray()
         self._stderr_lock = threading.Lock()
         self._alive = True
-        self._reader = threading.Thread(target=self._drain_stdout, daemon=True)
-        self._stderr_reader = threading.Thread(target=self._drain_stderr, daemon=True)
-        self._reader.start()
-        self._stderr_reader.start()
         try:
+            self._proc = subprocess.Popen(
+                [str(binary)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, bufsize=0)
+            self._reader = threading.Thread(target=self._drain_stdout, daemon=True)
+            self._stderr_reader = threading.Thread(target=self._drain_stderr, daemon=True)
+            self._reader.start()
+            self._stderr_reader.start()
             self._handshake(normalized_budget)
-        except BaseException:
-            self.cancel()  # constructor failures must not leak a child or threads
+        except BaseException as primary:
+            try:
+                self.cancel()
+            except BaseException:
+                primary.finalization_secondary = (
+                    *getattr(primary, "finalization_secondary", ()), "worker_constructor_shutdown")
             raise
 
     # -- transport ------------------------------------------------------
@@ -387,9 +389,11 @@ class RustWorker:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=_SHUTDOWN_TIMEOUT_S)
-            for reader in (self._reader, self._stderr_reader):
+            readers = [r for r in (self._reader, self._stderr_reader)
+                       if r is not None and r.ident is not None]
+            for reader in readers:
                 reader.join(timeout=_SHUTDOWN_TIMEOUT_S)
-            if self._reader.is_alive() or self._stderr_reader.is_alive():
+            if any(reader.is_alive() for reader in readers):
                 raise RustWorkerError("worker pipe reader failed to exit")
             for pipe in (proc.stdin, proc.stdout, proc.stderr):
                 if pipe is not None:
@@ -399,5 +403,11 @@ class RustWorker:
     def __enter__(self) -> RustWorker:
         return self
 
-    def __exit__(self, *exc: object) -> None:
-        self.close()
+    def __exit__(self, exc_type, primary, traceback):
+        try:
+            self.close()
+        except BaseException:
+            if primary is None:
+                raise
+            primary.finalization_secondary = (
+                *getattr(primary, "finalization_secondary", ()), "worker_close")

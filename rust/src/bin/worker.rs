@@ -18,7 +18,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::io::{self, BufRead, Write};
 
-const CAPABILITIES: [&str; 4] = ["hash_file", "fetch_range", "scan_tar", "scan_http_tar"];
+const CAPABILITIES: [&str; 5] = [
+    "hash_file",
+    "fetch_range",
+    "scan_tar",
+    "scan_http_tar",
+    "bounded_session_v1",
+];
+const MAX_SESSION_REQUESTS: usize = 256;
+const MAX_REQUEST_ID_BYTES: usize = 64;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -143,6 +151,7 @@ fn main() -> io::Result<()> {
     )?;
 
     let mut seen_requests: BTreeSet<String> = BTreeSet::new();
+    let mut execution = sakurapool_rust::production::ExecutionContext::default();
     loop {
         // One oversized line is reported and skipped; the worker survives.
         let line = match read_line(&mut reader)? {
@@ -172,6 +181,14 @@ fn main() -> io::Result<()> {
             }
         };
         let request_id = request.request_id.clone();
+        if request_id.is_empty() || request_id.len() > MAX_REQUEST_ID_BYTES {
+            respond(&mut stdout, "", Err("request_id_invalid"));
+            continue;
+        }
+        if seen_requests.len() >= MAX_SESSION_REQUESTS {
+            respond(&mut stdout, &request_id, Err("session_exhausted"));
+            break;
+        }
         if request.kind != "request" || !seen_requests.insert(request_id.clone()) {
             respond(&mut stdout, &request_id, Err("duplicate_request"));
             continue;
@@ -186,7 +203,7 @@ fn main() -> io::Result<()> {
                 // Conservatively charge the two-hop bound, even if origin stops early.
                 budget.commit_attempt();
             }
-            let outcome = dispatch(&request);
+            let outcome = dispatch(&request, &mut execution);
             if let Some(accounting) = outcome.as_ref().ok().and_then(|v| v.get("accounting")) {
                 let charge = if accounting.get("complete").and_then(|v| v.as_bool()) == Some(true) {
                     accounting
@@ -288,7 +305,10 @@ fn parse_inbound(line: Vec<u8>) -> Result<Inbound, &'static str> {
     }
 }
 
-fn dispatch(request: &Request) -> Result<serde_json::Value, &'static str> {
+fn dispatch(
+    request: &Request,
+    execution: &mut sakurapool_rust::production::ExecutionContext,
+) -> Result<serde_json::Value, &'static str> {
     if let Some(payload) = request.payload.get("production") {
         if !matches!(request.operation.as_str(), "fetch_range" | "scan_http_tar") {
             return Err("production_operation");
@@ -315,7 +335,7 @@ fn dispatch(request: &Request) -> Result<serde_json::Value, &'static str> {
         {
             return Err("production_budget");
         }
-        let outcome = sakurapool_rust::production::run(transfer);
+        let outcome = sakurapool_rust::production::run_with_context(transfer, execution);
         let mut value = outcome.result;
         value["diagnostic"] = outcome.accounting.diagnostic();
         value["observation"] = outcome.accounting.observation();

@@ -196,21 +196,166 @@ class RustProductionTransport:
         from collections import OrderedDict
 
         self._objects = OrderedDict()
+        import threading
+
+        self._lane_lock = threading.RLock()
+        self._operation_active = False
         self._closed = False
 
     max_range_bytes = MAX_RANGE
 
+    @contextmanager
+    def _execution_worker(self, worker_type, budget):
+        with self._lane_lock:
+            if self._closed:
+                raise RustWorkerError("execution channel closed")
+        if not getattr(self, "_persistent", False):
+            with worker_type(self.worker, job_budget=budget, timeout_s=40) as worker:
+                yield worker
+            return
+        with self._persistent_worker(worker_type, budget) as worker:
+            if getattr(self, "_track_correct_worker", False):
+                self._correct_worker = worker
+            yield worker
+
+    @contextmanager
+    def _persistent_worker(self, worker_type, budget):
+        try:
+            with self._persistent_worker_body(worker_type, budget) as worker:
+                yield worker
+        except BaseException as primary:
+            self._lane_failed = True
+            if self._lane_worker is not None:
+                try:
+                    self._lane_worker.cancel()
+                except BaseException:
+                    primary.finalization_secondary = (
+                        *getattr(primary, "finalization_secondary", ()), "worker_cancel")
+            raise
+
+    @contextmanager
+    def _persistent_worker_body(self, worker_type, budget):
+        if self._lane_failed:
+            raise RustWorkerError("execution channel unavailable")
+        if self._lane_worker is not None and (
+                self._lane_requests >= 256
+                or self._lane_body + budget["body"] > 8 << 30
+                or self._lane_attempts + budget["attempts"] > 2000):
+            self._lane_worker.close()
+            if self._lane_worker._proc is not None:
+                self._lane_failed = True
+                raise RustWorkerError("execution channel exit unconfirmed")
+            self._lane_worker = None
+        if self._lane_worker is None:
+            worker = worker_type(self.worker, job_budget={
+                "body": 8 << 30, "attempts": 2000,
+                "disk": 4 << 30, "inflight": 256 << 20}, timeout_s=40)
+            self._lane_worker = worker
+            if "bounded_session_v1" not in worker.capabilities:
+                self._lane_failed = True
+                worker.close()
+                raise RustWorkerError("execution channel capability unavailable")
+            self._lane_requests = self._lane_body = self._lane_attempts = 0
+        yield self._lane_worker
+        self._lane_requests += 1
+        self._lane_body += budget["body"]
+        self._lane_attempts += budget["attempts"]
+
+    def enable_persistent(self):
+        with self._lane_lock:
+            return self._enable_persistent()
+
+    def _enable_persistent(self):
+        if self._closed or self._operation_active or getattr(self, "_persistent", False):
+            raise RemoteIOError("execution channel lifecycle invalid")
+        self._lane_lease = self.ledger.reserve(Reservation(inflight=32 << 20))
+        self._persistent = True
+        self._lane_worker = None
+        self._lane_failed = False
+        self._lane_requests = self._lane_body = self._lane_attempts = 0
+        return self
+
+    def metadata_control(self):
+        with self._lane_lock:
+            return self._metadata_control()
+
+    def _metadata_control(self):
+        from urllib.parse import urlsplit
+
+        from .transport import GuardedTransport
+
+        if self._closed:
+            raise RemoteIOError("closed production transport")
+        if getattr(self, "_control", None) is None:
+            self._control = GuardedTransport(
+                self.ledger, trusted_hosts=frozenset({urlsplit(self.origin).hostname}),
+                token=self._token, credential_origin=self.origin,
+                same_origin_cookie=self._cookie)
+        return self._control
+
     def close(self):
+        with self._lane_lock:
+            self._closed = True
+            active = self._operation_active
+            worker = getattr(self, "_request_worker", None) or getattr(self, "_lane_worker", None)
+        if active:
+            if worker is not None and getattr(worker, "_construction_ready", True):
+                worker.cancel()
+            return  # Active owner finalizes payload before releasing resident quota.
+        with self._lane_lock:
+            self._close_channel()
+
+    def cancel(self):
+        self.close()
+
+    def _close_channel(self):
         self._objects.clear()
         self._closed = True
+        primary = None
+        control = getattr(self, "_control", None)
+        if control is not None:
+            try:
+                control.close()
+                self._control = None
+            except BaseException as error:
+                primary = error
+        if getattr(self, "_persistent", False):
+            worker = self._lane_worker
+            try:
+                if worker is not None:
+                    worker.close()
+            except BaseException as error:
+                if primary is None:
+                    primary = error
+                else:
+                    primary.finalization_secondary = (
+                        *getattr(primary, "finalization_secondary", ()), "worker_close")
+            if worker is None or worker._proc is None:
+                try:
+                    self.ledger.settle(self._lane_lease)
+                    self._persistent = False
+                except BaseException as error:
+                    if primary is None:
+                        primary = error
+                    else:
+                        primary.finalization_secondary = (
+                            *getattr(primary, "finalization_secondary", ()), "resident_settlement")
+        if primary is not None:
+            raise primary
 
     def __enter__(self):
         if self._closed:
             raise RemoteIOError("closed production transport")
         return self
 
-    def __exit__(self, *_exc):
-        self.close()
+    def __exit__(self, exc_type, primary, traceback):
+        try:
+            self.close()
+        except BaseException:
+            if primary is None:
+                raise
+            primary.finalization_secondary = (
+                *getattr(primary, "finalization_secondary", ()), "transport_close")
         return False
 
     def clone(self):
@@ -400,19 +545,28 @@ class RustProductionTransport:
             mode=mode,
             json_limit=json_limit,
         )
-        # All leases exist before hello; malformed/crash/timeout keeps unknown body pending.
-        worker_type = RustWorker
-        if getattr(self, "_track_correct_worker", False):
-            transport = self
+        # Register the actual child owner for both execution modes.
+        transport = self
 
-            class CorrectWorker(RustWorker):
-                def __init__(self, *args, **kwargs):
-                    self._proc = None  # Distinguish constructor-before-spawn from live unknown.
-                    transport._correct_worker = self
+        class CorrectWorker(RustWorker):
+            def __init__(self, *args, **kwargs):
+                self._proc = None
+                self._construction_ready = False
+                transport._correct_worker = self
+                if getattr(transport, "_persistent", False):
+                    transport._lane_worker = self
+                transport._request_worker = self
+                try:
                     super().__init__(*args, **kwargs)
+                finally:
+                    self._construction_ready = hasattr(self, "_lifecycle_lock")
+                if transport._closed:
+                    self.cancel()
+                    raise RustWorkerError("execution channel closed during construction")
 
-            worker_type = CorrectWorker
-        with worker_type(self.worker, job_budget=budget, timeout_s=40) as worker:
+        worker_type = CorrectWorker
+        with self._execution_worker(worker_type, budget) as worker:
+            self._request_worker = worker
             request_id = uuid.uuid4().hex
             worker.send_raw(
                 (
@@ -447,6 +601,7 @@ class RustProductionTransport:
                 or type(accounting["complete"]) is not bool
             ):
                 raise RustWorkerError("production accounting invalid; leases pending")
+            self._request_terminal = True
             self.ledger.consume_body(lease1, accounting["body"])
             if accounting["complete"]:
                 self.ledger.settle(lease1)
@@ -491,7 +646,36 @@ class RustProductionTransport:
             yield root, result
 
     @contextmanager
-    def _transfer_owned(
+    def _operation(self):
+        with self._lane_lock:
+            if self._closed or self._operation_active:
+                raise RemoteIOError("execution channel lifecycle invalid")
+            self._operation_active = True
+            self._request_worker = None
+            self._request_terminal = False
+        try:
+            yield
+        finally:
+            primary = sys.exc_info()[1]
+            with self._lane_lock:
+                self._operation_active = False
+                if self._closed:
+                    try:
+                        self._close_channel()
+                    except BaseException:
+                        if primary is None:
+                            raise
+                        primary.finalization_secondary = (
+                            *getattr(primary, "finalization_secondary", ()), "channel_close")
+
+    @contextmanager
+    def _transfer_owned(self, obj, **kwargs):
+        with self._operation():
+            with self._transfer_owned_body(obj, **kwargs) as result:
+                yield result
+
+    @contextmanager
+    def _transfer_owned_body(
         self,
         obj,
         *,
@@ -506,6 +690,8 @@ class RustProductionTransport:
         size = length if mode == "range" else obj.object_size
         footprint = ProductionFootprint.admit(mode, size)
         memory, disk = footprint.memory, footprint.transfer_disk
+        if getattr(self, "_persistent", False):
+            memory -= 32 << 20
         # Check profile/binding and working set before filesystem creation or network.
         if (
             condition == "match"
@@ -527,6 +713,8 @@ class RustProductionTransport:
         delivered_snapshot = None
         try:
             root = self._owned_dir()
+            self._request_worker = None
+            self._request_terminal = False
             result = self._call(
                 obj,
                 root,
@@ -563,7 +751,12 @@ class RustProductionTransport:
         finally:
             primary = sys.exc_info()[1]
             failed = False
+            worker = getattr(self, "_request_worker", None)
+            request_safe = (getattr(self, "_request_terminal", False)
+                            or worker is None or worker._proc is None)
             try:
+                if not request_safe:
+                    raise RemoteIOError("live request resources retained")
                 try:
                     self.ledger.settle(memory_lease)
                 finally:
@@ -714,11 +907,18 @@ class RustProductionTransport:
 
     @contextmanager
     def _capability_match(self, obj):
+        with self._operation():
+            with self._capability_match_body(obj) as result:
+                yield result
+
+    @contextmanager
+    def _capability_match_body(self, obj):
         # Same bytes/header/size path; only the proof prerequisite differs.
         footprint = ProductionFootprint.admit("range", 1)
         lease = self.ledger.reserve(Reservation(disk=footprint.transfer_disk))
         try:
-            memory_lease = self.ledger.reserve(Reservation(inflight=footprint.memory))
+            memory = footprint.memory - ((32 << 20) if getattr(self, "_persistent", False) else 0)
+            memory_lease = self.ledger.reserve(Reservation(inflight=memory))
         except BaseException as primary:
             try:
                 self.ledger.settle(lease)
@@ -750,7 +950,8 @@ class RustProductionTransport:
                 # Base shutdown clears _proc only after wait. Otherwise poll the actual
                 # retained Popen. No handle means no successful spawn or already reaped.
                 stopped = proc is None or proc.poll() is not None
-                if stopped:
+                artifact_finished = delivered_snapshot is not None and primary is None
+                if stopped or (getattr(self, "_persistent", False) and artifact_finished):
                     try:
                         self.ledger.settle(memory_lease)
                     finally:

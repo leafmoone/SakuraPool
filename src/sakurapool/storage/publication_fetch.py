@@ -156,7 +156,10 @@ def fetch_publication_sample(
         attempt_hook("NETWORK_START", {})
     if obj is None:
         owned = control is None
-        if owned:
+        reused = owned and getattr(transport, "_persistent", False)
+        if reused:
+            control = transport.metadata_control()
+        elif owned:
             control = GuardedTransport(
                 ledger,
                 trusted_hosts=frozenset({urlsplit(endpoint).hostname}),
@@ -167,7 +170,7 @@ def fetch_publication_sample(
         try:
             obj = exact_provider_lookup(control, endpoint, repo, revision, path, size, digest.hex())
         finally:
-            if owned:
+            if owned and not reused:
                 control.close()
         if obj.repo_type != repo_type:
             raise PublicationCorrupt("repository type mismatch")
