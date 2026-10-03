@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .budget import BudgetExceeded, BudgetLedger, Reservation
-from .modelscope import ModelScopeDataset
+from .modelscope import ModelScopeDataset, _io_error
 from .production import ProviderObject, RustProductionTransport
 from .publication import PublicationCorrupt
 from .retrieval import EXTENSIONS, _publish_directory, _real_output_root
@@ -81,7 +81,8 @@ def exact_provider_lookup(control, endpoint, repo_id, revision, path, size, dige
     found = provider.find_legacy_file(hub, revision, root=root, path=path)
     if (found.size != size or found.revision_candidate != revision
             or found.provider_sha256 != digest):
-        raise RemoteIOError("provider exact identity/digest mismatch")
+        raise _io_error(provider, "provider exact identity/digest mismatch", code="provider_shape",
+                              phase="provider_exact_lookup")
     return ProviderObject.from_tree(provider, found)
 
 

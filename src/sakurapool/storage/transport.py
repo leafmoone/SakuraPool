@@ -55,6 +55,7 @@ _SAFE_CODES = frozenset(
         "redirect_policy",
         "invalid_json",
         "provider_shape",
+        "provider_rejection",
         "retry_policy",
         "provider_page_shape",
         "provider_entry_shape",
@@ -100,6 +101,10 @@ _SAFE_PHASES = frozenset(
         "metadata_headers",
         "metadata_body",
         "provider_revision_shape",
+        "provider_repository_shape",
+        "provider_tree_shape",
+        "provider_repository_request",
+        "provider_tree_request",
         "provider_listing_shape",
         "provider_exact_lookup",
         "publication_fetch",
@@ -123,6 +128,7 @@ class RemoteIOError(RuntimeError):
         code: str = "remote_io",
         phase: str = "transport",
         http_status: int | None = None,
+        accounting: str = "UNKNOWN",
     ):
         if code not in _SAFE_CODES or phase not in _SAFE_PHASES:
             raise ValueError("unrecognized safe remote diagnostic")
@@ -130,16 +136,31 @@ class RemoteIOError(RuntimeError):
             type(http_status) is not int or not 100 <= http_status <= 599
         ):
             raise ValueError("invalid safe HTTP status")
+        if accounting not in {"CONFIRMED", "UNKNOWN"}:
+            raise ValueError("invalid operation accounting")
         super().__init__(message)
+        self.accounting_state = accounting
         self.code = code
         self.phase = phase
         self.http_status = http_status
 
     def public_diagnostic(self) -> dict[str, str | int]:
-        result: dict[str, str | int] = {"code": self.code, "phase": self.phase}
+        result: dict[str, str | int] = {"code": self.code, "phase": self.phase,
+                                        "accounting": self.accounting_state}
         if self.http_status is not None:
             result["http_status"] = self.http_status
+        if getattr(self, "finalization_secondary", ()):
+            result["secondary"] = list(self.finalization_secondary)
         return result
+
+
+class MetadataBytes(bytes):
+    """Payload with per-read settlement evidence; plain bytes are not evidence."""
+
+    def __new__(cls, payload, accounting):
+        obj = super().__new__(cls, payload)
+        obj.accounting_state = accounting
+        return obj
 
 
 class _AmbiguousRead(RemoteIOError):
@@ -898,6 +919,7 @@ class GuardedTransport:
         inflight: int,
         headers: dict[str, str],
         refresh_origin: str | None = None,
+        operation: dict | None = None,
     ):
         """At most 3 attempts; any 403 fails closed, even at a signed redirect.
 
@@ -913,6 +935,8 @@ class GuardedTransport:
                     url, max_body=max_body, metadata=metadata, inflight=inflight, headers=headers
                 )
             except _AmbiguousRead:
+                if operation is not None:
+                    operation["unknown"] = True
                 # The failed attempt and full unknown body remain charged.
                 if attempt + 1 < MAX_ATTEMPTS:
                     time.sleep(self._retry_delay(None, attempt))
@@ -929,7 +953,9 @@ class GuardedTransport:
                 self.ledger.settle(lease)
                 if target is None:
                     raise RemoteIOError(
-                        "unsafe redirect target", code="redirect_policy", phase="response_headers"
+                        "unsafe redirect target", code="redirect_policy", phase="response_headers",
+                        accounting=("CONFIRMED" if operation is not None
+                                    and not operation["unknown"] else "UNKNOWN"),
                     )
                 url = target
                 continue
@@ -938,11 +964,21 @@ class GuardedTransport:
                 response.close()
                 self.ledger.settle(lease)
                 if attempt + 1 < MAX_ATTEMPTS:
-                    time.sleep(self._retry_delay(retry_after, attempt))
+                    try:
+                        delay = self._retry_delay(retry_after, attempt)
+                    except RemoteIOError as error:
+                        error.accounting_state = (
+                            "CONFIRMED" if operation is not None and not operation["unknown"]
+                            else "UNKNOWN")
+                        raise
+                    time.sleep(delay)
                     continue
-                raise RemoteIOError("bounded retry attempts exhausted")
+                raise RemoteIOError("bounded retry attempts exhausted", accounting=(
+                    "CONFIRMED" if operation is not None and not operation["unknown"]
+                    else "UNKNOWN"))
             return response, lease
-        raise RemoteIOError("bounded redirect attempts exhausted")
+        raise RemoteIOError("bounded redirect attempts exhausted", accounting=(
+            "CONFIRMED" if operation is not None and not operation["unknown"] else "UNKNOWN"))
 
     def _read_bounded(
         self, response: requests.Response, lease: str, limit: int, *, metadata: bool, exact: bool
@@ -1208,8 +1244,10 @@ class GuardedTransport:
         """Guarded, bounded provider-listing response; no SDK bypass."""
         if max_bytes < 0 or max_bytes > 64 * MIB:
             raise ValueError("metadata single-response cap exceeded")
+        operation = {"unknown": False}
         response, lease = self._response(
-            url, max_body=max_bytes + 1, metadata=True, inflight=2 * (max_bytes + 1), headers={}
+            url, max_body=max_bytes + 1, metadata=True, inflight=2 * (max_bytes + 1), headers={},
+            operation=operation,
         )
         try:
             if response.status_code != 200:
@@ -1228,16 +1266,28 @@ class GuardedTransport:
                     http_status=200,
                 )
             body = self._read_bounded(response, lease, max_bytes, metadata=True, exact=False)
-        except _AmbiguousRead:
-            response.close()
+        except _AmbiguousRead as primary:
+            try:
+                response.close()
+            except BaseException:
+                primary.finalization_secondary = ("METADATA_FINALIZATION_FAILED",)
             raise
-        except RemoteIOError:
-            response.close()
-            self.ledger.settle(lease)  # validated reject/overlong with known raw count
+        except RemoteIOError as primary:
+            try:
+                response.close()
+                self.ledger.settle(lease)  # only this IO path proves its settlement
+            except BaseException:
+                primary.accounting_state = "UNKNOWN"
+                primary.finalization_secondary = ("METADATA_FINALIZATION_FAILED",)
+            else:
+                primary.accounting_state = "UNKNOWN" if operation["unknown"] else "CONFIRMED"
             raise
-        except BaseException:
-            response.close()
+        except BaseException as primary:
+            try:
+                response.close()
+            except BaseException:
+                primary.finalization_secondary = ("METADATA_FINALIZATION_FAILED",)
             raise
         response.close()
         self.ledger.settle(lease)
-        return body
+        return MetadataBytes(body, "UNKNOWN" if operation["unknown"] else "CONFIRMED")

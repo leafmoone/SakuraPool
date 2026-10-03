@@ -193,7 +193,7 @@ def run_task(directory, transport, *, control=None, resume=False, fault_hook=Non
     with (admit_task_growth(directory, transport.ledger),
           TaskDB(directory) as task, task.runner_lock()):
         _real_output_root(task.directory, transport.ledger)
-        if task.meta("state") in ("PAUSED", "CANCELLED") and not resume:
+        if task.meta("state") in ("PAUSED", "CANCELLED", "BLOCKED") and not resume:
             raise TaskError("EXPLICIT_RESUME_REQUIRED")
         with task.transaction() as db:
             if resume:
@@ -255,6 +255,8 @@ def run_task(directory, transport, *, control=None, resume=False, fault_hook=Non
                                 error = TaskError(details["code"], details["phase"])
                                 error.safe_details = {"code": details["code"],
                                                       "phase": details["phase"]}
+                                if details.get("accounting") in {"CONFIRMED", "UNKNOWN"}:
+                                    error.safe_details["accounting"] = details["accounting"]
                                 if isinstance(primary, PublicationFetchError):
                                     for key, allowed in {
                                         "delivery": {"PUBLISHED", "NOT_PUBLISHED"},
@@ -275,10 +277,14 @@ def run_task(directory, transport, *, control=None, resume=False, fault_hook=Non
                                 if type(status_code) is int and 100 <= status_code <= 599:
                                     error.safe_details["http_status"] = status_code
                         try:
-                            task.finish_item(item["seq"], state="BLOCKED", code=error.code,
-                                             accounting="UNKNOWN")
                             status = task.db.execute("SELECT delivery FROM items WHERE seq=?",
                                                      (item["seq"],)).fetchone()[0]
+                            known = (status != "PUBLISHED"
+                                     and getattr(error, "safe_details", {}).get("accounting")
+                                     == "CONFIRMED")
+                            task.finish_item(item["seq"], state="READY" if known else "BLOCKED",
+                                             code=error.code,
+                                             accounting="CONFIRMED" if known else "UNKNOWN")
                             error.delivery = ("PUBLISHED" if status == "PUBLISHED"
                                               else "NOT_PUBLISHED")
                         except BaseException:

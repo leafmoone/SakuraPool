@@ -1037,7 +1037,8 @@ def test_metadata_header_rejection_reports_known_status_without_body(http_and_bu
     with pytest.raises(RemoteIOError) as failure:
         client.read_metadata(url)
     assert failure.value.public_diagnostic() == {
-        "code": "http_status", "phase": "metadata_headers", "http_status": status}
+        "code": "http_status", "phase": "metadata_headers", "http_status": status,
+        "accounting": "CONFIRMED"}
     public = (str(failure.value) + repr(failure.value)
               + "".join(traceback.format_exception(failure.value)))
     assert secret not in public and failure.value.__context__ is None

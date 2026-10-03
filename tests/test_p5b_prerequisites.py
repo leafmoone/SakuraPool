@@ -175,7 +175,7 @@ def test_pagination_contradictions_fail_closed(monkeypatch, pages):
     repeat = len(pages) == 2 and pages[0] == pages[1]
     assert caught.value.public_diagnostic() == {
         "code": "provider_page_repeat" if repeat else "provider_total_conflict",
-        "phase": "provider_listing_shape",
+        "phase": "provider_listing_shape", "accounting": "UNKNOWN",
     }
 
 
@@ -221,6 +221,7 @@ def test_page_bound_is_incomplete_not_absent(monkeypatch):
                                  path="gc5m/target.tar", page_size=1, max_pages=1)
     assert caught.value.public_diagnostic() == {
         "code": "provider_listing_incomplete", "phase": "provider_exact_lookup",
+        "accounting": "UNKNOWN",
     }
 
 
@@ -231,7 +232,7 @@ def test_absent_is_distinct_from_incomplete(monkeypatch):
     with pytest.raises(RemoteIOError) as caught:
         provider.find_legacy_file(7, "a" * 40, root="gc5m", path="gc5m/target.tar")
     assert caught.value.public_diagnostic() == {
-        "code": "provider_object_absent", "phase": "provider_exact_lookup",
+        "code": "provider_object_absent", "phase": "provider_exact_lookup", "accounting": "UNKNOWN",
     }
 
 
@@ -243,7 +244,7 @@ def test_unidentified_directory_fails_closed(monkeypatch, entry):
     with pytest.raises(RemoteIOError) as caught:
         provider.legacy_tree_page(7, "a" * 40, root="gc5m")
     assert caught.value.public_diagnostic() == {
-        "code": "provider_entry_path", "phase": "provider_listing_shape",
+        "code": "provider_entry_path", "phase": "provider_listing_shape", "accounting": "UNKNOWN",
     }
 
 
@@ -255,5 +256,5 @@ def test_repeated_directory_page_fails_closed(monkeypatch):
     with pytest.raises(RemoteIOError) as caught:
         list(provider.iter_legacy_pages(7, "a" * 40, root="gc5m", page_size=1))
     assert caught.value.public_diagnostic() == {
-        "code": "provider_page_repeat", "phase": "provider_listing_shape",
+        "code": "provider_page_repeat", "phase": "provider_listing_shape", "accounting": "UNKNOWN",
     }

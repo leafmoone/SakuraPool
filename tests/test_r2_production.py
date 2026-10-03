@@ -22,7 +22,7 @@ from sakurapool.storage.budget import DEFAULT_WORK_ROOT, BudgetLedger
 from sakurapool.storage.modelscope import ModelScopeDataset
 from sakurapool.storage.production import ProviderObject, RustProductionTransport, proof_key
 from sakurapool.storage.rust_bridge import RustWorkerError
-from sakurapool.storage.transport import BoundObject, RemoteIOError
+from sakurapool.storage.transport import BoundObject, MetadataBytes, RemoteIOError
 
 
 def test_modelscope_legacy_control_plane_exact_identity_and_live_candidates():
@@ -35,7 +35,8 @@ def test_modelscope_legacy_control_plane_exact_identity_and_live_candidates():
 
         def read_metadata(self, url):
             self.calls.append(url)
-            return json.dumps({"Code": 200, "Data": self.payload}).encode()
+            return MetadataBytes(json.dumps({"Code": 200, "Data": self.payload}).encode(),
+                                 "CONFIRMED")
 
     control = Control()
     dataset = ModelScopeDataset(control, "https://modelscope.cn", "leafmoone/game_cg_5M")

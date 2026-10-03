@@ -56,7 +56,8 @@ def test_typed_rejections(monkeypatch, files, code):
     with pytest.raises(RemoteIOError) as caught:
         parse(monkeypatch, files, page_size=1 if code == "provider_page_shape" else 20)
     error = caught.value
-    assert error.public_diagnostic() == {"code": code, "phase": "provider_listing_shape"}
+    assert error.public_diagnostic() == {"code": code, "phase": "provider_listing_shape",
+                                         "accounting": "UNKNOWN"}
     exposed = str(error) + json.dumps(error.public_diagnostic())
     for value in (A, B, DIGEST, "private", "gc5m/test.tar", "outside/test.tar"):
         assert value not in exposed
@@ -86,7 +87,7 @@ def test_pinned_still_requires_entry_revision_syntax(monkeypatch, bad):
         parse(monkeypatch, [entry(Revision=bad)])
     assert caught.value.public_diagnostic() == {
         "code": "provider_entry_revision_shape",
-        "phase": "provider_listing_shape",
+        "phase": "provider_listing_shape", "accounting": "UNKNOWN",
     }
 
 

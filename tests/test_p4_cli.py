@@ -142,8 +142,10 @@ def test_production_inspect_session_mock_routes_without_socket(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize("error,expected", [
-    ("http", {"code": "http_status", "phase": "metadata_headers", "http_status": 403}),
-    ("shape", {"code": "provider_shape", "phase": "provider_revision_shape"}),
+    ("http", {"code": "http_status", "phase": "metadata_headers", "http_status": 403,
+              "accounting": "UNKNOWN"}),
+    ("shape", {"code": "provider_shape", "phase": "provider_revision_shape",
+               "accounting": "UNKNOWN"}),
     ("unknown", {"code": "local_or_unclassified", "phase": "local"}),
 ])
 def test_remote_cli_public_diagnostic_has_only_whitelisted_fields(

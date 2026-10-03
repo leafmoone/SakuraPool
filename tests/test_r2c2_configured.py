@@ -39,10 +39,13 @@ def test_configured_prefix_uses_existing_provider_canonical_gate():
             return "modelscope.cn"
 
         def read_metadata(self, url):
+            from sakurapool.storage.transport import MetadataBytes
+
             self.calls.append(url)
             if "/repo/tree?" in url:
-                return json.dumps({"Code": 200, "Data": {"Files": [], "TotalCount": 0}}).encode()
-            return json.dumps(
+                return MetadataBytes(json.dumps({"Code": 200,
+                                     "Data": {"Files": [], "TotalCount": 0}}).encode(), "CONFIRMED")
+            return MetadataBytes(json.dumps(
                 {
                     "Code": 200,
                     "Data": {
@@ -52,7 +55,7 @@ def test_configured_prefix_uses_existing_provider_canonical_gate():
                         "Type": 4,
                     },
                 }
-            ).encode()
+            ).encode(), "CONFIRMED")
 
     control = Control()
     provider = ModelScopeDataset(

@@ -233,7 +233,8 @@ class TaskDB:
             operation = uuid.uuid4().hex
             db.execute("INSERT INTO attempts(attempt_id,seq,operation_id,phase) VALUES(?,?,?,?)",
                        (attempt, row["seq"], operation, "CLAIMED"))
-            db.execute("UPDATE items SET state='IN_PROGRESS',attempt_id=? WHERE seq=?",
+            db.execute("UPDATE items SET state='IN_PROGRESS',attempt_id=?,accounting='NONE' "
+                       "WHERE seq=?",
                        (attempt, row["seq"]))
             return dict(row) | {"attempt_id": attempt, "operation_id": operation}
 
@@ -282,6 +283,9 @@ class TaskDB:
 
     def finish_item(self, seq, *, state, code=None, accounting=None):
         with self.transaction() as db:
+            if state == "READY" and accounting == "CONFIRMED" and code is not None:
+                db.execute("UPDATE attempts SET accounting='CONFIRMED',network_state='CONFIRMED' "
+                           "WHERE attempt_id=(SELECT attempt_id FROM items WHERE seq=?)", (seq,))
             db.execute("UPDATE items SET state=?,code=?,accounting=COALESCE(?,accounting) "
                        "WHERE seq=?", (state, code, accounting, seq))
 

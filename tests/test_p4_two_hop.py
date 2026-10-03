@@ -292,16 +292,20 @@ class FakeTransport:
 
     def read_metadata(self, url):
         if url.endswith("/revisions"):
-            return json.dumps({"Data": {"RevisionMap": {
+            from sakurapool.storage.transport import MetadataBytes
+
+            return MetadataBytes(json.dumps({"Data": {"RevisionMap": {
                 "Branches": [{"Revision": "master", "CommitId": REV}],
-                "Tags": []}}}).encode()
+                "Tags": []}}}).encode(), "CONFIRMED")
         data = {"Files": self.pages[0]}
         value = self.total if self.total is not None else sum(len(p) for p in self.pages)
         data[self.total_field] = value
         if "both" == self.total_field:
             data["Total"] = value + 1
             data["TotalCount"] = value
-        return json.dumps({"Data": data}).encode()
+        from sakurapool.storage.transport import MetadataBytes
+
+        return MetadataBytes(json.dumps({"Data": data}).encode(), "CONFIRMED")
 
     def two_hop_range(self, url, **kw):
         self.last_two_hop = dict(url=url, **kw)

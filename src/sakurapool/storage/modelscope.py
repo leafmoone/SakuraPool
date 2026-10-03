@@ -89,6 +89,13 @@ class TwoHopProbe:
                 **self.result.as_dict()}
 
 
+def _io_error(provider, message, **kwargs):
+    # Only the reader's explicit evidence is composed; plain fixtures are unknown.
+    kwargs["accounting"] = ("CONFIRMED" if getattr(provider, "_metadata_reads", 0)
+                            and provider._metadata_confirmed else "UNKNOWN")
+    return RemoteIOError(message, **kwargs)
+
+
 class ModelScopeDataset:
     """One configured repo and one guarded metadata/download transport.
 
@@ -118,24 +125,46 @@ class ModelScopeDataset:
         transport._host(endpoint)
         self.endpoint = endpoint.rstrip("/")
         self.transport = transport
+        self._metadata_reads = 0
+        self._metadata_confirmed = True
         self.repo_id = self.repository_id.id
         self.base = (f"{self.endpoint}/api/v1/datasets"
                      f"/{self.repository_id.owner}/{self.repository_id.name}")
 
     def _data(self, url: str, *, phase: str = "provider_revision_shape") -> object:
-        payload = self.transport.read_metadata(url)
+        request_phase = {"provider_repository_shape": "provider_repository_request",
+                         "provider_tree_shape": "provider_tree_request"}.get(phase)
+        try:
+            payload = self.transport.read_metadata(url)
+        except RemoteIOError as error:
+            self._metadata_reads += 1
+            self._metadata_confirmed &= error.accounting_state == "CONFIRMED"
+            error.accounting_state = "CONFIRMED" if self._metadata_confirmed else "UNKNOWN"
+            if request_phase is not None:
+                error.phase = request_phase
+            raise
+        except Exception:
+            self._metadata_confirmed = False
+            raise RemoteIOError("metadata operation failed", phase=request_phase or "metadata_send",
+                                accounting="UNKNOWN") from None
+        self._metadata_reads += 1
+        self._metadata_confirmed &= getattr(payload, "accounting_state", "UNKNOWN") == "CONFIRMED"
+        if not self._metadata_confirmed:
+            raise RemoteIOError("metadata operation contains an uncertain request",
+                                code="network_ambiguous", phase=request_phase or "metadata_body",
+                                accounting="UNKNOWN")
         try:
             decoded = json.loads(payload)
         except (UnicodeDecodeError, ValueError):
             decoded = None
         if decoded is None:
-            raise RemoteIOError("invalid provider metadata JSON", code="invalid_json",
+            raise _io_error(self, "invalid provider metadata JSON", code="invalid_json",
                                 phase=phase)
         if not isinstance(decoded, dict) or "Data" not in decoded:
-            raise RemoteIOError("unrecognized provider response; cannot claim completeness",
+            raise _io_error(self, "unrecognized provider response; cannot claim completeness",
                                 code="provider_shape", phase=phase)
         if (decoded.get("Code", 200) != 200 or decoded.get("Success") is False):
-            raise RemoteIOError("provider metadata unsuccessful",
+            raise _io_error(self, "provider metadata unsuccessful",
                                 code="provider_rejection", phase=phase)
         return decoded["Data"]
 
@@ -147,7 +176,9 @@ class ModelScopeDataset:
                 or info.get("Name") != self.repository_id.name
                 or type(info.get("Id")) is not int or not 0 < info["Id"] < 1 << 63
                 or type(info.get("Type")) is not int or info["Type"] != 4):
-            raise RemoteIOError("provider legacy repository identity differs")
+            raise _io_error(self, "provider legacy repository identity differs",
+                            code="provider_shape",
+                              phase="provider_repository_shape")
         self._legacy_verified_id = info["Id"]
         return info["Id"]
 
@@ -168,13 +199,14 @@ class ModelScopeDataset:
                           phase="provider_tree_shape")
         files = info.get("Files") if isinstance(info, dict) else None
         if not isinstance(files, list) or len(files) > page_size:
-            raise RemoteIOError("unrecognized legacy tree page", code="provider_page_shape",
+            raise _io_error(self, "unrecognized legacy tree page", code="provider_page_shape",
                                 phase="provider_listing_shape")
         result = []
         seen = set()
         for entry in files:
             if not isinstance(entry, dict):
-                raise RemoteIOError("malformed legacy tree entry", code="provider_entry_shape",
+                raise _io_error(self, "malformed legacy tree entry",
+                                code="provider_entry_shape",
                                     phase="provider_listing_shape")
             if entry.get("Type") not in ("blob", "file"):
                 if entry.get("Type") in ("tree", "directory"):
@@ -182,33 +214,34 @@ class ModelScopeDataset:
                     if (not isinstance(directory, str)
                             or not _is_canonical_path(directory) or len(directory) > 512
                             or (root != "/" and not directory.startswith(root + "/"))):
-                        raise RemoteIOError("legacy tree directory scope invalid",
+                        raise _io_error(self, "legacy tree directory scope invalid",
                                             code="provider_entry_path",
                                             phase="provider_listing_shape")
                     if directory in seen:
-                        raise RemoteIOError("legacy tree path duplicate",
+                        raise _io_error(self, "legacy tree path duplicate",
                                             code="provider_entry_duplicate",
                                             phase="provider_listing_shape")
                     seen.add(directory)
                     continue
-                raise RemoteIOError("unrecognized legacy tree entry type",
+                raise _io_error(self, "unrecognized legacy tree entry type",
                                     code="provider_entry_type",
                                     phase="provider_listing_shape")
             path, size, candidate = entry.get("Path"), entry.get("Size"), entry.get("Revision")
             if not isinstance(path, str) or not _is_canonical_path(path) or len(path)>512:
-                raise RemoteIOError("legacy tree path invalid", code="provider_entry_path",
+                raise _io_error(self, "legacy tree path invalid", code="provider_entry_path",
                                     phase="provider_listing_shape")
             if path in seen:
-                raise RemoteIOError("legacy tree path duplicate", code="provider_entry_duplicate",
+                raise _io_error(self, "legacy tree path duplicate",
+                                code="provider_entry_duplicate",
                                     phase="provider_listing_shape")
             if root != "/" and not path.startswith(root.rstrip("/")+"/"):
-                raise RemoteIOError("legacy tree scope invalid", code="provider_entry_scope",
+                raise _io_error(self, "legacy tree scope invalid", code="provider_entry_scope",
                                     phase="provider_listing_shape")
             if type(size) is not int or not 0 <= size <= 1 << 50:
-                raise RemoteIOError("legacy tree size invalid", code="provider_entry_size",
+                raise _io_error(self, "legacy tree size invalid", code="provider_entry_size",
                                     phase="provider_listing_shape")
             if not isinstance(candidate, str) or not _SHA.fullmatch(candidate):
-                raise RemoteIOError("legacy tree revision invalid",
+                raise _io_error(self, "legacy tree revision invalid",
                                     code="provider_entry_revision_shape",
                                     phase="provider_listing_shape")
             # Entry Revision identifies the entry's commit; a pinned request
@@ -218,17 +251,17 @@ class ModelScopeDataset:
             sha = entry.get("Sha256")
             if sha is not None and (not isinstance(sha, str)
                                     or re.fullmatch(r"[0-9a-f]{64}", sha) is None):
-                raise RemoteIOError("legacy tree digest malformed", code="provider_entry_digest",
+                raise _io_error(self, "legacy tree digest malformed", code="provider_entry_digest",
                                     phase="provider_listing_shape")
             result.append(ListedFile(path, size, sha, False, effective_revision))
         total = info.get("TotalCount", info.get("Total"))
         if ("Total" in info and "TotalCount" in info
                 and info["Total"] != info["TotalCount"]):
-            raise RemoteIOError("provider listing total fields disagree",
+            raise _io_error(self, "provider listing total fields disagree",
                                     code="provider_total_conflict", phase="provider_listing_shape")
         if total is not None and (type(total) is not int or total < len(files)
                                   or (not files and total > 0)):
-            raise RemoteIOError("provider listing total contradicts raw entries",
+            raise _io_error(self, "provider listing total contradicts raw entries",
                                 code="provider_total_conflict", phase="provider_listing_shape")
         complete = (page == 1 and total == len(files)) or (total is None and not files)
         return TreePage(result, complete, raw_count=len(files), total=total,
@@ -241,10 +274,10 @@ class ModelScopeDataset:
                 self, hub_id, revision, root=root, page_size=page_size, max_pages=max_pages):
             matches = [row for row in page.files if row.path == path]
             if len(matches) > 1:
-                raise RemoteIOError("provider exact object duplicate")
+                raise _io_error(self, "provider exact object duplicate")
             if matches:
                 return matches[0]
-        raise RemoteIOError("provider exact object unavailable", code="provider_object_absent",
+        raise _io_error(self, "provider exact object unavailable", code="provider_object_absent",
                             phase="provider_exact_lookup")
 
     def iter_legacy_pages(self, hub_id, revision, *, root,
@@ -263,48 +296,48 @@ class ModelScopeDataset:
                 # filtered page has insufficient evidence, never means absent.
                 rows, complete = page
                 if not complete:
-                    raise RemoteIOError("provider listing incomplete: raw evidence unavailable",
+                    raise _io_error(self, "provider listing incomplete: raw evidence unavailable",
                                         code="provider_listing_incomplete",
                                         phase="provider_exact_lookup")
                 page = TreePage(rows, True, raw_count=len(rows), total=len(rows),
                                 raw_paths=[row.path for row in rows], continuation=False)
             profile = (page.total is not None, page.total)
             if total_profile is not None and profile != total_profile:
-                raise RemoteIOError("provider listing total changed",
+                raise _io_error(self, "provider listing total changed",
                                     code="provider_total_conflict", phase="provider_listing_shape")
             total_profile = profile
             if paths.intersection(page.raw_paths):
-                raise RemoteIOError("provider listing repeated page path",
+                raise _io_error(self, "provider listing repeated page path",
                                     code="provider_page_repeat", phase="provider_listing_shape")
             paths.update(page.raw_paths)
             raw_count += page.raw_count
             if page.total is not None and raw_count > page.total:
-                raise RemoteIOError("provider listing raw count exceeds total",
+                raise _io_error(self, "provider listing raw count exceeds total",
                                     code="provider_total_conflict", phase="provider_listing_shape")
             yield page
             if page.complete or (page.total is not None and raw_count == page.total):
                 return
             if not page.continuation:
                 return
-        raise RemoteIOError("provider exact listing incomplete: page bound reached",
+        raise _io_error(self, "provider exact listing incomplete: page bound reached",
                             code="provider_listing_incomplete", phase="provider_exact_lookup")
 
     def revisions(self) -> list[str]:
         """List commit-id-shaped candidates; syntax does NOT verify immutability."""
         info = self._data(self.base + "/revisions")
         if not isinstance(info, dict) or not isinstance(info.get("RevisionMap"), dict):
-            raise RemoteIOError("unrecognized revision map", code="provider_shape",
+            raise _io_error(self, "unrecognized revision map", code="provider_shape",
                                 phase="provider_revision_shape")
         revisions = info["RevisionMap"]
         tags, branches = revisions.get("Tags"), revisions.get("Branches")
         if not isinstance(tags, list) or not isinstance(branches, list):
-            raise RemoteIOError("unrecognized revision entries", code="provider_shape",
+            raise _io_error(self, "unrecognized revision entries", code="provider_shape",
                                 phase="provider_revision_shape")
         candidates = tags + branches
         result = set()
         for item in candidates:
             if not isinstance(item, dict):
-                raise RemoteIOError("malformed revision entry", code="provider_shape",
+                raise _io_error(self, "malformed revision entry", code="provider_shape",
                                     phase="provider_revision_shape")
             for field in ("CommitId", "CommitID", "commit_id", "Revision"):
                 value = item.get(field)
@@ -337,58 +370,58 @@ class ModelScopeDataset:
             if (isinstance(data, dict) and "Total" in data
                     and "TotalCount" in data
                     and data["Total"] != data["TotalCount"]):
-                raise RemoteIOError("provider listing total fields disagree",
+                raise _io_error(self, "provider listing total fields disagree",
                                     code="provider_total_conflict", phase="provider_listing_shape")
             entries = (data.get("Files", data.get("files"))
                        if isinstance(data, dict) else data)
             has_total = isinstance(data, dict) and "Total" in data
             if total_profile is not None and has_total != total_profile:
-                raise RemoteIOError("inconsistent provider listing total presence")
+                raise _io_error(self, "inconsistent provider listing total presence")
             total_profile = has_total
             if has_total:
                 total = data["Total"]
                 if type(total) is not int or total < 0 or (
                         declared_total is not None and declared_total != total):
-                    raise RemoteIOError("inconsistent provider listing total")
+                    raise _io_error(self, "inconsistent provider listing total")
                 declared_total = total
             if not isinstance(entries, list) or len(entries) > PAGE_SIZE:
-                raise RemoteIOError("invalid or truncated provider listing")
+                raise _io_error(self, "invalid or truncated provider listing")
             seen_entries += len(entries)  # Total counts all tree and blob entries
             for item in entries:
                 if not isinstance(item, dict):
-                    raise RemoteIOError("invalid file-tree entry")
+                    raise _io_error(self, "invalid file-tree entry")
                 path = item.get("Path", item.get("path"))
                 try:
                     canonical_object_id(path)
                 except (TypeError, ValueError):
                     path = None
                 if path is None or len(path.encode("utf-8")) > 512:
-                    raise RemoteIOError("unsafe or excessive provider file path")
+                    raise _io_error(self, "unsafe or excessive provider file path")
                 if path in seen_paths:
-                    raise RemoteIOError("provider returned duplicate tree/blob path")
+                    raise _io_error(self, "provider returned duplicate tree/blob path")
                 seen_paths.add(path)
                 kind = item.get("Type", item.get("type", "blob"))
                 if kind == "tree":
                     continue
                 if kind != "blob":
-                    raise RemoteIOError("unsupported provider entry type")
+                    raise _io_error(self, "unsupported provider entry type")
                 size = item.get("Size", item.get("size"))
                 if type(size) is not int or not 0 <= size < 2**64:
-                    raise RemoteIOError("provider file size absent or invalid")
+                    raise _io_error(self, "provider file size absent or invalid")
                 digest = item.get("Sha256", item.get("sha256"))
                 if digest is not None and (not isinstance(digest, str)
                                            or not re.fullmatch(r"[0-9a-f]{64}", digest)):
-                    raise RemoteIOError("provider file SHA256 is malformed")
+                    raise _io_error(self, "provider file SHA256 is malformed")
                 record = ListedFile(path, size, digest, bool(item.get("Lfs", False)),
                                     revision_candidate=revision)
                 found[path] = record
             if declared_total is not None:
                 if seen_entries > declared_total:
-                    raise RemoteIOError("provider returned more entries than declared")
+                    raise _io_error(self, "provider returned more entries than declared")
                 if seen_entries == declared_total:
                     return sorted(found.values(), key=lambda x: x.path), True
                 if not entries:
-                    raise RemoteIOError("provider listing ended before declared total")
+                    raise _io_error(self, "provider listing ended before declared total")
             if len(found) >= MAX_LISTED:
                 return sorted(found.values(), key=lambda x: x.path), False
             if declared_total is None and len(entries) < PAGE_SIZE:

@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from sakurapool.storage.modelscope import ModelScopeDataset
-from sakurapool.storage.transport import RemoteIOError
+from sakurapool.storage.transport import MetadataBytes, RemoteIOError
 
 REV = "a" * 40
 REPO = "leafmoone/game_cg_5M"
@@ -25,13 +25,14 @@ class FakeTransport:
     def read_metadata(self, url):
         self.urls.append(url)
         if url.endswith("/revisions"):
-            return json.dumps({"Data": {"RevisionMap": {
+            return MetadataBytes(json.dumps({"Data": {"RevisionMap": {
                 "Branches": [{"Revision": "master", "CommitId": REV}],
-                "Tags": []}}}).encode()
+                "Tags": []}}}).encode(), "CONFIRMED")
         query = parse_qs(urlsplit(url).query)
         assert query["Revision"] == [REV]
-        return json.dumps({"Data": {"Files": self.pages[int(query["PageNumber"][0])-1],
-                                    "Total": sum(len(p) for p in self.pages)}}).encode()
+        return MetadataBytes(json.dumps({"Data": {
+            "Files": self.pages[int(query["PageNumber"][0])-1],
+            "Total": sum(len(p) for p in self.pages)}}).encode(), "CONFIRMED")
 
 
 def test_official_dataset_routes_are_guarded_and_pinned():
@@ -75,8 +76,8 @@ def test_fail_closed_on_invalid_remote_listing(bad):
 def test_malformed_revision_lists_are_redacted(bad):
     class BadTransport(FakeTransport):
         def read_metadata(self, url):
-            return json.dumps({"Data": {"RevisionMap": {"Tags": bad,
-                                                         "Branches": []}}}).encode()
+            return MetadataBytes(json.dumps({"Data": {"RevisionMap": {"Tags": bad,
+                                                         "Branches": []}}}).encode(), "CONFIRMED")
     with pytest.raises(RemoteIOError) as caught:
         ModelScopeDataset(BadTransport([]), "http://localhost", REPO).revisions()
     assert "SECRET" not in "".join(traceback.format_exception(caught.value))
@@ -85,7 +86,7 @@ def test_malformed_revision_lists_are_redacted(bad):
 def test_malformed_metadata_and_endpoint_never_expose_signed_url():
     class BadTransport(FakeTransport):
         def read_metadata(self, url):
-            return b'{"Data":SECRET_SIGNED_URL?token=SECRET}'
+            return MetadataBytes(b'{"Data":SECRET_SIGNED_URL?token=SECRET}', "CONFIRMED")
     with pytest.raises(RemoteIOError) as caught:
         ModelScopeDataset(BadTransport([]), "http://localhost", REPO).revisions()
     assert "SECRET" not in "".join(traceback.format_exception(caught.value))
@@ -101,7 +102,8 @@ def test_short_page_without_declared_total_never_claims_complete():
         def read_metadata(self, url):
             if url.endswith('/revisions'):
                 return super().read_metadata(url)
-            return json.dumps({"Data": {"Files": [{"Path": "a.tar", "Size": 1}]}}).encode()
+            return MetadataBytes(json.dumps({"Data": {
+                "Files": [{"Path": "a.tar", "Size": 1}]}}).encode(), "CONFIRMED")
     files, complete = ModelScopeDataset(NoTotal([]), "http://localhost", REPO).list_files(REV)
     assert len(files) == 1 and not complete
 
@@ -109,7 +111,8 @@ def test_short_page_without_declared_total_never_claims_complete():
 def test_declared_total_mismatch_rejected():
     class WrongTotal(FakeTransport):
         def read_metadata(self, url):
-            return json.dumps({"Data": {"Total": 2, "Files": []}}).encode()
+            return MetadataBytes(json.dumps({"Data": {"Total": 2, "Files": []}}).encode(),
+                                 "CONFIRMED")
     with pytest.raises(RemoteIOError, match="ended before"):
         ModelScopeDataset(WrongTotal([]), "http://localhost", REPO).list_files(REV)
 
@@ -131,9 +134,9 @@ def test_cross_page_tree_duplicate_and_changed_total_refused():
     class ChangingTotal(FakeTransport):
         def read_metadata(self, url):
             page = int(parse_qs(urlsplit(url).query)["PageNumber"][0])
-            return json.dumps({"Data": {"Total": 201 if page == 1 else 202,
+            return MetadataBytes(json.dumps({"Data": {"Total": 201 if page == 1 else 202,
                                         "Files": first if page == 1 else [
-                                            {"Path": "other", "Size": 1}]}}).encode()
+                                            {"Path": "other", "Size": 1}]}}).encode(), "CONFIRMED")
     with pytest.raises(RemoteIOError, match="total"):
         ModelScopeDataset(ChangingTotal([]), "http://localhost", REPO).list_files(REV)
 
