@@ -341,7 +341,8 @@ def build_publication(runtime, p2_list, remote_map, output):
                             batch_size=4096,
                             columns=["record_id", "hash_source", "hash_kind", "sha256"],
                         ):
-                            for r in batch.to_pylist():
+                            rows = batch.to_pylist()
+                            for r in rows:
                                 if (
                                     r["hash_source"] != "computed:sha256"
                                     or r["hash_kind"] != "sha256"
@@ -351,10 +352,10 @@ def build_publication(runtime, p2_list, remote_map, output):
                                     raise PublicationCorrupt("reliable image SHA required")
                             db.executemany(
                                 "INSERT INTO hashes VALUES(?,?)",
-                                [
+                                (
                                     (bytes.fromhex(r["record_id"]), bytes.fromhex(r["sha256"]))
-                                    for r in batch.to_pylist()
-                                ],
+                                    for r in rows
+                                ),
                             )
                 db.commit()
                 if db.execute("SELECT count(*) FROM hashes").fetchone()[0] != count:

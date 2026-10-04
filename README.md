@@ -10,14 +10,18 @@ P5-A adds bounded publication construction and a serial Python reader:
 `from sakurapool.storage.publication_session import PublicationSession`.
 A session fully verifies once, serves multiple record fetches and closes its bounded
 binding cache. It owns the publication handle, not the caller's transport/ledger.
-No cross-thread SQLite use or concurrent scheduler is supported.
+PublicationSession itself is serial and same-thread: no cross-thread SQLite use.
+The task coordinator separately supports bounded concurrent lanes; this is not a
+concurrent scheduler inside a shared PublicationSession.
 See [P5 roadmap and task design](docs/P5_ROADMAP.md). P5-B serial task and real
 closure certification is complete; see the [closure report](reports/P5B/REAL_CLOSURE_REPORT.md).
-P5-C bounded pipeline work is in progress, not yet certified. Budget/ledger v2
-migration is not implemented. Earlier P3/P4 CLI examples below are historical/admin
+P5-C bounded pipeline is approved and merged; P5-D production-scale validation
+is now in progress, not yet a production-scale certification. Default task workers=1;
+2/4 are explicit upper bounds, with actual concurrency limited by object distribution
+and resource admission. Budget/ledger v2 migration is not implemented. Earlier P3/P4 CLI examples below are historical/admin
 interfaces, not the default task workflow.
 
-## P5-B task API (certified serial task workflow)
+## Task API (recoverable task workflow)
 
 Task creation freezes the publication content/snapshot identity, normalized P3
 query and deterministic selection into a SQLite TaskDB. Resume uses those exact
@@ -42,7 +46,10 @@ outside it. TaskDB uses DELETE journal and FULL synchronization with short expli
 transactions, plus a real single-runner OS file lock. One serial session fully
 verifies the publication once per runner process. Pause/cancel CLI returns a
 **requested** state: the bounded current item finishes before another is claimed.
-Cancellation preserves deliveries and requires explicit resume.
+Cancellation preserves deliveries and requires explicit resume. With concurrent
+lanes, new claims stop when pause/cancel is observed; already-admitted active items
+drain before the run returns. Same-object affinity does not promise multiple
+concurrent streams from a single TAR.
 
 Task connection profiles are separate from strict old single-object profiles:
 `{"format":"sakurapool-task-connection-v1","origin":"https://modelscope.cn",
@@ -73,9 +80,9 @@ heap entries, 512-record identity batches, 32 MiB TaskDB, 33 MiB journal allowan
 the maximum DB page count is derived from its actual page size. Task admission
 also reserves growth/journal overhead under the legacy physical-root budget.
 Windows file/SQLite fsync is used; portable Windows directory power-loss durability
-is not claimed. Larger than 8 MiB members remain unsupported, concurrency and
-ledger/workspace v2 are not implemented. Remaining certification is tracked
-separately.
+is not claimed. Larger than 8 MiB members remain unsupported. Bounded task
+concurrency is available; general workspace/ledger v2 migration is not implemented.
+Production-scale validation is tracked separately.
 
 ## Publication v2 (runtime-first distribution)
 
@@ -118,8 +125,9 @@ Synthetic million-record measurements are not a production capacity guarantee.
 boundary reference. The intended administrator flow is remote TAR indexing →
 durable index → runtime compile/verify → versioned index publication. The user
 flow is install/verify a published index → query → locate image/JSON → Range
-retrieval → a small local dataset. Remote scanning, publication and retrieval
-remain future-stage work, not implemented P3 features.
+retrieval → a small local dataset. Earlier P3 descriptions of remote scanning,
+publication and retrieval as future work are historical; current explicit interfaces
+are described above and do not imply a complete production index is available.
 
 Ordinary users do not need complete local TARs; LocalTarScanner is for local
 inputs, testing and validation. No ready-to-import index currently exists; do not
@@ -131,9 +139,10 @@ object-version binding, component boundaries and dev/main review requirements.
 
 P4-R2 adds an explicit Rust production transport and two administrator pipeline
 interfaces; see [R2 transport](docs/R2_TRANSPORT.md) for configuration, gates and
-whole-TAR spool/memory limits. The minimal live capability batch stopped BLOCKED;
-these interfaces do not certify real production Range, immutable version binding
-or a ready production index. Ordinary fetch still requires a verified local package
+whole-TAR spool/memory limits. The early minimal live capability batch stopped
+BLOCKED (historical R2 evidence); subsequent approved small real closure evidence is
+linked above. Neither those small closures nor these interfaces certify a complete
+production-scale index. Ordinary fetch still requires a verified local package
 and must not implicitly scan. No real full-TAR download or large-repo build was run.
 
 ## Installation and CLI

@@ -334,6 +334,75 @@ def inputs(tmp_path):
     return rt, roots, mapping, tmp_path / "publication", row
 
 
+@pytest.mark.parametrize("invalid", [False, True])
+def test_hash_batch_single_conversion_and_validate_before_insert(inputs, monkeypatch, invalid):
+    from sakurapool.storage.publication import PublicationCorrupt
+
+    rt, roots, mapping, out, _ = inputs
+    parquet = pq.ParquetFile
+    conversions = []
+    inserted_batches = []
+    connect = sqlite3.connect
+
+    class Connection(sqlite3.Connection):
+        def executemany(self, sql, parameters):
+            if sql == "INSERT INTO hashes VALUES(?,?)":
+                inserted_batches.append(1)
+            return super().executemany(sql, parameters)
+
+    def observed_connect(*args, **kwargs):
+        kwargs["factory"] = Connection
+        return connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", observed_connect)
+
+    class HashBatch:
+        def __init__(self, batch):
+            self.batch = batch
+
+        def to_pylist(self):
+            conversions.append(1)
+            rows = self.batch.to_pylist()
+            if invalid:
+                # A valid first row must not hide a later invalid hash.
+                rows.append(dict(rows[0], sha256="invalid"))
+            return rows
+
+    class Parquet:
+        def __init__(self, *args, **kwargs):
+            self.file = parquet(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self.file, name)
+
+        def __enter__(self):
+            self.file.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.file.__exit__(*args)
+
+        def iter_batches(self, **kwargs):
+            for batch in self.file.iter_batches(**kwargs):
+                if kwargs.get("columns") == ["record_id", "hash_source", "hash_kind", "sha256"]:
+                    yield HashBatch(batch)
+                else:
+                    yield batch
+
+    monkeypatch.setattr(pq, "ParquetFile", Parquet)
+    if invalid:
+        with pytest.raises(PublicationCorrupt, match="reliable image SHA required"):
+            build_publication(rt, roots, mapping, out)
+        assert not (out / "READY").exists()
+        assert inserted_batches == []
+    else:
+        build_publication(rt, roots, mapping, out)
+        assert inserted_batches == [1]
+        with load_publication(out, full_verify=True) as publication:
+            assert publication.hashes[0].tobytes() == hashlib.sha256(b"image").digest()
+    assert len(conversions) == 1
+
+
 def test_build_open_cli(inputs):
     rt, roots, mapping, out, _ = inputs
     m = build_publication(rt, roots, mapping, out)

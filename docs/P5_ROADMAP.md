@@ -3,8 +3,12 @@
 A: publication construction, serial reader, safe diagnostics and foundations.
 B: recoverable serial task plan/state; certified real closure complete, see
 [REAL_CLOSURE_REPORT](../reports/P5B/REAL_CLOSURE_REPORT.md).
-C: bounded local pipeline/concurrency; authorized implementation in progress, not certified.
-D: production-scale validation; NOT STARTED. Directions, not approvals.
+C: bounded local pipeline/concurrency; approved and merged. Default workers=1;
+2/4 are explicit upper bounds, constrained by object affinity and admission.
+D: production-scale validation; currently authorized and in progress, not completed.
+Existing small canaries do not certify complete production-scale input coverage.
+PublicationSession remains serial/same-thread; task concurrency is owned by the
+coordinator and its lanes, not a shared session scheduler.
 
 ## B design contract
 
