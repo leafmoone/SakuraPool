@@ -1,6 +1,7 @@
 """Legacy rejection diagnostics preserve strict admission; offline only."""
 
 import json
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -81,14 +82,61 @@ def test_accepted_unchanged(monkeypatch, revision, candidate, sha):
     assert len(rows) == 1 and complete
 
 
-@pytest.mark.parametrize("bad", ["master", "", "garbage", "a" * 39])
-def test_pinned_still_requires_entry_revision_syntax(monkeypatch, bad):
+@pytest.mark.parametrize("revision", [A, "d" * 64])
+@pytest.mark.parametrize("candidate", ["", None, "missing", A, B, "e" * 64])
+def test_pinned_optional_entry_revision_binds_download_to_request(monkeypatch, revision, candidate):
+    row = entry(Revision=candidate)
+    if candidate == "missing":
+        del row["Revision"]
+    rows, complete = parse(monkeypatch, [row], revision=revision)
+    assert complete and len(rows) == 1
+    listed = rows[0]
+    assert listed.revision_candidate == revision
+    assert (listed.path, listed.size, listed.provider_sha256, listed.lfs) == (
+        "gc5m/test.tar", 12, DIGEST, False,
+    )
+    provider = object.__new__(ModelScopeDataset)
+    provider.base = "https://modelscope.cn/api/v1/datasets/test/repo"
+    query = parse_qs(urlsplit(provider.download_url(listed.revision_candidate, listed.path)).query)
+    assert query == {"Revision": [revision], "FilePath": [listed.path]}
+
+
+@pytest.mark.parametrize("revision", ["master", A, "d" * 64])
+@pytest.mark.parametrize("bad", ["master", "garbage", "a" * 39, "a" * 41,
+                                 "a" * 63, "a" * 65, "A" * 40, " ",
+                                 "a" * 40 + "\n", False, 0, 123, [], {}])
+def test_nonempty_invalid_entry_revision_rejected(monkeypatch, revision, bad):
     with pytest.raises(RemoteIOError) as caught:
-        parse(monkeypatch, [entry(Revision=bad)])
+        parse(monkeypatch, [entry(Revision=bad)], revision=revision)
     assert caught.value.public_diagnostic() == {
         "code": "provider_entry_revision_shape",
         "phase": "provider_listing_shape", "accounting": "UNKNOWN",
     }
+
+
+@pytest.mark.parametrize("candidate", ["", None, "missing"])
+def test_master_requires_entry_candidate(monkeypatch, candidate):
+    row = entry(Revision=candidate)
+    if candidate == "missing":
+        del row["Revision"]
+    with pytest.raises(RemoteIOError) as caught:
+        parse(monkeypatch, [row], revision="master")
+    assert caught.value.code == "provider_entry_revision_shape"
+
+
+@pytest.mark.parametrize("revision", ["", None, False, 123, "main", "a" * 7,
+                                     "a" * 39, "a" * 41, "a" * 63, "a" * 65,
+                                     "A" * 40, "a" * 40 + "\n"])
+def test_invalid_request_revision_rejected_before_metadata(monkeypatch, revision):
+    provider = object.__new__(ModelScopeDataset)
+    provider._legacy_verified_id = 7
+
+    def unexpected_read(*args, **kwargs):
+        pytest.fail("invalid request revision must not reach metadata HTTP")
+
+    monkeypatch.setattr(provider, "_data", unexpected_read)
+    with pytest.raises(ValueError, match="legacy tree scope invalid"):
+        provider.legacy_tree_page(7, revision, root="gc5m")
 
 
 def test_guard_order(monkeypatch):

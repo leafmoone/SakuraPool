@@ -1,13 +1,12 @@
 {
   "validated_scope": "20261004T143905Z-upload",
-  "validation": "PARTIAL",
+  "validation": "COMPLETE_FOR_FROZEN_SCOPE",
   "gates": {
     "SNAPSHOT_INPUT": "PASS",
     "P3_COMPILE": "PASS",
     "PUBLICATION_BUILD": "PASS",
     "PRODUCTION_SCALE_QUERY": "PASS_WITH_SUBSET_REFERENCE",
-    "REAL_MULTI_OBJECT_TASK": "BLOCKED",
-    "BLOCK_REASON": "SOURCE_REVISION_BINDING"
+    "REAL_MULTI_OBJECT_TASK": "PASS"
   },
   "capacity": {
     "components": {
@@ -671,5 +670,80 @@
       "CommitId": null
     }
   },
-  "historical_pending_comparison": "NOT_COMPLETED"
+  "historical_pending_comparison": "NOT_COMPLETED",
+  "previous_validation": "PARTIAL",
+  "resume": {
+    "task": "D:\\SakuraTool\\SakuraPool-P4-work\\p5d-fixed-multi-96e9c394114e",
+    "state": "PASS",
+    "verification": {
+      "files": [
+        {
+          "seq": 0,
+          "image_bytes": 165548,
+          "image_sha_matches": true,
+          "metadata_bytes": 5086,
+          "json_object": true,
+          "metadata_sha_basis": "delivery receipt; no independent publication SHA"
+        },
+        {
+          "seq": 1,
+          "image_bytes": 340319,
+          "image_sha_matches": true,
+          "metadata_bytes": 4131,
+          "json_object": true,
+          "metadata_sha_basis": "delivery receipt; no independent publication SHA"
+        },
+        {
+          "seq": 2,
+          "image_bytes": 909963,
+          "image_sha_matches": true,
+          "metadata_bytes": 3794,
+          "json_object": true,
+          "metadata_sha_basis": "delivery receipt; no independent publication SHA"
+        }
+      ],
+      "attempts": 4,
+      "history_attempts": 1,
+      "new_attempts": 3,
+      "delivered_confirmed": 3,
+      "unknown": 0
+    },
+    "historical_pending_comparison": "NOT_COMPLETED",
+    "new_pending_comparison": "PASS",
+    "history_attempt_rows_unchanged": true,
+    "secondary_errors": [],
+    "first": {
+      "state": "PAUSED",
+      "delivered": 1,
+      "seconds": 49.134897999989334,
+      "workers": 1
+    },
+    "fresh_process": {
+      "state": "COMPLETED",
+      "delivered": 3,
+      "seconds": 72.61905660002958,
+      "workers": 2
+    },
+    "partial_export": {
+      "exported": 1,
+      "bytes": 788
+    },
+    "final_export": {
+      "exported": 3,
+      "bytes": 2347
+    },
+    "global_delta_not_delivery_receipt": {
+      "body": 2120681,
+      "metadata": 690523,
+      "disk": 1454080,
+      "records": 0,
+      "saved_samples": 3,
+      "saved_bytes": 1428841,
+      "inflight": 0,
+      "attempts": 44
+    },
+    "executed_tree": "35747892e94b46677a6b3cef03267434b296394a",
+    "p2_p3_publication_rebuilt": false,
+    "capacity_gzip_remeasured": false
+  }
 }

@@ -1,6 +1,61 @@
 # P5-D 最小收敛与可用输入验证报告
 
-## 固定生产快照续验证（当前有效结论）
+## Pinned optional-entry compatibility 与原任务恢复（当前有效结论）
+
+```text
+P5_D = WAITING_REVIEW
+BASE_SHA = 1354a07ea8d66aa912d1d8a72c7b88607501e31f
+PINNED_EMPTY_ENTRY_REVISION = PASS
+MASTER_CANDIDATE_BEHAVIOR = PASS
+EXACT_PROVIDER_DIGEST_CHECK = PASS
+TARGETED_REGRESSION = PASS
+EXISTING_TASK_RESUMED = YES
+HISTORICAL_FAILED_ATTEMPT_PRESERVED = YES
+REAL_THREE_SOURCE_THREE_OBJECT_TASK = PASS
+REAL_METADATA = PASS
+REAL_PAUSE_RESUME_EXPORT = PASS
+DELIVERED_CONFIRMED = 3
+UNKNOWN_ACCOUNTING_COUNT = 0
+PREVIOUS_PENDING_COMPARISON = NOT_COMPLETED
+THIS_RESUME_PENDING_COMPARISON = PASS
+P2_P3_PUBLICATION_REBUILT = NO
+CAPACITY_AND_GZIP_REMEASURED = NO
+P5_D_VALIDATION = COMPLETE_FOR_FROZEN_SCOPE
+VALIDATED_SCOPE = 20261004T143905Z-upload
+MAIN_MODIFIED = NO
+INDEX_MACHINE_OPERATIONS = 0
+GLOBAL_INDEX_BUILD_COMPLETE = NOT_CLAIMED
+```
+
+当前用户明确批准新兼容契约替代上轮resolved-echo不足阻断策略。请求revision仍仅master或合法完整40/64位commit，短/非法在HTTP前拒绝。master必须合法entry candidate；pinned entry Revision空字符串/null/缺失可解析，合法same/different不覆盖request pin，非空非法type/format拒绝。ListedFile.revision_candidate与download URL始终同request pin。entry为可选metadata，不声称有不存在的resolved commit回显；provider独立内容摘要/path/size一致性和运行时fresh strong ETag If-Match、Range及独立image SHA仍须通过，未退master/latest、换repo/version或猜revision。
+
+### 定向离线证据与候选身份
+
+本轮先核statusclean/dev与origin1354、maina9c。实际Python3.13.15，导入D:/SakuraTool/SakuraPool-p5a-clean/src/sakurapool/__init__.py（当前源码，无旧wheel），复用keeper/worker，无Rust重建。委派产品回执称定向149passed/12deselected26.00s，但未保留完整命令/过滤条件，无法准确确认12deselected原因，不补造；此数仅背景，不作为可复核统计。为补足直接证据，主代理执行 `$PY -m pytest -q tests/test_legacy_tree_typed.py tests/test_legacy_pinned_lookup.py` exit0：103passed0.28s/no deselected。此前误带不存在的tests/test_legacy_control_plane.py命令exit4/no tests ran，已纠正路径；未扩历史矩阵或重网。新增空/null/缺失40/64pin及合法不同entry、非法fields、master/短request、整页可定位与digest阻断均覆盖。另命令 `$PY -m pytest -q tests/test_task_runner.py::test_pause_request_then_explicit_resume tests/test_task_resources.py::test_unrelated_historical_pending_does_not_block_confirmed_task tests/test_task_runner.py::test_range_exit_settlement_failure_never_confirmed` exit0：3passed21.67s。
+
+harness原4项内存合成覆盖主异常保留、finally审计、历史attempt行变更拒绝及错误脱敏；收口另5 faultcases：主异常+after失败、主异常+TaskDB失败、主异常+metrics和print同时失败、无primary成功路径metrics+print失败保原metrics错误、原AssertionError+metrics/print失败保原AssertionError，均exit0。必要读取失败新比较NOT_COMPLETED，不掩原异常；close失败只safe固定worker_close secondary。无全pending/historyrows落盘或额外hash。
+
+sole产品有限核与harness集中候选49dd00c3f1619bcb0da3c724262dfa58645dc7c3通过；最后授权最小修后实际网络执行tree `35747892e94b46677a6b3cef03267434b296394a`。最后报告/指标变更不重新制造认证，最终commit/tree交付正文列实际值，不自引用。
+
+### 原三source/三TAR真实闭环
+
+实际命令：`D:/SakuraTool/SakuraPool-Fix3-20260930a/python-env/Scripts/python.exe -u reports/P5D/real_multi_object.py --continue-existing D:/SakuraTool/SakuraPool-P4-work/p5d-fixed-multi-96e9c394114e`，job bash_b996690e exit0。
+
+只读预检验证已有plan/contentdigest/snapshot与冻结selection一致；原首READY/CONFIRMED无交付、余两READY/NONE未运行、UNKNOWN0、无输出冲突且预算满足。未手工改状态或删attempt/pending。正式resume=True workers1，首SETTLED请求PAUSE：PAUSED/delivered1、余2READY，49.134898s（run+close）。partial export1/788B。新Python进程、新transport/session workers2 resume：COMPLETED/delivered3/UNKNOWN0，72.619057s（run+close），final3/2347B；冻结seq0,1,2/record唯一，partial为final前缀。workers2为上界不宣称实测双lane并发。
+
+|seq/source/object|image B|独立pub imageSHA+extent|JSON B|JSON验证|
+|---|---:|---|---:|---|
+|0 anime_pictures/object0|165548|PASS|5086|extent+dict解析+delivery receipt PASS|
+|1 bangumi/object8|340319|PASS|4131|extent+dict解析+delivery receipt PASS|
+|2 konachan/object8352|909963|PASS|3794|extent+dict解析+delivery receipt PASS|
+
+原失败attempt1逐行保持；新增attempt3/total4，非硬编码总3。全部3item DONE/PUBLISHED/CONFIRMED，UNKNOWN items/attempts均0，无重复累计交付。全局ledger本次delta body2120681/meta690523/disk1454080/attempt44/saved_samples3/saved_bytes1428841，inflight前后0；全局网络attempt44不同于任务attempt4，不作为交付receipt。before pending仅父内存、本次after相等PASS，历史比较永久NOT_COMPLETED不追认。finally after与TaskDB读取成功，secondary_errors=[]。
+
+证据新owned `D:/SakuraTool/SakuraPool-P5D-20261004T143905Z/real-multi-object-resume-metrics.json`；exports在原task/partial.jsonl、final.jsonl，交付在原task/output。未重扫TAR/解包/编译/Pub/gzip/容量/全query；未索引机操作、上传或可见性变更。COMPLETE_FOR_FROZEN_SCOPE仅汇合下方已有输入/P3/Pub/有界query门及本次真实门，独立语义参照仍SUBSET_ONLY，无全局索引完成、生产吞吐或新增多版本/Rust认证声明。
+
+## 固定生产快照续验证历史（上轮 PARTIAL 时点）
+
+> 下节旧BLOCKED、parser未放宽、不resume等陈述保留上轮事实，已由上方用户批准兼容契约和本次真实恢复替代；旧pending比较未完成仍永久成立。
 
 ```text
 P5_D = WAITING_REVIEW

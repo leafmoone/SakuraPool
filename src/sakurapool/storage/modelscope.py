@@ -240,12 +240,15 @@ class ModelScopeDataset:
             if type(size) is not int or not 0 <= size <= 1 << 50:
                 raise _io_error(self, "legacy tree size invalid", code="provider_entry_size",
                                     phase="provider_listing_shape")
-            if not isinstance(candidate, str) or not _SHA.fullmatch(candidate):
+            candidate_absent = candidate is None or candidate == ""
+            if ((revision == "master" or not candidate_absent)
+                    and (not isinstance(candidate, str) or not _SHA.fullmatch(candidate))):
                 raise _io_error(self, "legacy tree revision invalid",
                                     code="provider_entry_revision_shape",
                                     phase="provider_listing_shape")
-            # Entry Revision identifies the entry's commit; a pinned request
-            # identifies the dataset snapshot whose tree was requested.
+            # Entry Revision is optional last-modified metadata for a pinned
+            # snapshot. Only master discovery needs it to identify a candidate;
+            # pinned tree identities and download URLs always use the request.
             effective_revision = candidate if revision == "master" else revision
             seen.add(path)
             sha = entry.get("Sha256")

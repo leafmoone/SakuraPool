@@ -1,4 +1,3 @@
-"""Approved same-TAR first3 tasks; historical pending only in parent memory."""
 import argparse
 import hashlib
 import json
@@ -33,6 +32,16 @@ def pending(ledger):
         return ledger._read_pair()[1][2]
 
 
+def safe_error(error):
+    # Never serialize exception messages, subprocess output, or arbitrary provider codes.
+    code = getattr(error, "code", None)
+    safe_codes = {"RESOURCE_BLOCKED", "OUTPUT_CONFLICT", "EXPORT_CONFLICT",
+                  "PUBLICATION_IDENTITY_MISMATCH", "PLAN_IDENTITY_MISMATCH",
+                  "BLOCKED_ACCOUNTING", "RUNNER_BUSY", "FETCH_UNCONFIRMED"}
+    return {"type": type(error).__name__,
+            "code": code if isinstance(code, str) and code in safe_codes else "HARNESS_ERROR"}
+
+
 def run(task, workers, resume=False, pause=False):
     ledger, config = BudgetLedger(), profile()
 
@@ -47,14 +56,27 @@ def run(task, workers, resume=False, pause=False):
         result = run_task(task, transport, workers=workers, resume=resume,
                           fault_hook=hook, connection_profile=config)
     finally:
-        transport.close()
+        primary = sys.exc_info()[1]
+        try:
+            transport.close()
+        except BaseException:
+            if primary is None:
+                raise
+            try:
+                print('{"secondary": "worker_close"}', file=sys.stderr, flush=True)
+            except BaseException:
+                pass
     return {"result": result, "run_close_seconds": time.perf_counter() - start}
 
 
-def verify(task_path, metadata):
+def verify(task_path, metadata, history_attempts=0):
+    assert type(history_attempts) is int and history_attempts >= 0
     files = []
     with TaskDB(task_path, readonly=True) as task, load_publication(PUB) as pub:
+        task.validate_plan()
         for item in task.db.execute("SELECT * FROM items ORDER BY seq"):
+            assert (item["state"], item["delivery"], item["accounting"]) == (
+                "DONE", "PUBLISHED", "CONFIRMED")
             verify_delivery(task, item)
             rid = pub.runtime.resolve_record(item["record_id"]).rid
             loc = pub.runtime.location(rid)
@@ -70,9 +92,14 @@ def verify(task_path, metadata):
                             metadata_sha_basis="delivery receipt; no independent publication SHA")
             files.append(info)
         attempts = task.db.execute("SELECT count(*) FROM attempts").fetchone()[0]
-        assert attempts == 3 and [f["seq"] for f in files] == [0, 1, 2]
-        return {"files": files, "attempts": attempts,
-                "unknown": task.inspect()["unknown_accounting_count"]}
+        new_attempts = attempts - history_attempts
+        assert new_attempts == 3 and [f["seq"] for f in files] == [0, 1, 2]
+        inspection = task.inspect()
+        assert inspection["delivered_confirmed"] == 3
+        assert inspection["unknown_accounting_count"] == 0
+        return {"files": files, "attempts": attempts, "history_attempts": history_attempts,
+                "new_attempts": new_attempts, "delivered_confirmed": 3,
+                "unknown": inspection["unknown_accounting_count"]}
 
 
 def main():
