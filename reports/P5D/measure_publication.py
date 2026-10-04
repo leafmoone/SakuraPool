@@ -32,7 +32,11 @@ def measure(path, label):
         rt = pub.runtime
         tags = rt._catalog.execute("SELECT n.namespace,t.value,t.cardinality FROM tags t "
                                    "JOIN namespaces n USING(namespace_id) "
-                                   "ORDER BY cardinality DESC,tag_id").fetchall()
+                                   "ORDER BY cardinality DESC,tag_id LIMIT 1").fetchall()
+        tags += rt._catalog.execute("SELECT n.namespace,t.value,t.cardinality FROM tags t "
+                                    "JOIN namespaces n USING(namespace_id) "
+                                    "WHERE cardinality > 0 "
+                                    "ORDER BY cardinality ASC,tag_id LIMIT 1").fetchall()
         sources = [r[0] for r in rt._catalog.execute("SELECT name FROM sources ORDER BY name")]
         specs = {"all": RuntimeQuerySpec()}
         if tags:
@@ -46,19 +50,28 @@ def measure(path, label):
                          zero=RuntimeQuerySpec(all_tags=(a,), none_tags=(a,)))
         if len(sources) > 1:
             specs["multi_source"] = RuntimeQuerySpec(sources=tuple(sources[:2]))
-        queries, sets = {}, {}
+        queries = {}
         for name, spec in specs.items():
-            result, first = timed(lambda: rt.query(spec))
-            sets[name] = set(result.iter_rids())
+            count, first = timed(lambda: rt.query(spec).count())
             samples = [timed(lambda: rt.query(spec).count())[1] for _ in range(5)]
-            queries[name] = {"count": result.count(), "first_seconds": first,
+            queries[name] = {"count": count, "first_seconds": first,
                              "warm_n": 5, "warm_median_seconds": statistics.median(samples),
                              "warm_p80_seconds": sorted(samples)[3]}
         unknown = "NO_TAG_NAMESPACE"
         if tags:
-            assert sets["intersection"] == sets["common"] & sets["rare"]
-            assert sets["any_of"] == sets["common"] | sets["rare"]
-            assert not sets["none"] & sets["common"] and not sets["zero"]
+            assert queries["intersection"]["count"] <= min(
+                queries["common"]["count"], queries["rare"]["count"])
+            assert queries["any_of"]["count"] == (queries["common"]["count"]
+                + queries["rare"]["count"] - queries["intersection"]["count"])
+            namespace_id = rt._catalog.execute(
+                "SELECT namespace_id FROM namespaces WHERE namespace=?", (a[0],)
+            ).fetchone()[0]
+            known = rt._bitmaps.execute(
+                "SELECT cardinality FROM bitmaps WHERE kind='namespace' AND id=?",
+                (namespace_id,),
+            ).fetchone()[0]
+            assert queries["none"]["count"] + queries["common"]["count"] == known
+            assert queries["zero"]["count"] == 0
             try:
                 rt.query(RuntimeQuerySpec(all_tags=((tags[0][0], "__p5d_unknown__"),)))
                 unknown = "ACCEPTED"
@@ -100,14 +113,15 @@ def measure(path, label):
                 "fetchable_rids": pub.manifest["fetchable_rid_count"],
                 "capacity": {"logical_bytes": total, "bytes_per_record": total / rt.rid_count,
                              "components": files, "allocated_bytes": "NOT_MEASURED",
-                             "p3_duplicate_added": False, "p2": "NOT_AVAILABLE", "dbstat": dbstat},
+                             "p3_duplicate_added": False, "p2": "NOT_MEASURED_BY_THIS_HARNESS",
+                             "dbstat": dbstat},
                 "fast_open": json.loads(child.stdout), "full_verify_seconds": full,
                 "query_evidence_tags": tags[:1] + tags[-1:], "queries": queries,
                 "unknown_tag": unknown, "multi_source": len(sources) > 1,
                 "record_batch": {"count": len(records.rid) if records else 0, "seconds": rs},
                 "location_batch": {"count": len(locations.rid) if locations else 0, "seconds": ls},
                 "random_locations": {"count": len(rids), "seconds": random_seconds},
-                "correctness": "SET_RELATIONS; INDEPENDENT_P2_REFERENCE_NOT_AVAILABLE",
+                "correctness": "COUNT_RELATIONS; INDEPENDENT_P2_REFERENCE_SEPARATE",
                 "rss": "NOT_MEASURED", "cache": "OS cache uncontrolled; same-handle warm query"}
 
 

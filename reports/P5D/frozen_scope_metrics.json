@@ -1,0 +1,675 @@
+{
+  "validated_scope": "20261004T143905Z-upload",
+  "validation": "PARTIAL",
+  "gates": {
+    "SNAPSHOT_INPUT": "PASS",
+    "P3_COMPILE": "PASS",
+    "PUBLICATION_BUILD": "PASS",
+    "PRODUCTION_SCALE_QUERY": "PASS_WITH_SUBSET_REFERENCE",
+    "REAL_MULTI_OBJECT_TASK": "BLOCKED",
+    "BLOCK_REASON": "SOURCE_REVISION_BINDING"
+  },
+  "capacity": {
+    "components": {
+      "publication": {
+        "files": 12,
+        "logical_bytes": 2204511811,
+        "api_reported_stored_bytes": 2204511811,
+        "allocated_bytes": "NOT_MEASURED"
+      },
+      "runtime": {
+        "files": 8,
+        "logical_bytes": 1919841657,
+        "api_reported_stored_bytes": 1919841657,
+        "allocated_bytes": "NOT_MEASURED"
+      },
+      "download": {
+        "files": 10,
+        "logical_bytes": 4782411532,
+        "api_reported_stored_bytes": 4782411532,
+        "allocated_bytes": "NOT_MEASURED"
+      },
+      "extracted": {
+        "files": 43470,
+        "logical_bytes": 6020561957,
+        "api_reported_stored_bytes": 6020561957,
+        "allocated_bytes": "NOT_MEASURED"
+      }
+    },
+    "allocation_method": "GetCompressedFileSizeW reported stored bytes; not a verified allocation measurement",
+    "P2_only": {
+      "files": 42667,
+      "logical_bytes": 5998741658,
+      "basis": "already verified streaming member manifests and formal loader"
+    },
+    "publication_archive": {
+      "path": "D:\\SakuraTool\\SakuraPool-P5D-20261004T143905Z\\publication.tar.gz",
+      "bytes": 1336756276,
+      "seconds": 94.21982680005021,
+      "format": "tar.gz gzip6",
+      "files": 12,
+      "scope": "publication only, no P2 or independent runtime",
+      "status": "MEASURED"
+    }
+  },
+  "production": {
+    "label": "fixed_production_20261004T143905Z-upload",
+    "publication": "D:\\SakuraTool\\SakuraPool-P5D-20261004T143905Z\\publication",
+    "content_digest": "c186f0a93d9bcf036f54a926ddae3b43aef35d6cfac4eb6dae2151abebcbd0eb",
+    "snapshot": "226a63935e73dc3d628024615425ad9d75b985686646d15dec151aec205feede",
+    "records": 8782107,
+    "sources": [
+      "anime_pictures",
+      "bangumi",
+      "danbooru",
+      "konachan",
+      "yande"
+    ],
+    "objects": 8480,
+    "fetchable_objects": 8480,
+    "fetchable_rids": 8782107,
+    "capacity": {
+      "logical_bytes": 2204511811,
+      "bytes_per_record": 251.02310994388932,
+      "components": [
+        {
+          "component": "image_sha256.npy",
+          "bytes": 281027552,
+          "percent": 12.747836078615594,
+          "bytes_per_record": 32.00001457509001
+        },
+        {
+          "component": "PUBLICATION.json",
+          "bytes": 1194,
+          "percent": 5.41616513026702e-05,
+          "bytes_per_record": 0.00013595826149692778
+        },
+        {
+          "component": "READY",
+          "bytes": 64,
+          "percent": 2.9031370882503292e-06,
+          "bytes_per_record": 7.287545004860451e-06
+        },
+        {
+          "component": "remote_objects.sqlite",
+          "bytes": 3641344,
+          "percent": 0.16517688777309072,
+          "bytes_per_record": 0.41463216059654023
+        },
+        {
+          "component": "runtime\\current.json",
+          "bytes": 240,
+          "percent": 1.0886764080938735e-05,
+          "bytes_per_record": 2.732829376822669e-05
+        },
+        {
+          "component": "runtime\\snapshots\\226a63935e73dc3d628024615425ad9d75b985686646d15dec151aec205feede\\bitmaps.sqlite",
+          "bytes": 551206912,
+          "percent": 25.00358171136149,
+          "bytes_per_record": 62.76476840922116
+        },
+        {
+          "component": "runtime\\snapshots\\226a63935e73dc3d628024615425ad9d75b985686646d15dec151aec205feede\\catalog.sqlite",
+          "bytes": 1026129920,
+          "percent": 46.546809814302236,
+          "bytes_per_record": 116.84324957552897
+        },
+        {
+          "component": "runtime\\snapshots\\226a63935e73dc3d628024615425ad9d75b985686646d15dec151aec205feede\\locations.npy",
+          "bytes": 342502511,
+          "percent": 15.536433476608849,
+          "bytes_per_record": 39.000038487347055
+        },
+        {
+          "component": "runtime\\snapshots\\226a63935e73dc3d628024615425ad9d75b985686646d15dec151aec205feede\\OWNER.json",
+          "bytes": 488,
+          "percent": 2.213642029790876e-05,
+          "bytes_per_record": 5.5567530662060936e-05
+        },
+        {
+          "component": "runtime\\snapshots\\226a63935e73dc3d628024615425ad9d75b985686646d15dec151aec205feede\\READY",
+          "bytes": 64,
+          "percent": 2.9031370882503292e-06,
+          "bytes_per_record": 7.287545004860451e-06
+        },
+        {
+          "component": "runtime\\snapshots\\226a63935e73dc3d628024615425ad9d75b985686646d15dec151aec205feede\\SNAPSHOT.json",
+          "bytes": 1517,
+          "percent": 6.881342129493358e-05,
+          "bytes_per_record": 0.00017273759019333288
+        },
+        {
+          "component": "runtime\\snapshots\\226a63935e73dc3d628024615425ad9d75b985686646d15dec151aec205feede\\STAGE.txt",
+          "bytes": 5,
+          "percent": 2.2680758501955696e-07,
+          "bytes_per_record": 5.693394535047228e-07
+        }
+      ],
+      "allocated_bytes": "NOT_MEASURED",
+      "p3_duplicate_added": false,
+      "p2": "NOT_MEASURED_BY_THIS_HARNESS",
+      "dbstat": {
+        "remote_objects.sqlite": {
+          "btree": [
+            [
+              "objects",
+              2428928,
+              2250198,
+              118518
+            ],
+            [
+              "sqlite_autoindex_objects_1",
+              1196032,
+              1009201,
+              157891
+            ],
+            [
+              "sqlite_schema",
+              4096,
+              845,
+              3120
+            ],
+            [
+              "meta",
+              4096,
+              143,
+              3940
+            ],
+            [
+              "repositories",
+              4096,
+              83,
+              4001
+            ],
+            [
+              "sqlite_autoindex_repositories_1",
+              4096,
+              83,
+              4002
+            ]
+          ],
+          "file_minus_btree_bytes": 0,
+          "freelist_pages": 0
+        },
+        "runtime\\snapshots\\226a63935e73dc3d628024615425ad9d75b985686646d15dec151aec205feede\\bitmaps.sqlite": {
+          "btree": [
+            [
+              "bitmaps",
+              536293376,
+              508205489,
+              21646216
+            ],
+            [
+              "sqlite_autoindex_bitmaps_1",
+              14901248,
+              10567508,
+              1836256
+            ],
+            [
+              "sqlite_schema",
+              4096,
+              446,
+              3525
+            ],
+            [
+              "bitmaps_meta",
+              4096,
+              72,
+              4012
+            ],
+            [
+              "sqlite_autoindex_bitmaps_meta_1",
+              4096,
+              68,
+              4017
+            ]
+          ],
+          "file_minus_btree_bytes": 0,
+          "freelist_pages": 0
+        },
+        "runtime\\snapshots\\226a63935e73dc3d628024615425ad9d75b985686646d15dec151aec205feede\\catalog.sqlite": {
+          "btree": [
+            [
+              "records",
+              327188480,
+              264359456,
+              2049485
+            ],
+            [
+              "sqlite_autoindex_records_1",
+              243601408,
+              193566955,
+              22974460
+            ],
+            [
+              "records_source_post",
+              174936064,
+              127750066,
+              20327173
+            ],
+            [
+              "records_dataset_post",
+              174936064,
+              127750066,
+              20327173
+            ],
+            [
+              "tags",
+              24399872,
+              17336333,
+              2071375
+            ],
+            [
+              "sqlite_autoindex_tags_1",
+              23166976,
+              18364656,
+              2280641
+            ],
+            [
+              "tag_categories_category_tag",
+              18903040,
+              14050707,
+              2343065
+            ],
+            [
+              "sqlite_autoindex_tag_categories_1",
+              18878464,
+              14050707,
+              2318561
+            ],
+            [
+              "tag_categories",
+              15814656,
+              10811746,
+              46133
+            ],
+            [
+              "objects",
+              3063808,
+              2809878,
+              191240
+            ],
+            [
+              "sqlite_autoindex_objects_1",
+              1196032,
+              1009201,
+              157891
+            ],
+            [
+              "sqlite_schema",
+              4096,
+              3121,
+              775
+            ],
+            [
+              "meta",
+              4096,
+              157,
+              3926
+            ],
+            [
+              "sqlite_autoindex_meta_1",
+              4096,
+              68,
+              4017
+            ],
+            [
+              "sources",
+              4096,
+              57,
+              4011
+            ],
+            [
+              "sqlite_autoindex_sources_1",
+              4096,
+              60,
+              4013
+            ],
+            [
+              "datasets",
+              4096,
+              80,
+              3988
+            ],
+            [
+              "sqlite_autoindex_datasets_1",
+              4096,
+              75,
+              3998
+            ],
+            [
+              "formats",
+              4096,
+              32,
+              4036
+            ],
+            [
+              "sqlite_autoindex_formats_1",
+              4096,
+              36,
+              4037
+            ],
+            [
+              "namespaces",
+              4096,
+              92,
+              3976
+            ],
+            [
+              "sqlite_autoindex_namespaces_1",
+              4096,
+              95,
+              3978
+            ]
+          ],
+          "file_minus_btree_bytes": 0,
+          "freelist_pages": 0
+        }
+      }
+    },
+    "fast_open": {
+      "seconds": 0.014127600006759167,
+      "records": 8782107,
+      "digest": "c186f0a93d9bcf036f54a926ddae3b43aef35d6cfac4eb6dae2151abebcbd0eb"
+    },
+    "full_verify_seconds": 7.1320356000214815,
+    "query_evidence_tags": [
+      [
+        "danbooru_native",
+        "1girl",
+        3618837
+      ],
+      [
+        "anime_pictures_native",
+        "belarus_(hetalia)",
+        1
+      ]
+    ],
+    "queries": {
+      "all": {
+        "count": 8782107,
+        "first_seconds": 7.200002437457442e-05,
+        "warm_n": 5,
+        "warm_median_seconds": 1.6400008462369442e-05,
+        "warm_p80_seconds": 1.7400016076862812e-05
+      },
+      "common": {
+        "count": 3618837,
+        "first_seconds": 0.0013780000153928995,
+        "warm_n": 5,
+        "warm_median_seconds": 0.0002294000005349517,
+        "warm_p80_seconds": 0.0002820999943651259
+      },
+      "rare": {
+        "count": 1,
+        "first_seconds": 0.00012690003495663404,
+        "warm_n": 5,
+        "warm_median_seconds": 6.230000872164965e-05,
+        "warm_p80_seconds": 6.499997107312083e-05
+      },
+      "intersection": {
+        "count": 0,
+        "first_seconds": 0.0001716000260785222,
+        "warm_n": 5,
+        "warm_median_seconds": 0.0001705000177025795,
+        "warm_p80_seconds": 0.00017309997929260135
+      },
+      "any_of": {
+        "count": 3618838,
+        "first_seconds": 0.00042500003473833203,
+        "warm_n": 5,
+        "warm_median_seconds": 0.0003307000151835382,
+        "warm_p80_seconds": 0.00046640000073239207
+      },
+      "none": {
+        "count": 1577200,
+        "first_seconds": 0.0017599000129848719,
+        "warm_n": 5,
+        "warm_median_seconds": 0.000825399998575449,
+        "warm_p80_seconds": 0.0008854999905452132
+      },
+      "zero": {
+        "count": 0,
+        "first_seconds": 0.0011435000342316926,
+        "warm_n": 5,
+        "warm_median_seconds": 0.0014413000317290425,
+        "warm_p80_seconds": 0.0017544000293128192
+      },
+      "multi_source": {
+        "count": 3543721,
+        "first_seconds": 0.0017130000051110983,
+        "warm_n": 5,
+        "warm_median_seconds": 0.00018319999799132347,
+        "warm_p80_seconds": 0.0002541999565437436
+      }
+    },
+    "unknown_tag": "UnknownQueryValueError",
+    "multi_source": true,
+    "record_batch": {
+      "count": 32,
+      "seconds": 0.00023100001271814108
+    },
+    "location_batch": {
+      "count": 32,
+      "seconds": 5.8999983593821526e-05
+    },
+    "random_locations": {
+      "count": 16,
+      "seconds": 6.990000838413835e-05
+    },
+    "correctness": "COUNT_RELATIONS; INDEPENDENT_P2_REFERENCE_SEPARATE",
+    "rss": "NOT_MEASURED",
+    "cache": "OS cache uncontrolled; same-handle warm query"
+  },
+  "reference": {
+    "status": "PASS_SUBSET_ONLY",
+    "samples": 257,
+    "datasets": [
+      "anime_pictures_v3",
+      "bangumi_v3",
+      "danbooru_v3",
+      "konachan_v3",
+      "yande_v3"
+    ],
+    "catalog_tags_limit1": [
+      [
+        "danbooru_native",
+        "1girl"
+      ],
+      [
+        "anime_pictures_native",
+        "belarus_(hetalia)"
+      ]
+    ],
+    "category_checks": 3485,
+    "queries": {
+      "all": {
+        "sample_hits": 257,
+        "checked": 257
+      },
+      "common": {
+        "sample_hits": 1,
+        "checked": 257
+      },
+      "rare": {
+        "sample_hits": 0,
+        "checked": 257
+      },
+      "intersection": {
+        "sample_hits": 0,
+        "checked": 257
+      },
+      "any_tags": {
+        "sample_hits": 1,
+        "checked": 257
+      },
+      "any_of": {
+        "sample_hits": 1,
+        "checked": 257
+      },
+      "none": {
+        "sample_hits": 0,
+        "checked": 257
+      },
+      "zero": {
+        "sample_hits": 0,
+        "checked": 257
+      },
+      "source:anime_pictures": {
+        "sample_hits": 64,
+        "checked": 257
+      },
+      "source:bangumi": {
+        "sample_hits": 64,
+        "checked": 257
+      },
+      "source:danbooru": {
+        "sample_hits": 1,
+        "checked": 257
+      },
+      "source:konachan": {
+        "sample_hits": 64,
+        "checked": 257
+      },
+      "source:yande": {
+        "sample_hits": 64,
+        "checked": 257
+      }
+    },
+    "content_digest": "c186f0a93d9bcf036f54a926ddae3b43aef35d6cfac4eb6dae2151abebcbd0eb",
+    "limitation": "one annotation fragment/object per dataset; not full corpus semantics"
+  },
+  "namespaces": {
+    "namespace_count": 5,
+    "coverage": [
+      {
+        "namespace": "anime_pictures_native",
+        "tag": "girl",
+        "counts": {
+          "tag": 4331,
+          "none": 819,
+          "zero": 0
+        },
+        "known": 5150,
+        "seconds": {
+          "tag": 0.000825399998575449,
+          "none": 0.0007248999900184572,
+          "zero": 0.00016220001270994544
+        }
+      },
+      {
+        "namespace": "bangumi_native",
+        "tag": "bangumi",
+        "counts": {
+          "tag": 3538571,
+          "none": 0,
+          "zero": 0
+        },
+        "known": 3538571,
+        "seconds": {
+          "tag": 0.0018792000482790172,
+          "none": 0.0021004999871365726,
+          "zero": 0.00031969998963177204
+        }
+      },
+      {
+        "namespace": "danbooru_native",
+        "tag": "1girl",
+        "counts": {
+          "tag": 3618837,
+          "none": 1577200,
+          "zero": 0
+        },
+        "known": 5196037,
+        "seconds": {
+          "tag": 0.002966000000014901,
+          "none": 0.0026795000303536654,
+          "zero": 0.0010695999953895807
+        }
+      },
+      {
+        "namespace": "konachan_native",
+        "tag": "long_hair",
+        "counts": {
+          "tag": 13736,
+          "none": 19641,
+          "zero": 0
+        },
+        "known": 33377,
+        "seconds": {
+          "tag": 0.001200700004119426,
+          "none": 0.0001601999974809587,
+          "zero": 0.00013780000153928995
+        }
+      },
+      {
+        "namespace": "yande_native",
+        "tag": "thighhighs",
+        "counts": {
+          "tag": 2079,
+          "none": 6893,
+          "zero": 0
+        },
+        "known": 8972,
+        "seconds": {
+          "tag": 0.0008787999977357686,
+          "none": 0.0004208000027574599,
+          "zero": 0.00017009995644912124
+        }
+      }
+    ],
+    "full_verify_repeated": false,
+    "scope": "catalog/bitmap count relations only; not independent full semantics"
+  },
+  "diagnostic": {
+    "repo": "leafmoone/webdataset_danbooru_v3",
+    "numeric_id": 218254,
+    "type": 4,
+    "endpoint": "https://modelscope.cn/api/v1/datasets/218254/repo/tree",
+    "params": {
+      "Revision": "73306f1dc5459238710f477b376c36da997d020c",
+      "Root": "anime_pictures",
+      "Recursive": "True",
+      "PageNumber": 1,
+      "PageSize": 20
+    },
+    "http_status": 200,
+    "top_keys": [
+      "RequestId",
+      "Code",
+      "Message",
+      "Data",
+      "PageNumber",
+      "PageSize",
+      "TotalCount"
+    ],
+    "data_keys": [
+      "Files",
+      "LatestCommitter",
+      "TotalCount"
+    ],
+    "top_safe_identity": {
+      "Code": 200,
+      "TotalCount": 1000
+    },
+    "data_safe_identity": {
+      "TotalCount": 1000
+    },
+    "entry_revision_shapes": [
+      {
+        "type": "blob",
+        "shape": "empty",
+        "count": 20
+      }
+    ],
+    "entry_example": {
+      "Type": "blob",
+      "Path": "anime_pictures/t0000-001.tar",
+      "Size": 1538519040,
+      "Sha256": "8bd22bea5471faceb028f74b02bfad16717a637c2fe5c3b90e22dd8fba474e22",
+      "Revision": "",
+      "CommitId": null
+    }
+  },
+  "historical_pending_comparison": "NOT_COMPLETED"
+}
