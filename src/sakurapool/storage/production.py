@@ -536,6 +536,7 @@ class RustProductionTransport:
     ):
         if self._closed:
             raise RemoteIOError("closed production transport")
+        secondary = ()
         try:
             return self._call_accounted(
                 obj,
@@ -546,10 +547,14 @@ class RustProductionTransport:
                 mode=mode,
                 json_limit=json_limit,
             )
-        except RustWorkerError:
-            # Leave the handler before raising: no raw cause OR retained __context__.
-            pass
-        raise RemoteIOError("Rust production request rejected; accounting uncertain")
+        except RustWorkerError as error:
+            # Preserve fixed cleanup evidence, never raw worker diagnostics.
+            secondary = tuple(value for value in getattr(error, "finalization_secondary", ())
+                              if type(value) is str and value in {"worker_close", "worker_cancel",
+                                           "worker_constructor_shutdown"})[:16]
+        converted = RemoteIOError("Rust production request rejected; accounting uncertain")
+        converted.finalization_secondary = secondary
+        raise converted
 
     def _call_accounted(
         self, obj, root, *, start=0, length=1, condition="match", mode="range", json_limit=1 << 20
@@ -762,14 +767,21 @@ class RustProductionTransport:
         ):
             raise RemoteIOError("verified production binding required")
         lease = self.ledger.reserve(Reservation(disk=disk))
+        worker_lease = None
+        worker_memory = 0 if getattr(self, "_persistent", False) or mode != "range" else 32 << 20
         try:
-            memory_lease = self.ledger.reserve(Reservation(inflight=memory))
+            if worker_memory:
+                worker_lease = self.ledger.reserve(Reservation(inflight=worker_memory))
+            memory_lease = self.ledger.reserve(Reservation(inflight=memory - worker_memory))
         except BaseException as primary:
-            try:
-                self.ledger.settle(lease)
-            except BaseException:
-                primary.finalization_secondary = (
-                    *getattr(primary, "finalization_secondary", ()), "reservation_rollback")
+            for rollback in (worker_lease, lease):
+                if rollback is None:
+                    continue
+                try:
+                    self.ledger.settle(rollback)
+                except BaseException:
+                    primary.finalization_secondary = (
+                        *getattr(primary, "finalization_secondary", ()), "reservation_rollback")
             raise
         root = None
         raw = b""
@@ -814,6 +826,7 @@ class RustProductionTransport:
             completed = True
         finally:
             primary = sys.exc_info()[1]
+            first_secondary = None
             failed = False
             worker = getattr(self, "_request_worker", None)
             request_safe = (getattr(self, "_request_terminal", False)
@@ -822,6 +835,23 @@ class RustProductionTransport:
                 if not request_safe:
                     raise RemoteIOError("live request resources retained")
                 try:
+                    if worker_lease is not None:
+                        if worker is None or worker._proc is None:
+                            try:
+                                self.ledger.settle(worker_lease)
+                            except BaseException as worker_settle_error:
+                                failed = True
+                                first_secondary = worker_settle_error
+                                if primary is not None:
+                                    primary.finalization_secondary = (
+                                        *getattr(primary, "finalization_secondary", ()),
+                                        "worker_memory_settle")
+                        else:
+                            failed = True
+                            if primary is not None:
+                                primary.finalization_secondary = (
+                                    *getattr(primary, "finalization_secondary", ()),
+                                    "worker_memory")
                     if primary is not None and raw:
                         # Escaping exceptions can retain payload through arbitrary
                         # frames/containers. Do not guess its object graph or refund
@@ -830,6 +860,14 @@ class RustProductionTransport:
                         primary.production_payload_resources = "PRESERVED"
                     else:
                         self.ledger.settle(memory_lease)
+                except BaseException as payload_settle_error:
+                    if first_secondary is None:
+                        first_secondary = payload_settle_error
+                    failed = True
+                    if primary is not None:
+                        primary.finalization_secondary = (
+                            *getattr(primary, "finalization_secondary", ()),
+                            "payload_memory_settle")
                 finally:
                     # Always attempt ownership registration/cleanup, even if settlement rejects.
                     if root is None:
@@ -855,11 +893,13 @@ class RustProductionTransport:
                             raise RemoteIOError("production artifact ownership unconfirmed")
                         # Unknown/reparse/failed ownership stays on disk with quota.
             except BaseException as secondary:
-                if primary is None and not isinstance(secondary, Exception):
-                    raise
+                if first_secondary is None:
+                    first_secondary = secondary
                 failed = True
             if failed:
                 if primary is None:
+                    if first_secondary is not None and not isinstance(first_secondary, Exception):
+                        raise first_secondary
                     raise RemoteIOError(
                         "production resource finalization incomplete; quota retained")
                 primary.finalization_secondary = (

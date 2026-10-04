@@ -572,9 +572,11 @@ def test_correct_real_child_shutdown_failure_retains_until_confirmed(binding_loo
 
     monkeypatch.setattr(production, "RustWorker", ShutdownFailure)
     try:
-        with pytest.raises(OSError, match="owned wait failure"):
+        with pytest.raises(RemoteIOError) as caught:
             with transport._capability_match(candidate):
                 pytest.fail("shutdown-failed worker continued")
+        assert "worker_close" in caught.value.finalization_secondary
+        assert caught.value.__context__ is None and caught.value.__cause__ is None
         assert owned and owned[0][1].poll() is None
         assert transport._correct_worker._proc is owned[0][1]
         assert ledger.status()["inflight"] > 0

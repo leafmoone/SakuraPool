@@ -138,7 +138,10 @@ def test_identification_extent_and_extension_boundaries_not_tar_authority(
     _, ledger, transport, obj, scheduler, canary, identity = configure(twohop, monkeypatch, raw)
     adapter, report = canary.identify_adapter(transport, obj, scheduler, identity)
     assert adapter is None and report["status"] == "ADAPTER_NOT_IDENTIFIED"
-    assert report["scope_limited"] and ledger.status()["inflight"] == 0
+    assert report["scope_limited"]
+    assert ledger.status()["inflight"] == (1024 if shape == "bad_checksum" else 0)
+    if shape == "bad_checksum":
+        assert report["budget_after"]["pending_unknown_body_bound"] == 0
     assert report["headers_examined"] <= 1
 
 

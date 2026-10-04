@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-from collections import OrderedDict
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -13,7 +12,6 @@ from test_task_runner import setup as task_setup_fixture
 
 from sakurapool.runtime import RuntimeQuerySpec
 from sakurapool.storage import publication_fetch
-from sakurapool.storage.budget import BudgetLedger
 from sakurapool.storage.modelscope import ModelScopeDataset
 from sakurapool.storage.transport import BoundObject, GuardedTransport, RemoteIOError
 from sakurapool.tasks import profile
@@ -40,22 +38,24 @@ def load(tmp_path, value):
 
 @pytest.mark.parametrize("origin", ORIGINS)
 def test_publication_control_uses_exact_configured_hostname(tmp_path, monkeypatch, origin):
-    # Real fetch entry and real control constructor, stopped before provider IO.
-    ledger = object.__new__(BudgetLedger)
-    ledger._offline_mode = True
-    digest = b"x" * 32
-    row = (origin, "synthetic/test", "modelscope_dataset_legacy", "b" * 40,
-           "one.tar", (1024).to_bytes(8, "big"), digest, digest, 1)
-    runtime = SimpleNamespace(
-        resolve_record=lambda _: SimpleNamespace(rid=0),
-        location=lambda _: {"object_idx": 0}, snapshot_id="synthetic",
-        object_ref=lambda _: {"object_path": "one.tar", "object_size": 1024,
-                              "object_version": digest.hex()},
-    )
-    pub = SimpleNamespace(_closed=False, full_verified=True, runtime=runtime,
-                          catalog=SimpleNamespace(execute=lambda *a: SimpleNamespace(
-                              fetchone=lambda: row)), content_digest="synthetic",
-                          _verified=OrderedDict())
+    from test_task_multiple import multiple
+
+    from sakurapool.storage.publication import load_publication
+    from sakurapool.tasks.store import TaskDB
+
+    fixture = multiple.__wrapped__(tmp_path, monkeypatch)
+    directory, ledger, _, _ = next(fixture)
+    with TaskDB(directory, readonly=True) as task:
+        path = task.meta("publication_path")
+        record = task.db.execute("SELECT record_id FROM items LIMIT 1").fetchone()[0]
+    pub = load_publication(path, full_verify=True)
+    original_catalog = pub.catalog
+    class Catalog:
+        def execute(self, *args):
+            original_row = original_catalog.execute(*args).fetchone()
+            row = (origin,) + tuple(original_row)[1:]
+            return SimpleNamespace(fetchone=lambda: row)
+    pub.catalog = Catalog()
 
     class Transport:
         pass
@@ -83,9 +83,14 @@ def test_publication_control_uses_exact_configured_hostname(tmp_path, monkeypatc
     monkeypatch.setattr(publication_fetch, "GuardedTransport", control)
     monkeypatch.setattr(publication_fetch, "exact_provider_lookup", lookup)
     monkeypatch.setattr(publication_fetch, "_real_output_root", lambda path, ledger: path)
-    with pytest.raises(StopBeforeIO):
-        publication_fetch.fetch_publication_sample(pub, "1" * 32, actual, tmp_path)
-    assert len(seen) == 1
+    try:
+        with pytest.raises(StopBeforeIO):
+            publication_fetch.fetch_publication_sample(pub, record, actual, tmp_path)
+        assert len(seen) == 1
+    finally:
+        pub.catalog = original_catalog
+        pub.close()
+        fixture.close()
 
 
 @pytest.mark.parametrize("origin", ORIGINS)
@@ -194,6 +199,204 @@ def bound_range(transport, candidate):
         repository=obj.repo_id)
 
 
+@pytest.mark.parametrize("later", ["payload", "disk"])
+def test_split_double_fault_preserves_first_interrupt(twohop, monkeypatch, later):
+    _, ledger, transport, candidate = twohop
+    bound = bound_range(transport, candidate)
+    first, second = KeyboardInterrupt(), SystemExit(9)
+    original_reserve, original_settle = ledger.reserve, ledger.settle
+    types, attempts = {}, []
+    def reserve(reservation):
+        lease = original_reserve(reservation)
+        types[lease] = "worker" if reservation.inflight == 32 << 20 else (
+            "payload" if reservation.inflight == 30 else "disk" if reservation.disk else "other")
+        return lease
+    def settle(lease, **kwargs):
+        attempts.append(types.get(lease))
+        if types.get(lease) == "worker":
+            raise first
+        if types.get(lease) == later:
+            raise second
+        return original_settle(lease, **kwargs)
+    monkeypatch.setattr(ledger, "reserve", reserve)
+    monkeypatch.setattr(ledger, "settle", settle)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        with transport.read_range_owned(bound, 512, 15):
+            pass
+    assert caught.value is first
+    assert "disk" in attempts
+    assert ledger.status()["inflight"] == (32 << 20) + (30 if later == "payload" else 0)
+
+
+def test_split_live_unknown_retains_resources_after_late_wait(twohop, monkeypatch):
+    from sakurapool.storage import production
+    from sakurapool.storage.rust_bridge import RustWorkerError
+
+    _, ledger, transport, candidate = twohop
+    bound = bound_range(transport, candidate)
+    actual = production.RustWorker
+    owned = []
+    class LiveFailure(actual):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            owned.append(self)
+        def send_raw(self, line):
+            pass
+        def read_raw(self):
+            raise RustWorkerError("owned-read-failure")
+        def close(self):
+            raise OSError("owned-close-failure")
+        def cancel(self):
+            raise OSError("owned-cancel-failure")
+    monkeypatch.setattr(production, "RustWorker", LiveFailure)
+    try:
+        with pytest.raises(RemoteIOError):
+            with transport.read_range_owned(bound, 512, 15):
+                pytest.fail("live request delivered")
+        assert owned[0]._proc is not None and owned[0]._proc.poll() is None
+        status = ledger.status()
+        assert status["inflight"] == (32 << 20) + 30
+        assert list(ledger.root.glob("rust-transfer-*"))
+        actual.close(owned[0])
+        assert owned[0]._proc is None
+        assert ledger.status() == status
+    finally:
+        for worker in owned:
+            actual.close(worker)
+
+
+@pytest.mark.parametrize("payload_error", [KeyboardInterrupt(), SystemExit(11)])
+def test_payload_then_disk_cleanup_keeps_first_interrupt(twohop, monkeypatch, payload_error):
+    _, ledger, transport, candidate = twohop
+    bound = bound_range(transport, candidate)
+    original = ledger.settle
+    types, attempts = {}, []
+    def reserve(reservation):
+        lease = original_reserve(reservation)
+        types[lease] = "worker" if reservation.inflight == 32 << 20 else (
+            "payload" if reservation.inflight == 30 else "disk" if reservation.disk else "other")
+        return lease
+    original_reserve = ledger.reserve
+    def settle(lease, **kwargs):
+        attempts.append(types.get(lease))
+        if types.get(lease) == "payload":
+            raise payload_error
+        if types.get(lease) == "disk":
+            raise SystemExit(12)
+        return original(lease, **kwargs)
+    monkeypatch.setattr(ledger, "reserve", reserve)
+    monkeypatch.setattr(ledger, "settle", settle)
+    with pytest.raises(BaseException) as caught:
+        with transport.read_range_owned(bound, 512, 15):
+            pass
+    assert caught.value is payload_error
+    assert "disk" in attempts
+    assert ledger.status()["inflight"] == 30
+    assert attempts.count("worker") == attempts.count("payload") == attempts.count("disk") == 1
+
+
+def test_split_success_settles_each_lease_once(twohop, monkeypatch):
+    _, ledger, transport, candidate = twohop
+    bound = bound_range(transport, candidate)
+    original = ledger.settle
+    attempts = []
+    def settle(lease, **kwargs):
+        attempts.append(lease)
+        return original(lease, **kwargs)
+    monkeypatch.setattr(ledger, "settle", settle)
+    with transport.read_range_owned(bound, 512, 15):
+        assert ledger.status()["inflight"] == (32 << 20) + 30
+    assert len(attempts) == len(set(attempts))
+    assert ledger.status()["inflight"] == 0
+
+
+def test_call_secondary_is_fixed_allowlist(twohop, monkeypatch):
+    from sakurapool.storage.rust_bridge import RustWorkerError
+
+    _, _, transport, candidate = twohop
+    marker = RustWorkerError("private-detail")
+    marker.finalization_secondary = ("worker_close", "private-detail", {"raw": "private"})
+    def fail(*args, **kwargs):
+        raise marker
+    monkeypatch.setattr(transport, "_call_accounted", fail)
+    with pytest.raises(RemoteIOError) as caught:
+        transport._call(candidate, None)
+    assert caught.value.finalization_secondary == ("worker_close",)
+    assert caught.value.__context__ is None
+    assert "private" not in str(caught.value)
+
+
+@pytest.mark.parametrize("failed_at,rollback_fails", [(2, False), (3, False), (3, True)])
+def test_split_reservation_rollback_is_reverse_and_independent(twohop, monkeypatch,
+                                                              failed_at, rollback_fails):
+    from sakurapool.storage.budget import BudgetExceeded
+
+    _, ledger, transport, candidate = twohop
+    bound = bound_range(transport, candidate)
+    original_reserve, original_settle = ledger.reserve, ledger.settle
+    leases, settled = [], []
+    def reserve(reservation):
+        if len(leases) + 1 == failed_at:
+            raise BudgetExceeded("split-reserve")
+        lease = original_reserve(reservation)
+        leases.append(lease)
+        return lease
+    def settle(lease, **kwargs):
+        settled.append(lease)
+        if rollback_fails and lease == leases[-1]:
+            raise RuntimeError("rollback")
+        return original_settle(lease, **kwargs)
+    monkeypatch.setattr(ledger, "reserve", reserve)
+    monkeypatch.setattr(ledger, "settle", settle)
+    with pytest.raises(BudgetExceeded):
+        with transport.read_range_owned(bound, 512, 15):
+            pytest.fail("reserve failure admitted IO")
+    assert settled == list(reversed(leases))
+    assert ledger.status()["inflight"] == (32 << 20 if rollback_fails else 0)
+
+
+@pytest.mark.parametrize("kind", ["interrupt", "exit", "ordinary"])
+@pytest.mark.parametrize("body_failure", [False, True])
+def test_split_worker_settlement_keeps_primary_and_attempts_safe_cleanup(twohop, monkeypatch,
+                                                                       kind, body_failure):
+    _, ledger, transport, candidate = twohop
+    bound = bound_range(transport, candidate)
+    marker = {"interrupt": KeyboardInterrupt(), "exit": SystemExit(7),
+              "ordinary": RuntimeError("worker-settle")}[kind]
+    body_primary = ValueError("consumer")
+    original_reserve, original_settle = ledger.reserve, ledger.settle
+    worker_leases, attempts = [], []
+    def reserve(reservation):
+        lease = original_reserve(reservation)
+        if reservation.inflight == 32 << 20:
+            worker_leases.append(lease)
+        return lease
+    def settle(lease, **kwargs):
+        attempts.append(lease)
+        if lease in worker_leases:
+            raise marker
+        return original_settle(lease, **kwargs)
+    monkeypatch.setattr(ledger, "reserve", reserve)
+    monkeypatch.setattr(ledger, "settle", settle)
+    with pytest.raises(BaseException) as caught:
+        with transport.read_range_owned(bound, 512, 15):
+            assert ledger.status()["inflight"] == (32 << 20) + 30
+            if body_failure:
+                raise body_primary
+    if body_failure:
+        assert caught.value is body_primary
+        assert "worker_memory_settle" in body_primary.finalization_secondary
+        assert ledger.status()["inflight"] == (32 << 20) + 30
+    else:
+        if kind != "ordinary":
+            assert caught.value is marker
+        else:
+            assert isinstance(caught.value, RemoteIOError)
+        assert ledger.status()["inflight"] == 32 << 20
+    assert len(attempts) == len(set(attempts))
+    assert not list(ledger.root.glob("rust-transfer-*"))
+
+
 @pytest.mark.parametrize("consumer_error", [False, True])
 def test_range_single_materialization_and_owner_lifetime(twohop, monkeypatch, consumer_error):
     state, ledger, transport, candidate = twohop
@@ -234,11 +437,14 @@ def test_range_single_materialization_and_owner_lifetime(twohop, monkeypatch, co
                 raise ConsumerError
 
     if consumer_error:
-        with pytest.raises(ConsumerError):
+        with pytest.raises(ConsumerError) as caught:
             consume()
+        assert caught.value.production_payload_resources == "PRESERVED"
+        assert ledger.status()["inflight"] == baseline + 30
+        assert caught.value.__traceback__ is not None
     else:
         consume()
-    assert ledger.status()["inflight"] == baseline
+        assert ledger.status()["inflight"] == baseline
     assert not list(ledger.root.glob("rust-transfer-*"))
     assert len(reads) == 1, "verified body must be materialized once, not re-read for consumer"
 
@@ -258,8 +464,10 @@ def test_range_independent_actual_bytes_and_worker_sha(twohop, monkeypatch, corr
         return result
 
     monkeypatch.setattr(transport, "_call", altered)
-    with pytest.raises(RemoteIOError, match="artifact verification"):
+    with pytest.raises(RemoteIOError, match="artifact verification") as caught:
         with transport.read_range_owned(bound, 512, 15):
             pytest.fail("unverified payload delivered")
-    assert ledger.status()["inflight"] == 0
+    assert ledger.status()["inflight"] == 30
+    assert caught.value.production_payload_resources == "PRESERVED"
+    assert caught.value.__traceback__ is not None
     assert not list(ledger.root.glob("rust-transfer-*"))
