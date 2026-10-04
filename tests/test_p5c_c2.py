@@ -22,6 +22,91 @@ multiple = _multiple
 twohop = _twohop
 
 
+@pytest.mark.parametrize("invalidate", [False, True])
+def test_real_lane_warm_range_with_cold_ledger_credit_unavailable(
+        multiple, twohop, monkeypatch, invalidate):
+    from dataclasses import replace
+
+    from sakurapool.runtime import RuntimeQuerySpec
+    from sakurapool.storage import publication_fetch
+    from sakurapool.storage.budget import Reservation
+    from sakurapool.storage.modelscope import ModelScopeDataset
+    from sakurapool.storage.production import RustProductionTransport
+    from sakurapool.storage.publication import load_publication
+    from sakurapool.tasks.plan import Selection
+    from sakurapool.tasks.runner import create_task
+
+    old, ledger, _, _ = multiple
+    state, _, rust, template = twohop
+    with TaskDB(old, readonly=True) as db:
+        pub_path = db.meta("publication_path")
+    with load_publication(pub_path, full_verify=True) as pub:
+        payload = bytearray(b"x" * 10240)
+        for rid in range(pub.runtime.rid_count):
+            offset = pub.runtime.location(rid)["image_offset"]
+            payload[offset:offset + 5] = b"image"
+    state["raw"] = bytes(payload)
+    directory = ledger.root / "warm-credit-task"
+    with create_task(pub_path, directory, ledger, RuntimeQuerySpec(),
+                     Selection(mode="first", limit=2)):
+        pass
+    bindings = []
+    verified_lanes = []
+    monkeypatch.setattr(publication_fetch, "exact_provider_lookup",
+        lambda control, endpoint, repo, revision, path, size, digest:
+        replace(template, repo_id=repo, revision=revision,
+                object_path=path, object_size=size))
+    monkeypatch.setattr(ModelScopeDataset, "download_url", lambda self, revision, path:
+        template.origin + "/object?Revision=" + revision + "&FilePath=" + path)
+    original = RustProductionTransport.verify_conditions
+
+    def proof(lane, obj):
+        result = original(lane, obj)
+        bindings.append((id(lane), lane._generation, obj.object_path))
+        verified_lanes.append(lane)
+        return result
+
+    monkeypatch.setattr(RustProductionTransport, "verify_conditions", proof)
+    predict = RustProductionTransport.predict_warm
+
+    def synthetic_origin(lane, identity, lengths):
+        # This fixture's verified publication uses HTTPS while its explicitly
+        # test-only byte transport is strict loopback; translate only this fixture.
+        return predict(lane, (template.origin, *identity[1:]), lengths)
+
+    monkeypatch.setattr(RustProductionTransport, "predict_warm", synthetic_origin)
+    occupied = []
+
+    def hook(event, payload):
+        if event == "SETTLED" and not occupied:
+            # Real reserved body leaves precisely the next 5-byte Range plus
+            # framing byte. Cold metadata/probe topology cannot fit.
+            remaining = ledger.limits["body"] - ledger.status()["body"]
+            occupied.append(ledger.reserve(Reservation(body=remaining - 6)))
+            if invalidate:
+                # A proof invalidated in the real transport cannot be inferred
+                # warm merely because the publication-side cache still exists.
+                verified_lanes[0]._live_proofs.clear()
+
+    transport = RustProductionTransport(ledger, rust.worker, origin=template.origin,
+        token=rust._token, same_origin_cookie=rust._cookie, _test=True)
+    try:
+        if invalidate:
+            with pytest.raises(TaskError, match="RESOURCE_BLOCKED"):
+                run_task(directory, transport, control=object(), workers=1, fault_hook=hook)
+            with TaskDB(directory, readonly=True) as task:
+                assert task.inspect()["delivered_confirmed"] == 1
+        else:
+            result = run_task(directory, transport, control=object(), workers=1, fault_hook=hook)
+            assert result["state"] == "COMPLETED" and result["delivered_confirmed"] == 2
+        assert len(bindings) == 1 and bindings[0][1] == 0
+    finally:
+        transport.close()
+        for lease in occupied:
+            ledger.settle(lease)
+    assert ledger.status()["inflight"] == 0
+
+
 @pytest.mark.parametrize("workers", [1, 2, 4])
 def test_real_rust_lanes_with_owner_ledger(multiple, twohop, monkeypatch, workers):
     from dataclasses import replace
@@ -74,10 +159,26 @@ def test_real_rust_lanes_with_owner_ledger(multiple, twohop, monkeypatch, worker
     transport = RustProductionTransport(ledger, rust_transport.worker,
         origin=object_template.origin, token=rust_transport._token,
         same_origin_cookie=rust_transport._cookie, _test=True)
+    proof_calls = []
+    verify = RustProductionTransport.verify_conditions
+
+    def counted_proof(lane, obj):
+        verified = verify(lane, obj)
+        proof_calls.append((obj.object_path, id(lane), lane._generation))
+        return verified
+
+    monkeypatch.setattr(RustProductionTransport, "verify_conditions", counted_proof)
+    predict = RustProductionTransport.predict_warm
+    monkeypatch.setattr(RustProductionTransport, "predict_warm",
+        lambda lane, identity, lengths:
+        predict(lane, (object_template.origin, *identity[1:]), lengths))
     # Synthetic offsets are even multiples of 4096, yielding repeated image.
     result = run_task(directory, transport, control=object(), workers=workers)
     assert result["state"] == "COMPLETED"
     assert result["delivered_confirmed"] == 3
+    assert len(proof_calls) == 2
+    assert len({path for path, _, _ in proof_calls}) == 2
+    assert all(generation == 0 for _, _, generation in proof_calls)
     assert ledger.status()["inflight"] == 0
 
 
@@ -170,6 +271,22 @@ def test_real_rust_metadata_enabled(multiple, twohop, monkeypatch, tmp_path, wor
 
 @pytest.mark.parametrize("workers", [1, 2, 4])
 def test_synthetic_pipeline_owner_and_content(multiple, monkeypatch, workers):
+    import weakref
+
+    from sakurapool.storage.prepared_fetch import PreparedFetch
+
+    live = []
+    peak = [0]
+    prepare = PreparedFetch._prepare
+
+    def observed_prepare(pub, record_id):
+        descriptor = prepare(pub, record_id)
+        live[:] = [reference for reference in live if reference() is not None]
+        live.append(weakref.ref(descriptor))
+        peak[0] = max(peak[0], len(live))
+        return descriptor
+
+    monkeypatch.setattr(PreparedFetch, "_prepare", observed_prepare)
     directory, ledger, Transport, calls = multiple
     owner = get_ident()
     for name in ("event", "finish_item", "claim"):
@@ -195,6 +312,9 @@ def test_synthetic_pipeline_owner_and_content(multiple, monkeypatch, workers):
     assert result["state"] == "COMPLETED"
     assert result["delivered_confirmed"] == 3
     assert result["unknown_accounting_count"] == 0
+    # Active lane descriptors plus previous/current transient preparation.
+    # No gc collection is forced, and weakrefs do not retain the descriptors.
+    assert peak[0] <= workers + 2
 
 
 def test_out_of_order_completion_export_stays_frozen(multiple):
@@ -245,6 +365,7 @@ def test_persistent_worker_reconnects_after_server_keepalive_close(twohop):
     assert ledger.status()["inflight"] == 0
 
 
+@pytest.mark.stress
 def test_real_request_threshold_rotates_and_reprobes(twohop):
     _, ledger, transport, obj = twohop
     transport.enable_persistent()
@@ -254,8 +375,13 @@ def test_real_request_threshold_rotates_and_reprobes(twohop):
         with transport.transfer(verified, start=512, length=1):
             pass
     assert transport._lane_requests == 255
+    assert transport.verified_object(verified, lengths=[1]) == verified
+    assert transport._lane_worker is first and transport._generation == 0
+    with transport.transfer(verified, start=512, length=1):
+        pass
+    assert transport._lane_requests == 256
     with pytest.raises(Exception):
-        transport.verified_object(verified)
+        transport.verified_object(verified, lengths=[1])
     assert first.pid is None
     assert transport._generation == 1
     verified = transport.verify_conditions(obj)
@@ -831,10 +957,26 @@ def test_empty_resume_does_not_admit_or_clone_lanes(multiple):
     assert ledger.status() == before
 
 
-def test_settled_hold_is_not_counted_twice(multiple, monkeypatch):
+@pytest.fixture
+def three_distinct_objects(tmp_path, monkeypatch):
+    import test_task_multiple
+    from synthetic_p2 import ObjectSpec, SampleSpec
+
+    build = test_task_multiple.build_p2_directory
+
+    def distinct_build(path, **kwargs):
+        kwargs["objects"] = [ObjectSpec(f"{i}.tar", [SampleSpec(f"{i}.png", str(i),
+                            has_json=False)], size=10240) for i in range(3)]
+        return build(path, **kwargs)
+
+    monkeypatch.setattr(test_task_multiple, "build_p2_directory", distinct_build)
+    yield from _multiple.__wrapped__(tmp_path, monkeypatch)
+
+
+def test_settled_hold_is_not_counted_twice(three_distinct_objects, monkeypatch):
     from sakurapool.storage import publication_fetch as pipeline
 
-    directory, ledger, Transport, calls = multiple
+    directory, ledger, Transport, calls = three_distinct_objects
     original = pipeline._fetch_publication_sample
     release = threading.Event()
     settled = threading.Event()
@@ -855,6 +997,7 @@ def test_settled_hold_is_not_counted_twice(multiple, monkeypatch):
         if event == "CLAIMED":
             claimed.append(payload["seq"])
             if len(claimed) == 3:
+                assert settled.is_set()
                 release.set()
     Transport.clone = lambda self: Transport()
     Transport.close = lambda self: None

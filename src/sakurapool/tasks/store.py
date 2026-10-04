@@ -219,7 +219,9 @@ class TaskDB:
             self.set_meta(db, "request", value)
         return {"requested": value, "state": self.meta("state")}
 
-    def _pipeline_candidate(self, db=None):
+    def _pipeline_candidate(self, db=None, *, limit=1):
+        if type(limit) is not int or not 1 <= limit <= 8:
+            raise TaskError("TASK_IDENTITY_INVALID")
         connection = self.db if db is None else db
         # CASE gates prevent materializing oversized selected values; selecting
         # first READY before validation avoids silently skipping corrupt identity.
@@ -229,18 +231,32 @@ class TaskDB:
             "CASE WHEN typeof(record_id)='text' AND length(record_id)=32 "
             "AND instr(record_id,char(0))=0 "
             "THEN record_id ELSE NULL END AS record_id FROM items "
-            "WHERE state='READY' ORDER BY seq LIMIT 1").fetchone()
-        if row is not None and (row["record_id"] is None
-                or type(row["seq"]) is not int or not 0 <= row["seq"] < 1 << 64
-                or type(row["rid"]) is not int or not 0 <= row["rid"] < 1 << 64):
-            raise TaskError("TASK_IDENTITY_INVALID")
-        return None if row is None else dict(row)
+            "WHERE state='READY' ORDER BY seq LIMIT ?", (limit,)).fetchall()
+        for candidate in row:
+            if (candidate["record_id"] is None
+                    or type(candidate["seq"]) is not int
+                    or not 0 <= candidate["seq"] < 1 << 64
+                    or type(candidate["rid"]) is not int
+                    or not 0 <= candidate["rid"] < 1 << 64):
+                raise TaskError("TASK_IDENTITY_INVALID")
+        if limit != 1:
+            return [dict(candidate) for candidate in row]
+        return None if not row else dict(row[0])
 
-    def _pipeline_claim(self):
+    def _pipeline_claim(self, expected=None, *, window=1):
         with self.transaction() as db:
             if self.meta("request") is not None:
                 return None
-            row = self._pipeline_candidate(db)
+            if expected is None:
+                row = self._pipeline_candidate(db)
+            else:
+                candidates = self._pipeline_candidate(db, limit=window)
+                if window == 1:
+                    candidates = [] if candidates is None else [candidates]
+                row = next((candidate for candidate in candidates
+                            if candidate == expected), None)
+                if row is None:
+                    raise TaskError("TASK_IDENTITY_INVALID")
             if row is None:
                 return None
             attempt, operation = uuid.uuid4().hex, uuid.uuid4().hex

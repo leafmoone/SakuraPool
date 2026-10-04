@@ -402,13 +402,13 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
             for lease, ownership in lease_owners.items():
                 if ownership[0] == index and ownership[1] == item["attempt_id"]:
                     retained_receipts[lease] = (ownership, reservations.get(lease), "PRESERVED")
+            descriptors.pop(index, None)
             if error is not None:
                 record_error(error)
                 stop = True
 
     from ..storage.budget import BudgetExceeded
 
-    initializing = []
     def observe_bookkeeping():
         if fault_hook:
             fault_hook("BOOKKEEPING", {"active": len(active), "completed": len(completed),
@@ -434,10 +434,6 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
                 lane.ledger = LedgerRPC(owner, calls, transport.ledger, lane_index, lane)
                 lanes.append((lane, OrderedDict()))
             free = list(range(len(lanes)))
-            while any(not future.done() for future in initializing):
-                pump()
-            for future in initializing:
-                future.result()
             while True:
                 consume_completions()
                 observe_bookkeeping()
@@ -450,12 +446,27 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
                     stop = True
                     record_error(pump_error)
                 while free and not stop:
-                    candidate = task._pipeline_candidate()
-                    if candidate is None:
+                    candidates = task._pipeline_candidate(limit=2 * workers)
+                    if not candidates:
                         stop = True
                         break
-                    item = dict(candidate)
-                    prepared = PreparedFetch._prepare(publication, item["record_id"])
+                    # Oldest eligible object wins: hot work never jumps an eligible
+                    # older different key. A busy object waits rather than replicating
+                    # its binding in every free lane. Window is always <=2W.
+                    def object_key(descriptor):
+                        return (descriptor.content_digest, descriptor.snapshot_id,
+                                *descriptor.catalog_row[:8])
+                    busy_keys = {object_key(descriptors[i]) for i in active}
+                    selected = None
+                    for candidate in candidates:
+                        descriptor = PreparedFetch._prepare(publication, candidate["record_id"])
+                        if object_key(descriptor) not in busy_keys:
+                            selected = (candidate, descriptor)
+                            break
+                    if selected is None:
+                        break
+                    item, prepared = selected
+                    del descriptor, selected
                     amount = prepared.location["image_size"]
                     if metadata and prepared.location["flags"] & 1:
                         amount += prepared.location["metadata_size"]
@@ -464,13 +475,29 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
                         record_error(TaskError("RESOURCE_BLOCKED", "preflight", recoverable=True))
                         stop = True
                         break
+                    # Pick the real destination before estimating its topology.
+                    identity = (*prepared.catalog_row[:5],
+                                int.from_bytes(prepared.catalog_row[5], "big"))
+                    lengths = [prepared.location["image_size"]]
+                    if metadata and prepared.location["flags"] & 1:
+                        lengths.append(prepared.location["metadata_size"])
+                    # Only free lanes are observed; transport validates its actual
+                    # live proof and generation credit, never shared across lanes.
+                    warm = [i for i in free if hasattr(lanes[i][0], "predict_warm")
+                            and (prepared.content_digest, prepared.snapshot_id,
+                                 prepared.location["object_idx"], lanes[i][0],
+                                 lanes[i][0].ledger) in lanes[i][1]
+                            and lanes[i][0].predict_warm(identity, lengths)]
+                    index = warm[0] if warm else free[0]
+                    lane, _ = lanes[index]
                     try:
-                        output = preflight(task, publication, item, transport)
+                        output = preflight(task, publication, item, lane, prepared=prepared,
+                                           proof_warm=index in warm, ledger=transport.ledger)
                     except BaseException as error:
                         record_error(error)
                         stop = True
                         break
-                    item = task._pipeline_claim()
+                    item = task._pipeline_claim(item, window=2 * workers)
                     if item is None:
                         stop = True
                         break
@@ -481,7 +508,7 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
                         stop = True
                         break
                     item = _lane_item(item)
-                    index = free.pop(0)
+                    free.remove(index)
                     holds[item["seq"]] = amount
                     descriptors[index] = prepared
                     future = pool.submit(execute, index, item, prepared, output)
@@ -493,8 +520,6 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
         except BaseException as error:
             record_error(error)
         finally:
-            while any(not future.done() for future in initializing):
-                pump()
             # Even a coordinator failure must serve outstanding ledger/events
             # while lanes finish; waiting for futures before pumping deadlocks.
             while active:

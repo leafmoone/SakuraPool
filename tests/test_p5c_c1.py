@@ -48,6 +48,36 @@ def test_persistent_worker_single_pid_and_idle_reservation(twohop, monkeypatch):
     assert ledger.status()["inflight"] == 0
 
 
+def test_warm_range_credit_does_not_require_cold_probe_credit(twohop):
+    _, _, transport, obj = twohop
+    transport.enable_persistent()
+    try:
+        verified = transport.verify_conditions(obj)
+        worker = transport._lane_worker
+        identity = (obj.origin, obj.repo_id, obj.repo_type, obj.revision,
+                    obj.object_path, obj.object_size)
+        transport._lane_requests = 254
+        assert transport.predict_warm(identity, [1])
+        assert transport.verified_object(verified, lengths=[1]) == verified
+        assert transport._lane_worker is worker
+        assert transport._generation == 0
+        changed = (*identity[:3], "c" * 40, *identity[4:])
+        assert not transport.predict_warm(changed, [1])
+        transport._lane_failed = True
+        assert not transport.predict_warm(identity, [1])
+        transport._lane_failed = False
+        transport._lane_requests = 256
+        assert not transport.predict_warm(identity, [1])
+        with pytest.raises(RemoteIOError):
+            transport.verified_object(verified, lengths=[1])
+        assert transport._generation == 1
+        assert not transport.predict_warm(identity, [1])
+        assert worker.pid is None
+    finally:
+        transport.close()
+    assert not transport.predict_warm(identity, [1])
+
+
 def test_actual_worker_seen_ids_bounded_and_cumulative_budget(twohop, tmp_path):
     _, _, transport, _ = twohop
     path = tmp_path / "one"

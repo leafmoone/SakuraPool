@@ -14,6 +14,38 @@ def setup(tmp_path, monkeypatch):
     yield from runner_setup.__wrapped__(tmp_path, monkeypatch)
 
 
+def test_prepared_warm_preflight_real_ledger_range_only_credit(setup):
+    from sakurapool.storage.prepared_fetch import PreparedFetch
+    from sakurapool.storage.publication import load_publication
+    from sakurapool.tasks.runner import preflight
+    from sakurapool.tasks.store import TaskDB
+
+    pub, directory, ledger, Transport, _ = setup
+    with create_task(pub, directory, ledger, RuntimeQuerySpec()):
+        pass
+    with TaskDB(directory) as task, load_publication(pub, full_verify=True) as publication:
+        item = task._pipeline_candidate()
+        prepared = PreparedFetch._prepare(publication, item["record_id"])
+        length = prepared.location["image_size"]
+        # Tighten this real synthetic ledger: exactly next Range's two hops,
+        # and insufficient mandatory cold metadata/probe topology.
+        status = ledger.status()
+        ledger.limits["attempts"] = status["attempts"] + 2
+        ledger.limits["body"] = status["body"] + length + 1
+        transport = Transport()
+        assert preflight(task, publication, item, transport, prepared=prepared,
+                         proof_warm=True) == directory / "output"
+        with pytest.raises(TaskError, match="RESOURCE_BLOCKED"):
+            preflight(task, publication, item, transport, prepared=prepared,
+                      proof_warm=False)
+        lease = ledger.reserve(Reservation(body=length + 1, attempt=True))
+        second = ledger.reserve(Reservation(attempt=True))
+        ledger.consume_body(lease, length)
+        ledger.settle(lease)
+        ledger.settle(second)
+        assert ledger.status()["attempts"] == status["attempts"] + 2
+
+
 def test_task_growth_cleanup_preserves_primary_and_pending(setup, monkeypatch):
     from sakurapool.tasks.runner import admit_task_growth
 

@@ -464,9 +464,26 @@ class RustProductionTransport:
         ):
             raise RemoteIOError("package requires independently verified Rust conditional binding")
 
-    def verified_object(self, candidate: ProviderObject):
+    def predict_warm(self, identity, lengths):
+        """Scheduling hint only; never authorizes IO or replaces ledger admission."""
         with self._lane_lock:
-            self._admit_generation((16 << 20) + 16, 20, 5)
+            if (self._closed or self._lane_failed or self._rotating
+                    or not getattr(self, "_persistent", False) or self._lane_worker is None):
+                return False
+            matches = [obj for key, obj in self._objects.items() if key[:6] == identity]
+            if len(matches) != 1 or proof_key(matches[0], test=self._test) not in self._live_proofs:
+                return False
+            return (self._lane_requests + len(lengths) <= 256
+                    and self._lane_body + sum(n * 2 + 16 for n in lengths) <= 8 << 30
+                    and self._lane_attempts + 4 * len(lengths) <= 2000)
+
+    def verified_object(self, candidate: ProviderObject, *, lengths=None):
+        with self._lane_lock:
+            if lengths is None:
+                self._admit_generation((16 << 20) + 16, 20, 5)
+            else:
+                self._admit_generation(sum(n * 2 + 16 for n in lengths),
+                                       4 * len(lengths), len(lengths))
         return self._verified_object_body(candidate)
 
     def _verified_object_body(self, candidate: ProviderObject):

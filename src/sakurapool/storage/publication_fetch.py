@@ -161,7 +161,10 @@ def _fetch_publication_sample(
         raise RemoteIOError("closed production transport")
     if obj is not None and isinstance(transport, RustProductionTransport):
         try:
-            if transport.verified_object(obj) != obj:
+            lengths = [loc["image_size"]]
+            if metadata and loc["flags"] & 1 and loc["metadata_size"]:
+                lengths.append(loc["metadata_size"])
+            if transport.verified_object(obj, lengths=lengths) != obj:
                 raise RemoteIOError("publication verified object changed")
         except RemoteIOError:
             pub._verified.pop(key, None)

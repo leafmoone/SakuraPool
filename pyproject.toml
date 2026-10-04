@@ -26,6 +26,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["stress: long-running transport lifecycle and resource pressure validation"]
 
 [tool.ruff]
 target-version = "py310"

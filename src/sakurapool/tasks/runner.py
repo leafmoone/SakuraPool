@@ -107,14 +107,25 @@ def reconcile(task):
         raise blocker
 
 
-def preflight(task, pub, item, transport):
+def preflight(task, pub, item, transport, *, prepared=None, proof_warm=None, ledger=None):
+    ledger = transport.ledger if ledger is None else ledger
     runtime = pub.runtime
-    record = runtime.resolve_record(item["record_id"])
-    if record.rid != item["rid"]:
+    if prepared is None:
+        record = runtime.resolve_record(item["record_id"])
+        rid = record.rid
+        loc = runtime.location(rid)
+        obj = pub.catalog.execute("SELECT object_size,fetchable FROM objects WHERE object_idx=?",
+                                  (loc["object_idx"],)).fetchone()
+    else:
+        if (prepared.record_id != item["record_id"]
+                or prepared.content_digest != pub.content_digest
+                or prepared.snapshot_id != runtime.snapshot_id):
+            raise TaskError("RECORD_IDENTITY_MISMATCH", "preflight")
+        rid = prepared.rid
+        loc = prepared.location
+        obj = (prepared.catalog_row[5], prepared.catalog_row[8])
+    if rid != item["rid"]:
         raise TaskError("RECORD_IDENTITY_MISMATCH", "preflight")
-    loc = runtime.location(record.rid)
-    obj = pub.catalog.execute("SELECT object_size,fetchable FROM objects WHERE object_idx=?",
-                              (loc["object_idx"],)).fetchone()
     if obj is None or obj[1] != 1:
         raise TaskError("PROVIDER_DIGEST_UNAVAILABLE", "preflight")
     size = int.from_bytes(obj[0], "big")
@@ -126,12 +137,13 @@ def preflight(task, pub, item, transport):
     if (loc["image_size"] <= 0 or loc["image_offset"] + loc["image_size"] > size
             or loc["metadata_offset"] + meta_size > size):
         raise TaskError("RECORD_EXTENT_INVALID", "preflight")
-    output = _real_output_root(task.directory / "output", transport.ledger)
+    output = _real_output_root(task.directory / "output", ledger)
     if os.path.lexists(output / item["record_id"]):
         raise TaskError("OUTPUT_CONFLICT", "preflight")
-    status = transport.ledger.status()
-    proof_cached = (pub.content_digest, runtime.snapshot_id, loc["object_idx"],
-                    transport, transport.ledger) in pub._verified
+    status = ledger.status()
+    proof_cached = ((pub.content_digest, runtime.snapshot_id, loc["object_idx"],
+                     transport, transport.ledger) in pub._verified
+                    if proof_warm is None else proof_warm)
     range_count = 1 + int(meta_size > 0)
     required = {"saved_samples": 1, "saved_bytes": loc["image_size"] + meta_size,
                 "body": loc["image_size"] + meta_size + range_count,
@@ -146,20 +158,20 @@ def preflight(task, pub, item, transport):
         required["body"] += 2 * listing_cap + 4 + NEGATIVE_CONDITION_BODY_CAP + 1
         required["metadata"] = 2 * listing_cap
         required["attempts"] += 8
-    if not transport.ledger.offline_mode:
+    if not ledger.offline_mode:
         from ..storage.production_resources import ProductionFootprint
 
         footprint = ProductionFootprint.admit("range", max(loc["image_size"], meta_size))
         required.update(inflight=footprint.memory,
                         disk=footprint.transfer_disk + loc["image_size"] + meta_size + 12288)
-    remaining = {key: max(0, transport.ledger.limits[key] - status[key]) for key in required}
+    remaining = {key: max(0, ledger.limits[key] - status[key]) for key in required}
     delivered_bytes = task.meta("confirmed_output_bytes")
     if (any(required[key] > remaining[key] for key in required)
             or delivered_bytes + required["saved_bytes"] > task.meta("max_output_bytes")):
         error = TaskError("RESOURCE_BLOCKED", "preflight", recoverable=True)
         error.resources = {"profile": "P4_LEGACY", "required": required,
                            "network_requirement": "known_cold_steps_plus_per_request_admission",
-                           "remaining": remaining, "effective_limit": transport.ledger.limits,
+                           "remaining": remaining, "effective_limit": ledger.limits,
                            "task_output_remaining": task.meta("max_output_bytes") - delivered_bytes}
         raise error
     return output
