@@ -228,6 +228,23 @@ def test_out_of_order_completion_export_stays_frozen(multiple):
     assert [row["record_id"] for row in rows] == expected
 
 
+def test_persistent_worker_reconnects_after_server_keepalive_close(twohop):
+    state, ledger, transport, obj = twohop
+    state["close_keepalive"] = True
+    transport.enable_persistent()
+    verified = transport.verify_conditions(obj)
+    child = transport._lane_worker
+    pid = child.pid
+    for _ in range(3):
+        with transport._transfer_owned(verified, start=512, length=16) as (_, _, payload):
+            assert payload == state["raw"][512:528]
+        assert transport._lane_worker is child and child.pid == pid
+    assert transport._lane_requests == 6
+    transport.close()
+    assert child.pid is None
+    assert ledger.status()["inflight"] == 0
+
+
 def test_real_request_threshold_rotates_and_reprobes(twohop):
     _, ledger, transport, obj = twohop
     transport.enable_persistent()

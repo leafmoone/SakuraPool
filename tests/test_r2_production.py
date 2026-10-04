@@ -162,6 +162,8 @@ def twohop(monkeypatch):
             else:
                 self.wfile.write(body)
             self.wfile.flush()
+            if state.get("close_keepalive"):
+                self.close_connection = True
 
     class Origin(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
