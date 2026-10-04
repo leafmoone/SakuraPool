@@ -552,6 +552,11 @@ def test_persistent_idle_rotation_has_fresh_process(twohop):
     verified = transport.verify_conditions(obj)
     worker = transport._lane_worker
     transport._lane_requests = 256
+    with pytest.raises(RemoteIOError):
+        with transport.transfer(verified, start=512, length=7):
+            pytest.fail("old generation proof reused")
+    assert worker.pid is None
+    verified = transport.verify_conditions(obj)
     with transport.transfer(verified, start=512, length=7):
         assert worker.pid is None
         assert transport._lane_worker is not worker

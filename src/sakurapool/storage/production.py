@@ -12,6 +12,7 @@ import re
 import secrets
 import stat
 import sys
+import threading
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
@@ -200,6 +201,10 @@ class RustProductionTransport:
 
         self._lane_lock = threading.RLock()
         self._operation_active = False
+        self._generation = 0
+        self._rotating = False
+        self._proof_group = False
+        self._live_proofs = set()
         self._closed = False
 
     max_range_bytes = MAX_RANGE
@@ -238,14 +243,10 @@ class RustProductionTransport:
         if self._lane_failed:
             raise RustWorkerError("execution channel unavailable")
         if self._lane_worker is not None and (
-                self._lane_requests >= 256
+                self._lane_requests + 1 > 256
                 or self._lane_body + budget["body"] > 8 << 30
                 or self._lane_attempts + budget["attempts"] > 2000):
-            self._lane_worker.close()
-            if self._lane_worker._proc is not None:
-                self._lane_failed = True
-                raise RustWorkerError("execution channel exit unconfirmed")
-            self._lane_worker = None
+            raise RustWorkerError("execution generation budget exhausted")
         if self._lane_worker is None:
             worker = worker_type(self.worker, job_budget={
                 "body": 8 << 30, "attempts": 2000,
@@ -260,6 +261,50 @@ class RustProductionTransport:
         self._lane_requests += 1
         self._lane_body += budget["body"]
         self._lane_attempts += budget["attempts"]
+
+    def _admit_generation(self, body, attempts, requests):
+        # Session credit only: every request still reserves its real ledger quota.
+        if not getattr(self, "_persistent", False):
+            return
+        if self._closed or self._operation_active or self._lane_failed or self._rotating:
+            raise RemoteIOError("execution generation unavailable")
+        if self._lane_worker is not None and (
+                self._lane_requests + requests > 256
+                or self._lane_body + body > 8 << 30
+                or self._lane_attempts + attempts > 2000):
+            worker = self._lane_worker
+            self._rotating = True
+            self._lane_lock.release()
+            try:
+                worker.close()
+            finally:
+                self._lane_lock.acquire()
+                self._rotating = False
+            if self._closed:
+                self._close_channel()
+                raise RemoteIOError("execution generation closed during rotation")
+            if self._lane_worker._proc is not None:
+                self._lane_failed = True
+                raise RemoteIOError("execution generation exit unconfirmed")
+            self._lane_worker = None
+            self._generation += 1
+            self._objects.clear()
+            self._live_proofs.clear()
+            self._lane_requests = self._lane_body = self._lane_attempts = 0
+            start_generation = getattr(self.ledger, "generation_start", None)
+            if start_generation is not None:
+                self._rotating = True
+                self._lane_lock.release()
+                try:
+                    start_generation()
+                except BaseException:
+                    self._lane_failed = True
+                    raise
+                finally:
+                    self._lane_lock.acquire()
+                    self._rotating = False
+                if self._closed:
+                    raise RemoteIOError("execution generation closed during admission")
 
     def enable_persistent(self):
         with self._lane_lock:
@@ -296,7 +341,7 @@ class RustProductionTransport:
     def close(self):
         with self._lane_lock:
             self._closed = True
-            active = self._operation_active
+            active = self._operation_active or self._rotating
             worker = getattr(self, "_request_worker", None) or getattr(self, "_lane_worker", None)
         if active:
             if worker is not None and getattr(worker, "_construction_ready", True):
@@ -332,7 +377,8 @@ class RustProductionTransport:
                         *getattr(primary, "finalization_secondary", ()), "worker_close")
             if worker is None or worker._proc is None:
                 try:
-                    self.ledger.settle(self._lane_lease)
+                    resident_settle = getattr(self.ledger, "settle_resident", self.ledger.settle)
+                    resident_settle(self._lane_lease)
                     self._persistent = False
                 except BaseException as error:
                     if primary is None:
@@ -419,6 +465,11 @@ class RustProductionTransport:
             raise RemoteIOError("package requires independently verified Rust conditional binding")
 
     def verified_object(self, candidate: ProviderObject):
+        with self._lane_lock:
+            self._admit_generation((16 << 20) + 16, 20, 5)
+        return self._verified_object_body(candidate)
+
+    def _verified_object_body(self, candidate: ProviderObject):
         """Resolve only this transport's live proof, matching full candidate identity."""
         if self._closed:
             raise RemoteIOError("closed production transport")
@@ -442,6 +493,9 @@ class RustProductionTransport:
         key, obj = matches[0]
         if self.ledger.condition_proof(proof_key(obj, test=self._test)) is None:
             raise RemoteIOError("verified object proof unavailable")
+        if (getattr(self, "_persistent", False)
+                and proof_key(obj, test=self._test) not in self._live_proofs):
+            raise RemoteIOError("fresh generation conditional proof required")
         self._objects.move_to_end(key)
         return obj
 
@@ -648,7 +702,8 @@ class RustProductionTransport:
     @contextmanager
     def _operation(self):
         with self._lane_lock:
-            if self._closed or self._operation_active:
+            if (self._closed or self._operation_active
+                    or (self._proof_group and self._proof_owner != threading.get_ident())):
                 raise RemoteIOError("execution channel lifecycle invalid")
             self._operation_active = True
             self._request_worker = None
@@ -670,6 +725,14 @@ class RustProductionTransport:
 
     @contextmanager
     def _transfer_owned(self, obj, **kwargs):
+        with self._lane_lock:
+            if not self._proof_group:
+                size = kwargs.get("length", 1)
+                self._admit_generation(size * 2 + 16, 4, 1)
+                if (getattr(self, "_persistent", False)
+                        and kwargs.get("condition", "match") == "match"
+                        and proof_key(obj, test=self._test) not in self._live_proofs):
+                    raise RemoteIOError("fresh generation conditional proof required")
         with self._operation():
             with self._transfer_owned_body(obj, **kwargs) as result:
                 yield result
@@ -709,6 +772,7 @@ class RustProductionTransport:
                     *getattr(primary, "finalization_secondary", ()), "reservation_rollback")
             raise
         root = None
+        raw = b""
         completed = False
         delivered_snapshot = None
         try:
@@ -758,7 +822,14 @@ class RustProductionTransport:
                 if not request_safe:
                     raise RemoteIOError("live request resources retained")
                 try:
-                    self.ledger.settle(memory_lease)
+                    if primary is not None and raw:
+                        # Escaping exceptions can retain payload through arbitrary
+                        # frames/containers. Do not guess its object graph or refund
+                        # the durable memory lease; network accounting is unchanged.
+                        primary.production_payload_lease = memory_lease
+                        primary.production_payload_resources = "PRESERVED"
+                    else:
+                        self.ledger.settle(memory_lease)
                 finally:
                     # Always attempt ownership registration/cleanup, even if settlement rejects.
                     if root is None:
@@ -890,6 +961,27 @@ class RustProductionTransport:
 
     def verify_conditions(self, candidate: ProviderObject):
         """Observe then positive+negative at the actual byte endpoint. Never infer support."""
+        with self._lane_lock:
+            if self._operation_active or self._proof_group:
+                raise RemoteIOError("execution generation already outstanding")
+            self._admit_generation((16 << 20) + 16, 20, 5)
+            self._proof_group = True
+            self._proof_owner = threading.get_ident()
+        try:
+            result = self._verify_conditions_body(candidate)
+            self._live_proofs.add(proof_key(result, test=self._test))
+            return result
+        except BaseException:
+            self._live_proofs.clear()
+            self._objects.clear()
+            if getattr(self, "_persistent", False):
+                self._lane_failed = True
+            raise
+        finally:
+            with self._lane_lock:
+                self._proof_group = False
+
+    def _verify_conditions_body(self, candidate):
         with self.transfer(candidate, condition="observe") as (_, observed):
             bound = replace(candidate, validator=observed["etag"], cdn_host=observed["cdn_host"])
             digest = observed["sha256"]

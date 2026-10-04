@@ -24,6 +24,7 @@ def add_parser(subparsers):
         command.add_argument("task_dir")
         if name in ("run", "resume"):
             command.add_argument("--profile", required=True)
+            command.add_argument("--workers", type=int, choices=(1, 2, 4), default=1)
         elif name == "export":
             command.add_argument("--manifest", required=True)
 
@@ -75,7 +76,7 @@ def command(args):
                 profile = read_profile(args.profile)
                 with connect_profile(profile, ledger) as transport:
                     result = run_task(args.task_dir, transport, resume=action == "resume",
-                                      connection_profile=profile)
+                                      connection_profile=profile, workers=args.workers)
         print(json.dumps(result, sort_keys=True))
         return 0
     except TaskError as error:

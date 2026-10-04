@@ -91,6 +91,18 @@ def fetch_publication_sample(
     pub, record_id, transport, output, metadata=False, control=None, scope=None,
     attempt_hook=None,
 ):
+    from .publication import Publication
+
+    if not isinstance(pub, Publication) or pub._closed or not pub.full_verified:
+        raise PublicationCorrupt("fetch requires full verified publication")
+    return _fetch_publication_sample(pub, record_id, transport, output, metadata=metadata,
+                                     control=control, scope=scope, attempt_hook=attempt_hook)
+
+
+def _fetch_publication_sample(
+    pub, record_id, transport, output, metadata=False, control=None, scope=None,
+    attempt_hook=None,
+):
     if pub._closed or not pub.full_verified:
         raise PublicationCorrupt("fetch requires full verified publication")
     if not isinstance(record_id, str) or len(record_id) != 32:
@@ -130,7 +142,9 @@ def fetch_publication_sample(
     ):
         raise PublicationCorrupt("runtime locator mismatch")
     ledger = transport.ledger
-    if not isinstance(ledger, BudgetLedger) or (
+    from ..tasks.pipeline import LedgerRPC
+
+    if not isinstance(ledger, (BudgetLedger, LedgerRPC)) or (
         not ledger.offline_mode
         and (not isinstance(transport, RustProductionTransport) or not transport.production_profile)
     ):

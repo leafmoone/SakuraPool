@@ -74,12 +74,17 @@ def verify_delivery(task, item):
 
 def reconcile(task):
     """Unknown network/settlement is a blocker, never permission to retry/refund."""
+    blocker = None
     for row in task.db.execute("SELECT * FROM items WHERE state IN ('IN_PROGRESS','DONE')"):
         final = task.directory / "output" / row["record_id"]
         attempt = task.db.execute("SELECT * FROM attempts WHERE attempt_id=?",
                                   (row["attempt_id"],)).fetchone()
         if os.path.lexists(final):
-            verify_delivery(task, row)
+            try:
+                verify_delivery(task, row)
+            except TaskError as error:
+                blocker = blocker or error
+                continue
             if (row["accounting"] == "CONFIRMED"
                     or (attempt is not None and attempt["accounting"] == "CONFIRMED"
                         and attempt["phase"] == "SETTLED")):
@@ -87,14 +92,19 @@ def reconcile(task):
                 continue
             task.finish_item(row["seq"], state="BLOCKED", code="BLOCKED_ACCOUNTING",
                              accounting="UNKNOWN")
-            raise TaskError("BLOCKED_ACCOUNTING", "recovery")
+            blocker = blocker or TaskError("BLOCKED_ACCOUNTING", "recovery")
+            continue
         if row["state"] == "DONE":
-            raise TaskError("OUTPUT_MISSING", "recovery")
+            blocker = blocker or TaskError("OUTPUT_MISSING", "recovery")
+            continue
         if attempt is None or attempt["network_state"] != "NOT_STARTED":
             task.finish_item(row["seq"], state="BLOCKED", code="NETWORK_ACCOUNTING_UNKNOWN",
                              accounting="UNKNOWN")
-            raise TaskError("NETWORK_ACCOUNTING_UNKNOWN", "recovery")
+            blocker = blocker or TaskError("NETWORK_ACCOUNTING_UNKNOWN", "recovery")
+            continue
         task.finish_item(row["seq"], state="READY")
+    if blocker is not None:
+        raise blocker
 
 
 def preflight(task, pub, item, transport):
@@ -188,8 +198,10 @@ def admit_task_growth(directory, ledger):
 
 
 def run_task(directory, transport, *, control=None, resume=False, fault_hook=None,
-             connection_profile=None):
-    """One process, one serial session, short DB transactions outside all IO."""
+             connection_profile=None, workers=1):
+    """Coordinator authority; bounded lanes never receive SQLite handles."""
+    if type(workers) is not int or workers not in (1, 2, 4):
+        raise TaskError("WORKERS_INVALID", "preflight")
     with (admit_task_growth(directory, transport.ledger),
           TaskDB(directory) as task, task.runner_lock()):
         _real_output_root(task.directory, transport.ledger)
@@ -210,6 +222,15 @@ def run_task(directory, transport, *, control=None, resume=False, fault_hook=Non
                 reconcile(task)
                 if task.db.execute("SELECT 1 FROM items WHERE state='BLOCKED' LIMIT 1").fetchone():
                     raise TaskError("BLOCKED_ACCOUNTING", "recovery")
+                if hasattr(transport, "clone"):
+                    from .pipeline import run_pipeline
+
+                    run_pipeline(task, session.publication, transport, workers=workers,
+                                 metadata=header["metadata"], fault_hook=fault_hook,
+                                 control=control)
+                    return task.inspect()
+                if workers != 1:
+                    raise TaskError("WORKER_CHANNEL_UNAVAILABLE", "preflight")
                 while True:
                     request = task.meta("request")
                     if request:

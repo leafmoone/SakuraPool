@@ -500,6 +500,23 @@ class RuntimeSnapshot:
         row = self._locations[rid]
         return {name: int(row[name]) for name in row.dtype.names}
 
+    def _prepared_object_ref(self, object_idx: int) -> dict:
+        """Bounded internal projection; reject before SQLite materializes text."""
+        self._check_open()
+        row = self._catalog.execute(
+            "SELECT object_path,object_size,object_version FROM objects "
+            "WHERE object_idx=? AND typeof(object_path)='text' AND length(object_path)<=2048 "
+            "AND instr(object_path,char(0))=0 "
+            "AND typeof(object_size)='blob' AND length(object_size)=8 "
+            "AND typeof(object_version)='text' AND length(object_version)=64 "
+            "AND instr(object_version,char(0))=0",
+            (object_idx,),
+        ).fetchone()
+        if row is None:
+            raise UnknownQueryValueError("prepared object identity unavailable or exceeds bound")
+        return {"object_path": row[0], "object_size": _from_u64(row[1]),
+                "object_version": row[2]}
+
     def object_ref(self, object_idx: int) -> dict:
         """Full ObjectRef for one catalog object (object_idx from a location)."""
         self._check_open()

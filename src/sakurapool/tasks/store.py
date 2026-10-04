@@ -219,6 +219,37 @@ class TaskDB:
             self.set_meta(db, "request", value)
         return {"requested": value, "state": self.meta("state")}
 
+    def _pipeline_candidate(self, db=None):
+        connection = self.db if db is None else db
+        # CASE gates prevent materializing oversized selected values; selecting
+        # first READY before validation avoids silently skipping corrupt identity.
+        row = connection.execute(
+            "SELECT CASE WHEN typeof(seq)='integer' THEN seq ELSE NULL END AS seq,"
+            "CASE WHEN typeof(rid)='integer' THEN rid ELSE NULL END AS rid,"
+            "CASE WHEN typeof(record_id)='text' AND length(record_id)=32 "
+            "AND instr(record_id,char(0))=0 "
+            "THEN record_id ELSE NULL END AS record_id FROM items "
+            "WHERE state='READY' ORDER BY seq LIMIT 1").fetchone()
+        if row is not None and (row["record_id"] is None
+                or type(row["seq"]) is not int or not 0 <= row["seq"] < 1 << 64
+                or type(row["rid"]) is not int or not 0 <= row["rid"] < 1 << 64):
+            raise TaskError("TASK_IDENTITY_INVALID")
+        return None if row is None else dict(row)
+
+    def _pipeline_claim(self):
+        with self.transaction() as db:
+            if self.meta("request") is not None:
+                return None
+            row = self._pipeline_candidate(db)
+            if row is None:
+                return None
+            attempt, operation = uuid.uuid4().hex, uuid.uuid4().hex
+            db.execute("INSERT INTO attempts(attempt_id,seq,operation_id,phase) VALUES(?,?,?,?)",
+                       (attempt, row["seq"], operation, "CLAIMED"))
+            db.execute("UPDATE items SET state='IN_PROGRESS',attempt_id=?,accounting='NONE' "
+                       "WHERE seq=?", (attempt, row["seq"]))
+            return row | {"attempt_id": attempt, "operation_id": operation}
+
     def claim(self):
         """Claim one seq in a short transaction, only under runner ownership."""
         with self.transaction() as db:
@@ -243,6 +274,8 @@ class TaskDB:
         if event not in allowed:
             raise TaskError("ATTEMPT_EVENT_INVALID")
         with self.transaction() as db:
+            # Only current newly-generated attempt is admitted here; payload
+            # receipt came through the 16KiB typed RPC gate, not historical items.
             row = db.execute("SELECT * FROM attempts WHERE attempt_id=?", (attempt,)).fetchone()
             if row is None:
                 raise TaskError("ATTEMPT_IDENTITY_MISSING")
