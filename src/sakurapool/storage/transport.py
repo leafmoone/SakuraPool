@@ -157,8 +157,11 @@ class RemoteIOError(RuntimeError):
         self.http_status = http_status
 
     def public_diagnostic(self) -> dict[str, str | int]:
-        result: dict[str, str | int] = {"code": self.code, "phase": self.phase,
-                                        "accounting": self.accounting_state}
+        result: dict[str, str | int] = {
+            "code": self.code,
+            "phase": self.phase,
+            "accounting": self.accounting_state,
+        }
         if self.http_status is not None:
             result["http_status"] = self.http_status
         if (
@@ -167,8 +170,11 @@ class RemoteIOError(RuntimeError):
             and getattr(self, "actual_consumption", None) == "UNKNOWN"
             and getattr(self, "accounted", None) == "CONSERVATIVE_MAX"
         ):
-            result.update(accounting_basis="CONSERVATIVE_MAX_CHARGE",
-                          actual_consumption="UNKNOWN", accounted="CONSERVATIVE_MAX")
+            result.update(
+                accounting_basis="CONSERVATIVE_MAX_CHARGE",
+                actual_consumption="UNKNOWN",
+                accounted="CONSERVATIVE_MAX",
+            )
         if getattr(self, "finalization_secondary", ()):
             result["secondary"] = list(self.finalization_secondary)
         return result
@@ -399,8 +405,11 @@ class GuardedTransport:
                 raise ValueError("offline transport requires literal IPv4 loopback only")
         self.ledger = ledger
         workspace = getattr(ledger, "workspace", None)
-        self.capacity = capacity if capacity is not None else (
-            workspace.capacity if workspace is not None else CapacityConfig())
+        self.capacity = (
+            capacity
+            if capacity is not None
+            else (workspace.capacity if workspace is not None else CapacityConfig())
+        )
         if not isinstance(self.capacity, CapacityConfig):
             raise ValueError("typed capacity required")
         if workspace is not None and workspace.capacity != self.capacity:
@@ -556,8 +565,13 @@ class GuardedTransport:
                 "network attempt failed; body reservation retained",
                 phase="metadata_send" if metadata else "transport",
             )
-        if sum(len(k.encode("utf-8")) + len(v.encode("utf-8")) + 4
-               for k, v in response.headers.items()) > self.capacity.http_header_bytes:
+        if (
+            sum(
+                len(k.encode("utf-8")) + len(v.encode("utf-8")) + 4
+                for k, v in response.headers.items()
+            )
+            > self.capacity.http_header_bytes
+        ):
             response.close()
             self.ledger.settle(lease)
             raise RemoteIOError("response headers exceed capacity", phase="response_headers")
@@ -957,6 +971,7 @@ class GuardedTransport:
         headers: dict[str, str],
         refresh_origin: str | None = None,
         operation: dict | None = None,
+        tree_retry_url: str | None = None,
     ):
         """At most 3 attempts; any 403 fails closed, even at a signed redirect.
 
@@ -975,6 +990,8 @@ class GuardedTransport:
                 if operation is not None:
                     operation["unknown"] = True
                 # The failed attempt and full unknown body remain charged.
+                if tree_retry_url is not None:
+                    raise
                 if attempt + 1 < MAX_ATTEMPTS:
                     time.sleep(self._retry_delay(None, attempt))
                     continue
@@ -990,11 +1007,25 @@ class GuardedTransport:
                 self.ledger.settle(lease)
                 if target is None:
                     raise RemoteIOError(
-                        "unsafe redirect target", code="redirect_policy", phase="response_headers",
-                        accounting=("CONFIRMED" if operation is not None
-                                    and not operation["unknown"] else "UNKNOWN"),
+                        "unsafe redirect target",
+                        code="redirect_policy",
+                        phase="response_headers",
+                        accounting=(
+                            "CONFIRMED"
+                            if operation is not None and not operation["unknown"]
+                            else "UNKNOWN"
+                        ),
                     )
                 url = target
+                continue
+            if (
+                tree_retry_url is not None
+                and url == tree_retry_url
+                and status in {400, 403}
+                and attempt + 1 < MAX_ATTEMPTS
+            ):
+                response.close()
+                self.ledger.settle(lease)
                 continue
             if status in (429, 500, 502, 503, 504):
                 retry_after = response.headers.get("Retry-After")
@@ -1005,17 +1036,28 @@ class GuardedTransport:
                         delay = self._retry_delay(retry_after, attempt)
                     except RemoteIOError as error:
                         error.accounting_state = (
-                            "CONFIRMED" if operation is not None and not operation["unknown"]
-                            else "UNKNOWN")
+                            "CONFIRMED"
+                            if operation is not None and not operation["unknown"]
+                            else "UNKNOWN"
+                        )
                         raise
                     time.sleep(delay)
                     continue
-                raise RemoteIOError("bounded retry attempts exhausted", accounting=(
-                    "CONFIRMED" if operation is not None and not operation["unknown"]
-                    else "UNKNOWN"))
+                raise RemoteIOError(
+                    "bounded retry attempts exhausted",
+                    accounting=(
+                        "CONFIRMED"
+                        if operation is not None and not operation["unknown"]
+                        else "UNKNOWN"
+                    ),
+                )
             return response, lease
-        raise RemoteIOError("bounded redirect attempts exhausted", accounting=(
-            "CONFIRMED" if operation is not None and not operation["unknown"] else "UNKNOWN"))
+        raise RemoteIOError(
+            "bounded redirect attempts exhausted",
+            accounting=(
+                "CONFIRMED" if operation is not None and not operation["unknown"] else "UNKNOWN"
+            ),
+        )
 
     def _read_bounded(
         self, response: requests.Response, lease: str, limit: int, *, metadata: bool, exact: bool
@@ -1277,14 +1319,21 @@ class GuardedTransport:
         self.ledger.record_condition_proof(key, observed)
         return observed
 
-    def read_metadata(self, url: str, *, max_bytes: int = MIB) -> bytes:
+    def read_metadata(
+        self, url: str, *, max_bytes: int = MIB, _validated_tree_retry: bool = False
+    ) -> bytes:
         """Guarded, bounded provider-listing response; no SDK bypass."""
         if type(max_bytes) is not int or not 0 <= max_bytes <= self.capacity.metadata_max_bytes:
             raise ValueError("metadata single-response cap exceeded")
         operation = {"unknown": False}
         response, lease = self._response(
-            url, max_body=max_bytes + 1, metadata=True, inflight=2 * (max_bytes + 1), headers={},
+            url,
+            max_body=max_bytes + 1,
+            metadata=True,
+            inflight=2 * (max_bytes + 1),
+            headers={},
             operation=operation,
+            tree_retry_url=url if _validated_tree_retry else None,
         )
         try:
             if response.status_code != 200:

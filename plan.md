@@ -1,3 +1,18 @@
+# P6-A NETWORK STABILITY — HTTP STATUS FINALIZATION
+
+Current execution supersedes prior HTTP/retry stop rules. Base e049a7c84031301faef592cec3f11ce428fde640 preserved; only existing worktree/feature branch writes. Freeze old user3UNKNOWN/6pending and previous cold/persistent2pending each plus raw results.
+
+- [ ] Sole safety design: bounded control-response drain cap65536 with cap+1 overflow probe, trustworthy framing+EOF only complete; no body logging/output; retain exactly8 conservative network codes.
+- [ ] Shared origin/CDN body-budget helper across accounted call/StreamPlan/warm prediction/preflight; payload length/SHA independent of counted control bytes.
+- [ ] Complete HTTP status accounting only after consume and all lease settlements; outer cleanup/unpublished/earlierUNKNOWN gates; persistent confirmed-status continuation without clearing uncertainty.
+- [ ] Legacy repo/tree validated GET400/403-only retry in existing shared MAX_ATTEMPTS redirect budget; close/settle before retry; no auth/shape/identity/ambiguous retries.
+- [ ] Bounded Rust/Python status/framing/retry/persistent/consumer tests, explicit GNU PATH dedicated build --locked, no full matrix.
+- [ ] New independent real soak each iteration verifyconditions, classify PASS/KNOWN_STATUS_REJECTION/CONFIRMED_TRANSIENT/TRUEUNKNOWN; trueunknown stops mode, no old-domain mutation.
+- [ ] Userworkspace new approved task only both modes noTRUEUNKNOWN; one recoverable freshprocessresume max, trueunknown stop, actual finalexport metadata/saved evidence.
+- [ ] Reviewed ordinary product commit plus optional docs, branch-only push/remote SHA devmain unchanged, full report and WAITING_REVIEW.
+
+## Previous execution sheet (historical)
+
 # P6-A NETWORK STABILITY FINAL — current authorization
 
 Current user execution sheet supersedes the previous discovery-gated stop. Continue only current worktree/branch from 98732034cd369b389f8f3ef8dfaa40f97d4adec0; preserve that commit without amend/rebase. Old three UNKNOWN tasks and original six pending remain read-only.

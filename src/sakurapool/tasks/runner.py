@@ -218,17 +218,27 @@ def preflight(task, pub, item, transport, *, prepared=None, proof_warm=None, led
     else:
         proof_cached = proof_warm
     range_count, max_chunk = chunk_plan(loc["image_size"], meta_size, capacity)
+    from ..storage.prepared_fetch import stream_plan
+    from ..storage.production_resources import checked_body_add, network_body_budget
+
     required = {
         "saved_samples": 1,
         "saved_bytes": loc["image_size"] + meta_size,
-        "body": loc["image_size"] + meta_size + range_count,
+        "body": stream_plan(loc, size, metadata=metadata, capacity=capacity).generation_body,
         "attempts": 2 * range_count,
     }
     if not proof_cached:
-        from ..storage.production_resources import NEGATIVE_CONDITION_BODY_CAP
+        from ..storage.production_resources import checked_body_add, network_body_budget
 
         listing_cap = (1 << 20) + 1
-        required["body"] += 2 * listing_cap + 4 + NEGATIVE_CONDITION_BODY_CAP + 1
+        required["body"] = checked_body_add(
+            required["body"],
+            listing_cap,
+            listing_cap,
+            network_body_budget(1),
+            network_body_budget(1),
+            network_body_budget(1, condition="wrong"),
+        )
         required["metadata"] = 2 * listing_cap
         required["attempts"] += 8
     if not ledger.offline_mode:
@@ -456,8 +466,9 @@ def run_task(
                                 state="READY" if known else "BLOCKED",
                                 code=error.code,
                                 accounting="CONFIRMED" if known else "UNKNOWN",
-                                accounting_basis=(error.safe_details.get("accounting_basis")
-                                                  if known else None),
+                                accounting_basis=(
+                                    error.safe_details.get("accounting_basis") if known else None
+                                ),
                             )
                             error.delivery = (
                                 "PUBLISHED" if status == "PUBLISHED" else "NOT_PUBLISHED"

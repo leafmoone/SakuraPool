@@ -8,7 +8,37 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-pub const NEGATIVE_CONDITION_BODY_CAP: u64 = 65_536;
+pub const CONTROL_RESPONSE_BODY_CAP: u64 = 65_536;
+pub const NEGATIVE_CONDITION_BODY_CAP: u64 = CONTROL_RESPONSE_BODY_CAP;
+
+fn drain_control(r: &mut Response, a: &mut Accounting) -> Result<(), &'static str> {
+    a.complete = false;
+    let cl = single(r.headers(), "content-length")?;
+    let te = single(r.headers(), "transfer-encoding")?;
+    if cl.is_some() && te.is_some()
+        || te.is_some_and(|v| !v.eq_ignore_ascii_case("chunked"))
+        || single(r.headers(), "content-encoding")?.unwrap_or("identity") != "identity"
+    { return Err("body_framing"); }
+    let declared = cl.map(|v| {
+        if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) { return Err("body_framing"); }
+        v.parse::<u64>().map_err(|_| "body_framing")
+    }).transpose()?;
+    if declared.is_some_and(|n| n > CONTROL_RESPONSE_BODY_CAP) { return Err("body_length"); }
+    let mut count = 0u64;
+    let mut scratch = [0u8; 4096];
+    loop {
+        let take = ((CONTROL_RESPONSE_BODY_CAP + 1 - count) as usize).min(scratch.len());
+        let n = r.read(&mut scratch[..take]).map_err(|_| "body_io")?;
+        count += n as u64;
+        a.body = a.body.checked_add(n as u64).ok_or("body_length")?;
+        if count > CONTROL_RESPONSE_BODY_CAP { return Err("body_length"); }
+        if n == 0 {
+            if declared.is_some_and(|n| n != count) { return Err("body_length"); }
+            a.complete = true;
+            return Ok(());
+        }
+    }
+}
 fn public_scan_error(error: &'static str) -> &'static str {
     if error == "metadata_limit" {
         "metadata_limit"
@@ -177,12 +207,13 @@ pub struct Outcome {
     pub accounting: Accounting,
 }
 fn network_error(error: &reqwest::Error, origin: bool) -> &'static str {
-    network_error_predicates(
-        origin,
-        error.is_timeout(),
-        error.is_connect(),
-        error.is_request(),
-    )
+    // send() also reports response-parser/framing errors as request/transport.
+    // reqwest exposes no stable typed discriminator here. Fail closed rather
+    // than upgrading an untrusted response through conservative maximum charge.
+    if !error.is_timeout() && !error.is_connect() {
+        return "network_ambiguous";
+    }
+    network_error_predicates(origin, error.is_timeout(), error.is_connect(), false)
 }
 
 fn network_error_predicates(
@@ -486,6 +517,7 @@ struct CountTee<'a> {
     max: u64,
     count: &'a mut u64,
     complete: &'a mut bool,
+    total: &'a mut u64,
 }
 impl Read for CountTee<'_> {
     fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
@@ -499,6 +531,8 @@ impl Read for CountTee<'_> {
         }
         let n = self.response.read(&mut b[..cap])?;
         *self.count += n as u64;
+        *self.total = self.total.checked_add(n as u64)
+            .ok_or_else(|| std::io::Error::other("body_limit"))?;
         if *self.count > self.max {
             return Err(std::io::Error::other("body_limit"));
         }
@@ -588,14 +622,10 @@ fn transfer(
     a.http_status = None;
     a.attempts += 1;
     a.complete = false;
-    let r = req.send().map_err(|error| network_error(&error, true))?;
+    let mut r = req.send().map_err(|error| network_error(&error, true))?;
     a.observe_headers(&r);
     headers(&r, t.http_header_bytes)?;
-    a.complete = single(r.headers(), "content-length")? == Some("0")
-        && single(r.headers(), "transfer-encoding")?.is_none();
-    if !a.complete {
-        return Err("origin_body_unknown");
-    }
+    drain_control(&mut r, a)?;
     if r.status().as_u16() != 302 {
         return Err("origin_status");
     }
@@ -632,49 +662,15 @@ fn transfer(
     let mut r = req.send().map_err(|error| network_error(&error, false))?;
     a.observe_headers(&r);
     headers(&r, t.http_header_bytes)?;
-    a.complete = single(r.headers(), "content-length")? == Some("0")
-        && single(r.headers(), "transfer-encoding")?.is_none();
+    a.complete = false;
     let status = r.status().as_u16();
     if t.condition == "wrong" {
         a.complete = false;
         if status != 412 {
-            return Err("conditional_unsupported");
+            drain_control(&mut r, a)?;
+            return Err("cdn_status");
         }
-        let cl = single(r.headers(), "content-length")?;
-        let te = single(r.headers(), "transfer-encoding")?;
-        if cl.is_some() && te.is_some()
-            || single(r.headers(), "content-encoding")?.unwrap_or("identity") != "identity"
-            || te.is_some_and(|v| !v.eq_ignore_ascii_case("chunked"))
-        {
-            return Err("body_framing");
-        }
-        let declared = cl
-            .map(|v| {
-                if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
-                    return Err("body_framing");
-                }
-                v.parse::<u64>().map_err(|_| "body_framing")
-            })
-            .transpose()?;
-        if declared.is_some_and(|n| n > NEGATIVE_CONDITION_BODY_CAP) {
-            return Err("body_length");
-        }
-        let mut chunk = [0u8; 4096];
-        loop {
-            let take = ((NEGATIVE_CONDITION_BODY_CAP + 1 - a.body) as usize).min(chunk.len());
-            let n = r.read(&mut chunk[..take]).map_err(|_| "body_io")?;
-            a.body += n as u64;
-            if a.body > NEGATIVE_CONDITION_BODY_CAP {
-                return Err("body_length");
-            }
-            if n == 0 {
-                if declared.is_some_and(|n| n != a.body) {
-                    return Err("body_length");
-                }
-                a.complete = true;
-                break;
-            }
-        }
+        drain_control(&mut r, a)?;
         output
             .as_mut()
             .ok_or("output_io")?
@@ -683,6 +679,7 @@ fn transfer(
         return Ok(serde_json::json!({"status":412,"cdn_host":target.host_str(),"bytes":0}));
     }
     if status != if t.mode == "range" { 206 } else { 200 } {
+        drain_control(&mut r, a)?;
         return Err("cdn_status");
     }
     let size = if t.mode == "range" {
@@ -727,13 +724,17 @@ fn transfer(
     if t.mode == "range" {
         let mut hash = Sha256::new();
         let mut chunk = [0u8; 65536];
-        while a.body < size + 1 {
-            let cap = ((size + 1 - a.body) as usize).min(chunk.len());
+        let mut payload = 0u64;
+        let mut eof = false;
+        while payload < size + 1 {
+            let cap = ((size + 1 - payload) as usize).min(chunk.len());
             let n = r.read(&mut chunk[..cap]).map_err(|_| "body_io")?;
             if n == 0 {
+                eof = true;
                 break;
             }
-            a.body += n as u64;
+            a.body = a.body.checked_add(n as u64).ok_or("body_length")?;
+            payload += n as u64;
             hash.update(&chunk[..n]);
             output
                 .as_mut()
@@ -741,8 +742,8 @@ fn transfer(
                 .write_all(&chunk[..n])
                 .map_err(|_| "output_io")?;
         }
-        a.complete = true;
-        if a.body != size {
+        a.complete = eof;
+        if payload != size || !eof {
             return Err("body_length");
         }
         output
@@ -751,7 +752,7 @@ fn transfer(
             .sync_all()
             .map_err(|_| "output_io")?;
         return Ok(
-            serde_json::json!({"bytes":a.body,"sha256":format!("{:x}",hash.finalize()),"etag":etag,"status":status,"cdn_host":target.host_str()}),
+            serde_json::json!({"bytes":payload,"sha256":format!("{:x}",hash.finalize()),"etag":etag,"status":status,"cdn_host":target.host_str()}),
         );
     }
     let limits = crate::ScanLimits {
@@ -759,14 +760,16 @@ fn transfer(
         max_members: 100_000,
     };
     let observer = sidecars.as_mut().ok_or("report_missing")?;
+    let mut payload = 0u64;
     let report = if t.mode == "remote-stream-scan" {
         a.phase = "scan";
         let mut counted = CountTee {
             response: r,
             file: None,
             max: size,
-            count: &mut a.body,
+            count: &mut payload,
             complete: &mut a.complete,
+            total: &mut a.body,
         };
         crate::scan_tar_reader_observed(&mut counted, &limits, observer)
             .map_err(public_scan_error)?
@@ -776,8 +779,9 @@ fn transfer(
             response: r,
             file: output,
             max: size,
-            count: &mut a.body,
+            count: &mut payload,
             complete: &mut a.complete,
+            total: &mut a.body,
         };
         std::io::copy(&mut tee, &mut std::io::sink()).map_err(|_| "body_io")?;
         tee.file
@@ -794,11 +798,11 @@ fn transfer(
         )
         .map_err(public_scan_error)?
     };
-    if a.body != size || report.size != size || !a.complete {
+    if payload != size || report.size != size || !a.complete {
         return Err("body_length");
     }
     let mut result = sidecars.take().ok_or("report_missing")?.finish(&report)?;
-    result["bytes"] = serde_json::json!(a.body);
+    result["bytes"] = serde_json::json!(payload);
     result["sha256"] = serde_json::json!(report.whole_sha256);
     result["etag"] = serde_json::json!(etag);
     result["status"] = serde_json::json!(status);
@@ -829,6 +833,56 @@ pub fn run_with_context(t: Transfer, context: &mut ExecutionContext) -> Outcome 
 }
 #[cfg(test)]
 mod diagnostic_tests {
+    #[test]
+    fn control_response_framing_loopback() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let cases = [
+            ("Content-Length: 0\r\n", Vec::new(), true),
+            ("Content-Length: 3\r\n", b"abc".to_vec(), true),
+            ("Transfer-Encoding: chunked\r\n", b"3\r\nabc\r\n0\r\n\r\n".to_vec(), true),
+            ("", b"abc".to_vec(), true),
+            ("Content-Length: 65536\r\n", vec![b'x'; 65536], true),
+            ("Content-Length: 65537\r\n", Vec::new(), false),
+            ("Content-Length: 3\r\n", b"a".to_vec(), false),
+            ("Content-Encoding: gzip\r\nContent-Length: 0\r\n", Vec::new(), false),
+            ("", vec![b'x'; 65537], false),
+            ("Content-Length: nope\r\n", Vec::new(), false),
+            ("Transfer-Encoding: mystery\r\n", Vec::new(), false),
+            ("Content-Length: 0\r\nTransfer-Encoding: chunked\r\n", b"0\r\n\r\n".to_vec(), false),
+        ];
+        for (headers, body, expected) in cases {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let expected_count = if headers.contains("65537")
+                || headers.contains("gzip") || headers.contains("nope")
+                || headers.contains("mystery") || (headers.contains("Content-Length")
+                    && headers.contains("Transfer-Encoding")) { 0 }
+                else if headers.contains("chunked") { 3 }
+                else { body.len() as u64 };
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut request = [0; 4096];
+                let _ = socket.read(&mut request);
+                let header = format!("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n{headers}\r\n");
+                let _ = socket.write_all(header.as_bytes());
+                let _ = socket.write_all(&body);
+            });
+            let response = reqwest::blocking::Client::new()
+                .get(format!("http://{address}/")).send();
+            let mut accounting = super::Accounting::default();
+            if let Ok(mut response) = response {
+                assert_eq!(super::drain_control(&mut response, &mut accounting).is_ok(), expected);
+                assert_eq!(accounting.complete, expected);
+                assert_eq!(accounting.body, expected_count);
+            } else {
+                assert!(!expected);
+                assert!(!accounting.complete);
+            }
+            server.join().unwrap();
+        }
+    }
+
     #[test]
     fn network_predicate_priority_and_phase() {
         for origin in [true, false] {

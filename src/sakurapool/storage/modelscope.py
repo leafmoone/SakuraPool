@@ -131,11 +131,18 @@ class ModelScopeDataset:
         self.base = (f"{self.endpoint}/api/v1/datasets"
                      f"/{self.repository_id.owner}/{self.repository_id.name}")
 
-    def _data(self, url: str, *, phase: str = "provider_revision_shape") -> object:
-        request_phase = {"provider_repository_shape": "provider_repository_request",
-                         "provider_tree_shape": "provider_tree_request"}.get(phase)
+    def _data(
+        self, url: str, *, phase: str = "provider_revision_shape", tree_retry: bool = False
+    ) -> object:
+        request_phase = {
+            "provider_repository_shape": "provider_repository_request",
+            "provider_tree_shape": "provider_tree_request",
+        }.get(phase)
         try:
-            payload = self.transport.read_metadata(url)
+            if tree_retry:
+                payload = self.transport.read_metadata(url, _validated_tree_retry=True)
+            else:
+                payload = self.transport.read_metadata(url)
         except RemoteIOError as error:
             self._metadata_reads += 1
             self._metadata_confirmed &= error.accounting_state == "CONFIRMED"
@@ -145,27 +152,39 @@ class ModelScopeDataset:
             raise
         except Exception:
             self._metadata_confirmed = False
-            raise RemoteIOError("metadata operation failed", phase=request_phase or "metadata_send",
-                                accounting="UNKNOWN") from None
+            raise RemoteIOError(
+                "metadata operation failed",
+                phase=request_phase or "metadata_send",
+                accounting="UNKNOWN",
+            ) from None
         self._metadata_reads += 1
         self._metadata_confirmed &= getattr(payload, "accounting_state", "UNKNOWN") == "CONFIRMED"
         if not self._metadata_confirmed:
-            raise RemoteIOError("metadata operation contains an uncertain request",
-                                code="network_ambiguous", phase=request_phase or "metadata_body",
-                                accounting="UNKNOWN")
+            raise RemoteIOError(
+                "metadata operation contains an uncertain request",
+                code="network_ambiguous",
+                phase=request_phase or "metadata_body",
+                accounting="UNKNOWN",
+            )
         try:
             decoded = json.loads(payload)
         except (UnicodeDecodeError, ValueError):
             decoded = None
         if decoded is None:
-            raise _io_error(self, "invalid provider metadata JSON", code="invalid_json",
-                                phase=phase)
+            raise _io_error(
+                self, "invalid provider metadata JSON", code="invalid_json", phase=phase
+            )
         if not isinstance(decoded, dict) or "Data" not in decoded:
-            raise _io_error(self, "unrecognized provider response; cannot claim completeness",
-                                code="provider_shape", phase=phase)
-        if (decoded.get("Code", 200) != 200 or decoded.get("Success") is False):
-            raise _io_error(self, "provider metadata unsuccessful",
-                                code="provider_rejection", phase=phase)
+            raise _io_error(
+                self,
+                "unrecognized provider response; cannot claim completeness",
+                code="provider_shape",
+                phase=phase,
+            )
+        if decoded.get("Code", 200) != 200 or decoded.get("Success") is False:
+            raise _io_error(
+                self, "provider metadata unsuccessful", code="provider_rejection", phase=phase
+            )
         return decoded["Data"]
 
     def legacy_hub_id(self) -> int:
@@ -182,109 +201,190 @@ class ModelScopeDataset:
         self._legacy_verified_id = info["Id"]
         return info["Id"]
 
-    def legacy_tree_page(self, hub_id: int, revision: str, *, root: str,
-                         page: int = 1, page_size: int = 20) -> TreePage:
+    def legacy_tree_page(
+        self, hub_id: int, revision: str, *, root: str, page: int = 1, page_size: int = 20
+    ) -> TreePage:
         """Bounded SDK legacy tree; master only discovers candidates, never proves binding."""
-        if (type(hub_id) is not int or hub_id != getattr(self, "_legacy_verified_id", None)
-                or not 0 < hub_id < 1 << 63
-                or not isinstance(revision, str)
-                or (revision != "master" and not _SHA.fullmatch(revision))
-                or type(page) is not int or not 1 <= page <= MAX_PAGES
-                or type(page_size) is not int or not 1 <= page_size <= PAGE_SIZE
-                or not isinstance(root, str) or (root != "/" and not _is_canonical_path(root))):
+        if (
+            type(hub_id) is not int
+            or hub_id != getattr(self, "_legacy_verified_id", None)
+            or not 0 < hub_id < 1 << 63
+            or not isinstance(revision, str)
+            or (revision != "master" and not _SHA.fullmatch(revision))
+            or type(page) is not int
+            or not 1 <= page <= MAX_PAGES
+            or type(page_size) is not int
+            or not 1 <= page_size <= PAGE_SIZE
+            or not isinstance(root, str)
+            or (root != "/" and not _is_canonical_path(root))
+        ):
             raise ValueError("legacy tree scope invalid")
-        query = urlencode({"Revision": revision, "Root": root, "Recursive": "True",
-                           "PageNumber": page, "PageSize": page_size})
-        info = self._data(f"{self.endpoint}/api/v1/datasets/{hub_id}/repo/tree?{query}",
-                          phase="provider_tree_shape")
+        query = urlencode(
+            {
+                "Revision": revision,
+                "Root": root,
+                "Recursive": "True",
+                "PageNumber": page,
+                "PageSize": page_size,
+            }
+        )
+        info = self._data(
+            f"{self.endpoint}/api/v1/datasets/{hub_id}/repo/tree?{query}",
+            phase="provider_tree_shape",
+            tree_retry=bool(_SHA.fullmatch(revision)) and self._metadata_confirmed,
+        )
         files = info.get("Files") if isinstance(info, dict) else None
         if not isinstance(files, list) or len(files) > page_size:
-            raise _io_error(self, "unrecognized legacy tree page", code="provider_page_shape",
-                                phase="provider_listing_shape")
+            raise _io_error(
+                self,
+                "unrecognized legacy tree page",
+                code="provider_page_shape",
+                phase="provider_listing_shape",
+            )
         result = []
         seen = set()
         for entry in files:
             if not isinstance(entry, dict):
-                raise _io_error(self, "malformed legacy tree entry",
-                                code="provider_entry_shape",
-                                    phase="provider_listing_shape")
+                raise _io_error(
+                    self,
+                    "malformed legacy tree entry",
+                    code="provider_entry_shape",
+                    phase="provider_listing_shape",
+                )
             if entry.get("Type") not in ("blob", "file"):
                 if entry.get("Type") in ("tree", "directory"):
                     directory = entry.get("Path")
-                    if (not isinstance(directory, str)
-                            or not _is_canonical_path(directory) or len(directory) > 512
-                            or (root != "/" and not directory.startswith(root + "/"))):
-                        raise _io_error(self, "legacy tree directory scope invalid",
-                                            code="provider_entry_path",
-                                            phase="provider_listing_shape")
+                    if (
+                        not isinstance(directory, str)
+                        or not _is_canonical_path(directory)
+                        or len(directory) > 512
+                        or (root != "/" and not directory.startswith(root + "/"))
+                    ):
+                        raise _io_error(
+                            self,
+                            "legacy tree directory scope invalid",
+                            code="provider_entry_path",
+                            phase="provider_listing_shape",
+                        )
                     if directory in seen:
-                        raise _io_error(self, "legacy tree path duplicate",
-                                            code="provider_entry_duplicate",
-                                            phase="provider_listing_shape")
+                        raise _io_error(
+                            self,
+                            "legacy tree path duplicate",
+                            code="provider_entry_duplicate",
+                            phase="provider_listing_shape",
+                        )
                     seen.add(directory)
                     continue
-                raise _io_error(self, "unrecognized legacy tree entry type",
-                                    code="provider_entry_type",
-                                    phase="provider_listing_shape")
+                raise _io_error(
+                    self,
+                    "unrecognized legacy tree entry type",
+                    code="provider_entry_type",
+                    phase="provider_listing_shape",
+                )
             path, size, candidate = entry.get("Path"), entry.get("Size"), entry.get("Revision")
-            if not isinstance(path, str) or not _is_canonical_path(path) or len(path)>512:
-                raise _io_error(self, "legacy tree path invalid", code="provider_entry_path",
-                                    phase="provider_listing_shape")
+            if not isinstance(path, str) or not _is_canonical_path(path) or len(path) > 512:
+                raise _io_error(
+                    self,
+                    "legacy tree path invalid",
+                    code="provider_entry_path",
+                    phase="provider_listing_shape",
+                )
             if path in seen:
-                raise _io_error(self, "legacy tree path duplicate",
-                                code="provider_entry_duplicate",
-                                    phase="provider_listing_shape")
-            if root != "/" and not path.startswith(root.rstrip("/")+"/"):
-                raise _io_error(self, "legacy tree scope invalid", code="provider_entry_scope",
-                                    phase="provider_listing_shape")
+                raise _io_error(
+                    self,
+                    "legacy tree path duplicate",
+                    code="provider_entry_duplicate",
+                    phase="provider_listing_shape",
+                )
+            if root != "/" and not path.startswith(root.rstrip("/") + "/"):
+                raise _io_error(
+                    self,
+                    "legacy tree scope invalid",
+                    code="provider_entry_scope",
+                    phase="provider_listing_shape",
+                )
             if type(size) is not int or not 0 <= size <= 1 << 50:
-                raise _io_error(self, "legacy tree size invalid", code="provider_entry_size",
-                                    phase="provider_listing_shape")
+                raise _io_error(
+                    self,
+                    "legacy tree size invalid",
+                    code="provider_entry_size",
+                    phase="provider_listing_shape",
+                )
             candidate_absent = candidate is None or candidate == ""
-            if ((revision == "master" or not candidate_absent)
-                    and (not isinstance(candidate, str) or not _SHA.fullmatch(candidate))):
-                raise _io_error(self, "legacy tree revision invalid",
-                                    code="provider_entry_revision_shape",
-                                    phase="provider_listing_shape")
+            if (revision == "master" or not candidate_absent) and (
+                not isinstance(candidate, str) or not _SHA.fullmatch(candidate)
+            ):
+                raise _io_error(
+                    self,
+                    "legacy tree revision invalid",
+                    code="provider_entry_revision_shape",
+                    phase="provider_listing_shape",
+                )
             # Entry Revision is optional last-modified metadata for a pinned
             # snapshot. Only master discovery needs it to identify a candidate;
             # pinned tree identities and download URLs always use the request.
             effective_revision = candidate if revision == "master" else revision
             seen.add(path)
             sha = entry.get("Sha256")
-            if sha is not None and (not isinstance(sha, str)
-                                    or re.fullmatch(r"[0-9a-f]{64}", sha) is None):
-                raise _io_error(self, "legacy tree digest malformed", code="provider_entry_digest",
-                                    phase="provider_listing_shape")
+            if sha is not None and (
+                not isinstance(sha, str) or re.fullmatch(r"[0-9a-f]{64}", sha) is None
+            ):
+                raise _io_error(
+                    self,
+                    "legacy tree digest malformed",
+                    code="provider_entry_digest",
+                    phase="provider_listing_shape",
+                )
             result.append(ListedFile(path, size, sha, False, effective_revision))
         total = info.get("TotalCount", info.get("Total"))
-        if ("Total" in info and "TotalCount" in info
-                and info["Total"] != info["TotalCount"]):
-            raise _io_error(self, "provider listing total fields disagree",
-                                    code="provider_total_conflict", phase="provider_listing_shape")
-        if total is not None and (type(total) is not int or total < len(files)
-                                  or (not files and total > 0)):
-            raise _io_error(self, "provider listing total contradicts raw entries",
-                                code="provider_total_conflict", phase="provider_listing_shape")
+        if "Total" in info and "TotalCount" in info and info["Total"] != info["TotalCount"]:
+            raise _io_error(
+                self,
+                "provider listing total fields disagree",
+                code="provider_total_conflict",
+                phase="provider_listing_shape",
+            )
+        if total is not None and (
+            type(total) is not int or total < len(files) or (not files and total > 0)
+        ):
+            raise _io_error(
+                self,
+                "provider listing total contradicts raw entries",
+                code="provider_total_conflict",
+                phase="provider_listing_shape",
+            )
         complete = (page == 1 and total == len(files)) or (total is None and not files)
-        return TreePage(result, complete, raw_count=len(files), total=total,
-                        raw_paths=seen, continuation=bool(files) and not complete)
+        return TreePage(
+            result,
+            complete,
+            raw_count=len(files),
+            total=total,
+            raw_paths=seen,
+            continuation=bool(files) and not complete,
+        )
 
-    def find_legacy_file(self, hub_id, revision, *, root, path,
-                         page_size=PAGE_SIZE, max_pages=MAX_PAGES):
+    def find_legacy_file(
+        self, hub_id, revision, *, root, path, page_size=PAGE_SIZE, max_pages=MAX_PAGES
+    ):
         """One bounded exact lookup; filtered-empty pages never establish EOF."""
         for page in ModelScopeDataset.iter_legacy_pages(
-                self, hub_id, revision, root=root, page_size=page_size, max_pages=max_pages):
+            self, hub_id, revision, root=root, page_size=page_size, max_pages=max_pages
+        ):
             matches = [row for row in page.files if row.path == path]
             if len(matches) > 1:
                 raise _io_error(self, "provider exact object duplicate")
             if matches:
                 return matches[0]
-        raise _io_error(self, "provider exact object unavailable", code="provider_object_absent",
-                            phase="provider_exact_lookup")
+        raise _io_error(
+            self,
+            "provider exact object unavailable",
+            code="provider_object_absent",
+            phase="provider_exact_lookup",
+        )
 
-    def iter_legacy_pages(self, hub_id, revision, *, root,
-                          page_size=PAGE_SIZE, max_pages=MAX_PAGES):
+    def iter_legacy_pages(
+        self, hub_id, revision, *, root, page_size=PAGE_SIZE, max_pages=MAX_PAGES
+    ):
         """Shared scope walk, yielding bounded pages with consistent raw evidence."""
         if type(max_pages) is not int or not 1 <= max_pages <= MAX_PAGES:
             raise ValueError("tree page bound invalid")
@@ -292,56 +392,94 @@ class ModelScopeDataset:
         paths = set()
         total_profile = None
         for number in range(1, max_pages + 1):
-            page = self.legacy_tree_page(hub_id, revision, root=root,
-                                         page=number, page_size=page_size)
+            page = self.legacy_tree_page(
+                hub_id, revision, root=root, page=number, page_size=page_size
+            )
             if not isinstance(page, TreePage):
                 # Compatibility for old complete tuple providers; an incomplete
                 # filtered page has insufficient evidence, never means absent.
                 rows, complete = page
                 if not complete:
-                    raise _io_error(self, "provider listing incomplete: raw evidence unavailable",
-                                        code="provider_listing_incomplete",
-                                        phase="provider_exact_lookup")
-                page = TreePage(rows, True, raw_count=len(rows), total=len(rows),
-                                raw_paths=[row.path for row in rows], continuation=False)
+                    raise _io_error(
+                        self,
+                        "provider listing incomplete: raw evidence unavailable",
+                        code="provider_listing_incomplete",
+                        phase="provider_exact_lookup",
+                    )
+                page = TreePage(
+                    rows,
+                    True,
+                    raw_count=len(rows),
+                    total=len(rows),
+                    raw_paths=[row.path for row in rows],
+                    continuation=False,
+                )
             profile = (page.total is not None, page.total)
             if total_profile is not None and profile != total_profile:
-                raise _io_error(self, "provider listing total changed",
-                                    code="provider_total_conflict", phase="provider_listing_shape")
+                raise _io_error(
+                    self,
+                    "provider listing total changed",
+                    code="provider_total_conflict",
+                    phase="provider_listing_shape",
+                )
             total_profile = profile
             if paths.intersection(page.raw_paths):
-                raise _io_error(self, "provider listing repeated page path",
-                                    code="provider_page_repeat", phase="provider_listing_shape")
+                raise _io_error(
+                    self,
+                    "provider listing repeated page path",
+                    code="provider_page_repeat",
+                    phase="provider_listing_shape",
+                )
             paths.update(page.raw_paths)
             raw_count += page.raw_count
             if page.total is not None and raw_count > page.total:
-                raise _io_error(self, "provider listing raw count exceeds total",
-                                    code="provider_total_conflict", phase="provider_listing_shape")
+                raise _io_error(
+                    self,
+                    "provider listing raw count exceeds total",
+                    code="provider_total_conflict",
+                    phase="provider_listing_shape",
+                )
             yield page
             if page.complete or (page.total is not None and raw_count == page.total):
                 return
             if not page.continuation:
                 return
-        raise _io_error(self, "provider exact listing incomplete: page bound reached",
-                            code="provider_listing_incomplete", phase="provider_exact_lookup")
+        raise _io_error(
+            self,
+            "provider exact listing incomplete: page bound reached",
+            code="provider_listing_incomplete",
+            phase="provider_exact_lookup",
+        )
 
     def revisions(self) -> list[str]:
         """List commit-id-shaped candidates; syntax does NOT verify immutability."""
         info = self._data(self.base + "/revisions")
         if not isinstance(info, dict) or not isinstance(info.get("RevisionMap"), dict):
-            raise _io_error(self, "unrecognized revision map", code="provider_shape",
-                                phase="provider_revision_shape")
+            raise _io_error(
+                self,
+                "unrecognized revision map",
+                code="provider_shape",
+                phase="provider_revision_shape",
+            )
         revisions = info["RevisionMap"]
         tags, branches = revisions.get("Tags"), revisions.get("Branches")
         if not isinstance(tags, list) or not isinstance(branches, list):
-            raise _io_error(self, "unrecognized revision entries", code="provider_shape",
-                                phase="provider_revision_shape")
+            raise _io_error(
+                self,
+                "unrecognized revision entries",
+                code="provider_shape",
+                phase="provider_revision_shape",
+            )
         candidates = tags + branches
         result = set()
         for item in candidates:
             if not isinstance(item, dict):
-                raise _io_error(self, "malformed revision entry", code="provider_shape",
-                                    phase="provider_revision_shape")
+                raise _io_error(
+                    self,
+                    "malformed revision entry",
+                    code="provider_shape",
+                    phase="provider_revision_shape",
+                )
             for field in ("CommitId", "CommitID", "commit_id", "Revision"):
                 value = item.get(field)
                 if isinstance(value, str) and _SHA.fullmatch(value):
@@ -447,8 +585,9 @@ class ModelScopeDataset:
         params = urlencode({"Revision": revision, "FilePath": path})
         return f"{self.base}/repo?{params}"
 
-    def range_probe(self, entry: "ListedFile", *, start: int, length: int,
-                    batch: str = "") -> "TwoHopProbe":
+    def range_probe(
+        self, entry: "ListedFile", *, start: int, length: int, batch: str = ""
+    ) -> "TwoHopProbe":
         """Guarded two-hop capability read of ONE tree-listed object range.
 
         The object identity (revision candidate, path) and expected size all
@@ -471,14 +610,19 @@ class ModelScopeDataset:
             raise ValueError("tree entry size must be a positive bounded integer")
         url = self.download_url(entry.revision_candidate, entry.path)
         result = self.transport.two_hop_range(
-            url, start=start, length=length, expected_size=entry.size,
-            batch=batch)
-        return TwoHopProbe(repository=self.repo_id,
-                           revision_candidate=entry.revision_candidate,
-                           path=entry.path, size=entry.size, result=result)
+            url, start=start, length=length, expected_size=entry.size, batch=batch
+        )
+        return TwoHopProbe(
+            repository=self.repo_id,
+            revision_candidate=entry.revision_candidate,
+            path=entry.path,
+            size=entry.size,
+            result=result,
+        )
 
-    def record_probe_proof(self, probe: "TwoHopProbe", payload_sha: str,
-                           observed_batch: str = "") -> str:
+    def record_probe_proof(
+        self, probe: "TwoHopProbe", payload_sha: str, observed_batch: str = ""
+    ) -> str:
         """Store a v2 proof for an actual probe, using ONLY the bound identity.
 
         size/path/revision come from the probe's tree binding; the caller
@@ -502,4 +646,5 @@ class ModelScopeDataset:
             etag=probe.result.etag,
             cdn_host=probe.result.approved_host,
             payload_sha=payload_sha,
-            observed_batch=observed_batch or probe.result.batch)
+            observed_batch=observed_batch or probe.result.batch,
+        )

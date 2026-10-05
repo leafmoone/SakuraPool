@@ -32,7 +32,7 @@ def snapshot(ledger):
 
 
 def terminal(monkeypatch, phase="origin", code="origin_connect", observed=0, crash=False,
-             live=False, wrapper=False):
+             live=False, wrapper=False, complete=False, status=None):
     class Worker:
         _proc = object() if live else None
 
@@ -53,10 +53,10 @@ def terminal(monkeypatch, phase="origin", code="origin_connect", observed=0, cra
             if crash:
                 raise production.RustWorkerError("synthetic crash")
             accounting = {"body": observed, "attempts": 1 if phase == "origin" else 2,
-                          "complete": False}
-            diagnostic = {"phase": phase, "http_status": None,
+                          "complete": complete}
+            diagnostic = {"phase": phase, "http_status": status,
                           "attempts": accounting["attempts"], "body_bytes_observed": observed,
-                          "accounting_complete": False,
+                          "accounting_complete": complete,
                           **{name: False for name in production._DIAGNOSTIC_FLAGS}}
             return {"type": "response", "request_id": self.request["request_id"], "ok": False,
                     "result": {"accounting": accounting, "diagnostic": diagnostic,
@@ -91,7 +91,7 @@ def test_terminal_full_original_charge(channel, monkeypatch, phase, code):
     assert error.accounting_state == "CONFIRMED"
     assert error.public_diagnostic()["accounting_basis"] == "CONSERVATIVE_MAX_CHARGE"
     state = snapshot(ledger)
-    assert state["usage"]["body"] == 2
+    assert state["usage"]["body"] == production.network_body_budget(1)
     assert state["usage"]["attempts"] == 2
     assert state["pending_count"] == 0
     assert state["usage"]["saved_samples"] == 0
@@ -145,7 +145,7 @@ def test_failed_finalization_never_confirms(channel, monkeypatch, failure):
                                      if failure == "cleanup" else 2)
     if failure in {"second_settle", "consume_after_commit"}:
         assert transport._conservative_candidate["used"]
-        assert state["usage"]["body"] == 2
+        assert state["usage"]["body"] == production.network_body_budget(1)
         assert state["usage"]["attempts"] == 2
 
 
@@ -391,7 +391,7 @@ def test_persistent_live_worker_terminal_request_finalizes(channel, monkeypatch)
     assert transport._request_worker._proc is not None
     assert snapshot(ledger)["pending_count"] == resident["pending_count"] == 1
     assert snapshot(ledger)["usage"]["inflight"] == resident["usage"]["inflight"]
-    assert snapshot(ledger)["usage"]["body"] == 2
+    assert snapshot(ledger)["usage"]["body"] == production.network_body_budget(1)
 
 
 @pytest.mark.parametrize("failure", [None, "consume_after_commit", "cleanup", "crash"])
@@ -422,7 +422,7 @@ def test_persistent_wrapper_continuation_and_failure(channel, monkeypatch, failu
         assert caught.value.accounting_state == "CONFIRMED"
         assert transport._lane_worker is worker
         assert transport._lane_requests == 2
-        assert transport._lane_body == 4 and transport._lane_attempts == 4
+        assert transport._lane_body == 2 * production.network_body_budget(1) and transport._lane_attempts == 4
     else:
         assert worker.cancelled and transport._lane_failed
         assert getattr(transport, "_unresolved_network", False)

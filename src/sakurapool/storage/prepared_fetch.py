@@ -6,6 +6,7 @@ from threading import get_ident
 from types import MappingProxyType, SimpleNamespace
 
 from ..capacity import UINT64_MAX, CapacityConfig
+from .production_resources import chunked_body_budget
 from .publication import PublicationCorrupt
 
 _FACTORY = object()
@@ -43,7 +44,7 @@ class StreamPlan:
 
     @property
     def generation_body(self):
-        return 2 * self.saved_bytes + 16 * self.chunk_count
+        return chunked_body_budget(self.image_bytes, self.metadata_bytes, self.chunk_bytes)
 
     @property
     def generation_attempts(self):

@@ -7,7 +7,51 @@ from dataclasses import dataclass
 
 from ..capacity import UINT64_MAX, CapacityConfig
 
-NEGATIVE_CONDITION_BODY_CAP = 65_536
+CONTROL_RESPONSE_BODY_CAP = 65_536  # Explicit worker protocol value; Rust parity is tested.
+NEGATIVE_CONDITION_BODY_CAP = CONTROL_RESPONSE_BODY_CAP
+
+
+def checked_body_add(*values):
+    total = 0
+    for value in values:
+        if type(value) is not int or not 0 <= value <= UINT64_MAX:
+            raise ValueError("production body budget integer invalid")
+        total += value
+        if total > UINT64_MAX:
+            raise ValueError("production body budget overflow")
+    return total
+
+
+def checked_body_mul(value, count):
+    checked_body_add(value)
+    checked_body_add(count)
+    result = value * count
+    if result > UINT64_MAX:
+        raise ValueError("production body budget overflow")
+    return result
+
+
+def chunked_body_budget(image_size, metadata_size, chunk):
+    checked_body_add(chunk)
+    if chunk == 0:
+        raise ValueError("chunk must be positive")
+    total = 0
+    for size in (image_size, metadata_size):
+        checked_body_add(size)
+        full, remainder = divmod(size, chunk)
+        if full:
+            total = checked_body_add(total, checked_body_mul(network_body_budget(chunk), full))
+        if remainder:
+            total = checked_body_add(total, network_body_budget(remainder))
+    return total
+
+
+def network_body_budget(size, *, condition="match"):
+    origin = checked_body_add(CONTROL_RESPONSE_BODY_CAP, 1)
+    business = origin if condition == "wrong" else checked_body_add(size, 1)
+    return checked_body_add(origin, max(business, origin))
+
+
 MAX_RANGE = 8 << 20
 RECORD_CAP = 32 << 20
 METADATA_CAP = 32 << 20

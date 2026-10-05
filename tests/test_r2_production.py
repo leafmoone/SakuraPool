@@ -33,7 +33,7 @@ def test_modelscope_legacy_control_plane_exact_identity_and_live_candidates():
         def _host(self, url):
             return "modelscope.cn"
 
-        def read_metadata(self, url):
+        def read_metadata(self, url, **kwargs):
             self.calls.append(url)
             return MetadataBytes(json.dumps({"Code": 200, "Data": self.payload}).encode(),
                                  "CONFIRMED")
@@ -103,6 +103,17 @@ def twohop(monkeypatch):
 
         def do_GET(self):
             state["calls"].append(("cdn", dict(self.headers)))
+            if state.get("malformed_phase") == "cdn":
+                self.connection.sendall(state["malformed_wire"])
+                self.close_connection = True
+                return
+            if state.get("cdn_rejection"):
+                self.send_response(state["cdn_rejection"])
+                body = state.get("control_body", b"")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             wrong = self.headers.get("If-Match") == '"sakurapool-deliberately-wrong-r2"'
             if wrong and state["mode"] != "ignore-condition":
                 self.send_response(412)
@@ -174,6 +185,10 @@ def twohop(monkeypatch):
         def do_GET(self):
             state["calls"].append(("origin", dict(self.headers)))
             assert self.headers.get("Authorization") == "Bearer " + TOKEN
+            if state.get("malformed_phase") == "origin":
+                self.connection.sendall(state["malformed_wire"])
+                self.close_connection = True
+                return
             location = state["cdn"] + "/object"
             if state["mode"] == "echo":
                 location += "?secret=" + TOKEN
@@ -197,10 +212,19 @@ def twohop(monkeypatch):
                 location += "#oops"
             elif state["mode"] == "path-escape":
                 location += "/%2Fobject"
+            if state.get("origin_rejection"):
+                self.send_response(state["origin_rejection"])
+                body = state.get("control_body", b"")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             self.send_response(302)
             self.send_header("Location", location)
-            self.send_header("Content-Length", "0")
+            body = state.get("redirect_body", b"")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
+            self.wfile.write(body)
 
     origin = ThreadingHTTPServer(("127.0.0.1", 0), Origin)
     cdn = ThreadingHTTPServer(("127.0.0.1", 0), CDN)
@@ -243,6 +267,97 @@ def twohop(monkeypatch):
         s.server_close()
     for t in threads:
         t.join(2)
+
+
+@pytest.mark.parametrize("body", [b"", b"discard-control-prefix"])
+def test_status_control_redirect_payload(twohop, body):
+    state, ledger, transport, obj = twohop
+    state["redirect_body"] = body
+    with transport.transfer(obj, length=1, condition="observe") as (_, result):
+        assert result["bytes"] == 1
+        assert result["sha256"] == hashlib.sha256(state["raw"][:1]).hexdigest()
+    assert transport.last_result["accounting"]["body"] == len(body) + 1
+
+
+@pytest.mark.parametrize("body", [b"", b"small-error", b"x" * 65537],
+                         ids=["empty", "small", "overcap"])
+def test_origin_status_full_worker(twohop, body):
+    state, ledger, transport, obj = twohop
+    state["origin_rejection"] = 400
+    state["control_body"] = body
+    with pytest.raises(RemoteIOError) as caught:
+        with transport.transfer(obj, length=1, condition="observe"):
+            pass
+    assert caught.value.accounting_state == ("UNKNOWN" if len(body) > 65536 else "CONFIRMED")
+    assert transport.last_result["accounting"]["complete"] == (len(body) <= 65536)
+
+
+@pytest.mark.parametrize("phase", ["origin", "cdn"])
+@pytest.mark.parametrize("framing", ["invalid-cl", "conflict", "unsupported-te"])
+def test_malformed_response_worker_python_unknown(twohop, phase, framing):
+    from sakurapool.storage.publication_fetch import PublicationFetchError
+    state, ledger, transport, obj = twohop
+    headers = {
+        "invalid-cl": b"Content-Length: invalid\r\n",
+        "conflict": b"Content-Length: 0\r\nTransfer-Encoding: chunked\r\n",
+        "unsupported-te": b"Transfer-Encoding: mystery\r\n",
+    }
+    state["malformed_phase"] = phase
+    state["malformed_wire"] = (b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n"
+                               + headers[framing] + b"\r\n0\r\n\r\n")
+    with pytest.raises(RemoteIOError) as caught:
+        with transport.transfer(obj, length=1, condition="observe"):
+            pytest.fail("malformed response cannot deliver")
+    error = caught.value
+    assert error.accounting_state == "UNKNOWN"
+    assert getattr(error, "_conservative_finalized", None) is None
+    assert getattr(error, "_http_status_finalized", None) is None
+    with ledger._locked():
+        _, (_, _, leases, _) = ledger._read_pair()
+        assert len(leases) == 2
+    assert ledger.status()["body"] == 131074
+    assert "accounting_basis" not in error.public_diagnostic()
+    assert not list(ledger.root.glob("rust-transfer-*"))
+    outer = PublicationFetchError("publication_range", delivered=False, cleanup_safe=True,
+                                  output_lease="CONFIRMED", underlying=error, secondary=())
+    assert outer.accounting_state == "UNKNOWN"
+
+
+def test_origin_control_scan_payload_sha(twohop):
+    state, ledger, transport, candidate = twohop
+    obj = transport.verify_conditions(candidate)
+    state["redirect_body"] = b"control-prefix"
+    with transport.transfer(obj, mode="remote-stream-scan") as (_, result):
+        assert result["bytes"] == obj.object_size
+        assert result["sha256"] == hashlib.sha256(state["raw"]).hexdigest()
+    assert transport.last_result["accounting"]["body"] == obj.object_size + 14
+
+
+def test_origin_location_failure_not_status_recoverable(twohop):
+    state, ledger, transport, obj = twohop
+    state["redirect_body"] = b"control-prefix"
+    state["mode"] = "fragment"
+    with pytest.raises(RemoteIOError) as caught:
+        with transport.transfer(obj, length=1, condition="observe"):
+            pass
+    assert transport.last_result["accounting"]["complete"]
+    assert getattr(caught.value, "_http_status_finalized", None) is None
+    assert caught.value.accounting_state == "UNKNOWN"
+
+
+@pytest.mark.parametrize("size", [3, 65537])
+def test_cdn_status_full_worker(twohop, size):
+    state, ledger, transport, obj = twohop
+    state["cdn_rejection"] = 404
+    state["control_body"] = b"x" * size
+    state["redirect_body"] = b"prefix"
+    with pytest.raises(RemoteIOError) as caught:
+        with transport.transfer(obj, length=1, condition="observe"):
+            pass
+    assert caught.value.accounting_state == ("CONFIRMED" if size == 3 else "UNKNOWN")
+    assert transport.last_result["accounting"]["complete"] == (size == 3)
+    if size == 3:
+        assert transport.last_result["accounting"]["body"] == 9
 
 
 @pytest.mark.parametrize("fresh_condition_ok", [True, False])
@@ -368,7 +483,8 @@ def test_range_headers_reject_without_body_or_fallback(twohop, mode):
             pass
     assert len(state["calls"]) == 2
     # Nonempty unread rejected bodies are unknown, not zero. Empty 302 is known.
-    assert ledger.status()["body"] == (0 if mode == "cdn-redirect" else 2)
+    expected_body = 0 if mode == "cdn-redirect" else 1 if mode == "200" else 131074
+    assert ledger.status()["body"] == expected_body
     assert ledger.status()["inflight"] == 0
     diagnostic = transport.last_result["diagnostic"]
     assert set(diagnostic) == {
@@ -387,8 +503,8 @@ def test_range_headers_reject_without_body_or_fallback(twohop, mode):
     assert diagnostic["http_status"] == (
         200 if mode == "200" else 302 if mode == "cdn-redirect" else 206
     )
-    assert diagnostic["body_bytes_observed"] == 0
-    assert diagnostic["accounting_complete"] == (mode == "cdn-redirect")
+    assert diagnostic["body_bytes_observed"] == (1 if mode == "200" else 0)
+    assert diagnostic["accounting_complete"] == (mode in {"200", "cdn-redirect"})
     public = json.dumps(transport.last_result)
     assert TOKEN not in public and "Signature=" not in public and state["cdn"] not in public
 
@@ -440,7 +556,7 @@ def test_wrong_etag_and_wrong_size_reject(twohop):
     with pytest.raises(RemoteIOError):
         with transport.transfer(obj, condition="observe"):
             pass
-    assert ledger.status()["body"] == 2  # unread response: reservation stays pending
+    assert ledger.status()["body"] == 131074  # unread response: reservation stays pending
     state["calls"].clear()
     with pytest.raises(RemoteIOError):
         with transport.transfer(
@@ -457,7 +573,7 @@ def test_short_body_known_prefix_and_unknown_remainder_retained(twohop):
         with transport.transfer(obj, length=10, condition="observe"):
             pass
     # Actual prefix charged; the unobserved remainder is not silently refunded.
-    assert ledger.status()["body"] == 11
+    assert ledger.status()["body"] == 131074
     assert ledger.status()["inflight"] == 0
     assert ledger.status()["attempts"] == 2
 
@@ -743,7 +859,7 @@ def test_worker_crash_does_not_refund_pending_body(twohop, monkeypatch):
     with pytest.raises(RemoteIOError, match="accounting uncertain"):
         with transport.transfer(obj, condition="observe"):
             pass
-    assert ledger.status()["body"] == 2
+    assert ledger.status()["body"] == 131074
     assert ledger.status()["attempts"] == 2
     assert ledger.status()["inflight"] == 0
 
@@ -767,7 +883,8 @@ def test_partial_or_invalid_fullstream_never_marks_stage_complete(twohop, mode):
         assert ledger.status()["body"] - before == obj.object_size
     else:
         assert not retained
-        assert ledger.status()["body"] - before == obj.object_size + 1  # early parser stop: unknown
+        # Early parser stop retains shared reservation.
+        assert ledger.status()["body"] - before == 131074
 
 
 def test_stage_traversal_and_scope_changes_rejected_before_network(twohop):

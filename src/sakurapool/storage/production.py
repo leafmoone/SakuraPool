@@ -23,10 +23,12 @@ from .budget import BudgetLedger, Reservation, _cluster_bytes, _disk_usage, is_r
 from .location_gate import normalize_endpoint, two_hop_proof_key
 from .modelscope import ListedFile, ModelScopeDataset
 from .production_resources import (
-    NEGATIVE_CONDITION_BODY_CAP,
     STAGE_DISK_CAP,
     STREAM_MEMORY,
     ProductionFootprint,
+    checked_body_add,
+    checked_body_mul,
+    network_body_budget,
     protocolmemory,
 )
 from .rust_bridge import RustWorker, RustWorkerError
@@ -35,6 +37,7 @@ from .transport import RemoteIOError
 MAX_RANGE = 8 * (1 << 20)
 # In-process evidence minted only after the request resource and ledger gates.
 _CONSERVATIVE_FINALIZED = object()
+_HTTP_STATUS_FINALIZED = object()
 _DIAGNOSTIC_FLAGS = (
     "content_length_present",
     "content_range_present",
@@ -258,12 +261,29 @@ class RustProductionTransport:
                 yield worker
         except BaseException as primary:
             candidate = getattr(self, "_conservative_candidate", None)
-            if (isinstance(primary, RemoteIOError)
-                    and getattr(self, "_transfer_finalizer_owner", False)
-                    and getattr(self, "_request_terminal", False)
-                    and candidate is not None and not candidate["used"]
-                    and primary.code == candidate["code"]
-                    and not getattr(primary, "finalization_secondary", ())):
+            if (
+                isinstance(primary, RemoteIOError)
+                and (
+                    getattr(self, "_transfer_finalizer_owner", False)
+                    or (
+                        getattr(self, "_capability_finalizer_owner", False)
+                        and getattr(self, "_http_status_candidate", None) is not None
+                    )
+                )
+                and getattr(self, "_request_terminal", False)
+                and (
+                    (
+                        candidate is not None
+                        and not candidate["used"]
+                        and primary.code == candidate["code"]
+                    )
+                    or (
+                        getattr(self, "_http_status_candidate", None) is not None
+                        and primary.code == self._http_status_candidate["code"]
+                    )
+                )
+                and not getattr(primary, "finalization_secondary", ())
+            ):
                 # Defer, never confirm: outer resource/ledger gates own the verdict.
                 self._deferred_network_error = primary
                 raise
@@ -284,7 +304,7 @@ class RustProductionTransport:
         if refresh:
             self.ledger.status()  # Refresh policy only from an authorized lane operation.
         maximum = max(self.capacity.range_chunk_bytes, self.capacity.metadata_max_bytes)
-        body = 256 * (maximum + 1)
+        body = checked_body_mul(network_body_budget(maximum), 256)
         if body >= 1 << 64:
             raise RustWorkerError("generation body integer capacity exceeded")
         return {
@@ -563,7 +583,7 @@ class RustProductionTransport:
                 attempts = lengths.generation_attempts
             else:
                 requests = len(lengths)
-                body = sum(n * 2 + 16 for n in lengths)
+                body = checked_body_add(*(network_body_budget(n) for n in lengths))
                 attempts = 4 * requests
             # Coordinator prediction cannot invoke the lane's owner-ledger RPC.
             # Actual admission refreshes policy and reserves; this is credit only.
@@ -577,7 +597,15 @@ class RustProductionTransport:
     def verified_object(self, candidate: ProviderObject, *, lengths=None):
         with self._lane_lock:
             if lengths is None:
-                self._admit_generation((16 << 20) + 16, 20, 5)
+                self._admit_generation(
+                    checked_body_add(
+                        network_body_budget(1),
+                        network_body_budget(1),
+                        network_body_budget(1, condition="wrong"),
+                    ),
+                    6,
+                    3,
+                )
             else:
                 from .prepared_fetch import StreamPlan
 
@@ -587,7 +615,9 @@ class RustProductionTransport:
                     )
                 else:
                     self._admit_generation(
-                        sum(n * 2 + 16 for n in lengths), 4 * len(lengths), len(lengths)
+                        checked_body_add(*(network_body_budget(n) for n in lengths)),
+                        4 * len(lengths),
+                        len(lengths),
                     )
         return self._verified_object_body(candidate)
 
@@ -708,11 +738,7 @@ class RustProductionTransport:
         size = length if mode == "range" else obj.object_size
         footprint = ProductionFootprint.admit(mode, size, capacity=self.capacity)
         memory, disk = footprint.memory, footprint.artifacts
-        body_budget = (
-            NEGATIVE_CONDITION_BODY_CAP + 1
-            if mode == "range" and condition == "wrong"
-            else size + 1
-        )
+        body_budget = network_body_budget(size, condition=condition)
         budget = {"body": body_budget, "attempts": 2, "disk": disk, "inflight": memory}
         lease1 = self.ledger.reserve(Reservation(body=body_budget, attempt=True))
         try:
@@ -828,20 +854,50 @@ class RustProductionTransport:
                     code if isinstance(code, str) and code in _PUBLIC_ERROR_CODES else "rejected"
                 )
             if not msg.get("ok") or "production_error" in result:
+                self._http_status_candidate = None
+                diagnostic = self.last_result["diagnostic"]
+                status_code = self.last_result.get("production_error")
+                if (
+                    accounting["complete"]
+                    and (status_code, diagnostic["phase"])
+                    in {("origin_status", "origin"), ("cdn_status", "cdn")}
+                    and type(diagnostic["http_status"]) is int
+                    and diagnostic["http_status"]
+                    != (
+                        302
+                        if diagnostic["phase"] == "origin"
+                        else 412
+                        if condition == "wrong"
+                        else 206
+                        if mode == "range"
+                        else 200
+                    )
+                ):
+                    self._http_status_candidate = {"code": status_code}
                 # A valid terminal response is necessary, not sufficient, for reconciliation.
                 diagnostic = self.last_result["diagnostic"]
                 safe_code = self.last_result.get("production_error", "rejected")
                 if (
                     not accounting["complete"]
-                    and safe_code in {
-                        "origin_timeout", "origin_connect", "origin_request", "origin_transport",
-                        "cdn_timeout", "cdn_connect", "cdn_request", "cdn_transport",
+                    and safe_code
+                    in {
+                        "origin_timeout",
+                        "origin_connect",
+                        "origin_request",
+                        "origin_transport",
+                        "cdn_timeout",
+                        "cdn_connect",
+                        "cdn_request",
+                        "cdn_transport",
                     }
                     and safe_code.startswith(diagnostic["phase"] + "_")
                 ):
                     self._conservative_candidate = {
-                        "leases": (lease1, lease2), "maximum": body_budget,
-                        "observed": accounting["body"], "used": False, "code": safe_code,
+                        "leases": (lease1, lease2),
+                        "maximum": body_budget,
+                        "observed": accounting["body"],
+                        "used": False,
+                        "code": safe_code,
                     }
                 raise RemoteIOError(
                     "Rust production request rejected",
@@ -892,8 +948,14 @@ class RustProductionTransport:
     def _transfer_owned(self, obj, **kwargs):
         with self._lane_lock:
             if not self._proof_group:
-                size = kwargs.get("length", 1)
-                self._admit_generation(size * 2 + 16, 4, 1)
+                size = (
+                    kwargs.get("length", 1)
+                    if kwargs.get("mode", "range") == "range"
+                    else obj.object_size
+                )
+                self._admit_generation(
+                    network_body_budget(size, condition=kwargs.get("condition", "match")), 2, 1
+                )
                 if (
                     getattr(self, "_persistent", False)
                     and kwargs.get("condition", "match") == "match"
@@ -960,11 +1022,17 @@ class RustProductionTransport:
             self._request_worker = None
             self._request_terminal = False
             self._conservative_candidate = None
+            self._http_status_candidate = None
             self._transfer_finalizer_owner = True
             try:
                 result = self._call(
-                    obj, root, start=start, length=length, condition=condition,
-                    mode=mode, json_limit=json_limit,
+                    obj,
+                    root,
+                    start=start,
+                    length=length,
+                    condition=condition,
+                    mode=mode,
+                    json_limit=json_limit,
                 )
             finally:
                 self._transfer_finalizer_owner = False
@@ -1076,9 +1144,14 @@ class RustProductionTransport:
                 failed = True
             candidate = getattr(self, "_conservative_candidate", None)
             if (
-                primary is not None and isinstance(primary, RemoteIOError)
-                and candidate is not None and not candidate["used"]
-                and self._request_terminal and not failed and not raw and not retain
+                primary is not None
+                and isinstance(primary, RemoteIOError)
+                and candidate is not None
+                and not candidate["used"]
+                and self._request_terminal
+                and not failed
+                and not raw
+                and not retain
                 and not getattr(primary, "finalization_secondary", ())
                 and not getattr(primary, "production_payload_lease", None)
             ):
@@ -1104,10 +1177,24 @@ class RustProductionTransport:
                     primary.accounted = "CONSERVATIVE_MAX"
                     if not getattr(self, "_unresolved_network", False):
                         primary._conservative_finalized = _CONSERVATIVE_FINALIZED
+            status_candidate = getattr(self, "_http_status_candidate", None)
+            if (
+                isinstance(primary, RemoteIOError)
+                and status_candidate is not None
+                and primary.code == status_candidate["code"]
+                and not failed
+                and not raw
+                and not retain
+                and not getattr(primary, "finalization_secondary", ())
+                and not getattr(self, "_unresolved_network", False)
+            ):
+                primary.accounting_state = "CONFIRMED"
+                primary._http_status_finalized = _HTTP_STATUS_FINALIZED
             if primary is not None and (
                 not getattr(self, "_request_terminal", False)
                 or failed
-                or isinstance(primary, RemoteIOError) and primary.accounting_state == "UNKNOWN"
+                or isinstance(primary, RemoteIOError)
+                and primary.accounting_state == "UNKNOWN"
             ):
                 # Earlier unresolved requests on this channel cannot be washed by
                 # a later confirmed chunk. Historical ledger leases are separate.
@@ -1115,9 +1202,16 @@ class RustProductionTransport:
             deferred = getattr(self, "_deferred_network_error", None)
             if deferred is not None:
                 self._deferred_network_error = None
-                if (deferred is not primary or failed
-                        or getattr(primary, "_conservative_finalized", None)
-                        is not _CONSERVATIVE_FINALIZED):
+                if (
+                    deferred is not primary
+                    or failed
+                    or (
+                        getattr(primary, "_conservative_finalized", None)
+                        is not _CONSERVATIVE_FINALIZED
+                        and getattr(primary, "_http_status_finalized", None)
+                        is not _HTTP_STATUS_FINALIZED
+                    )
+                ):
                     self._lane_failed = True
                     self._unresolved_network = True
                     try:
@@ -1126,7 +1220,9 @@ class RustProductionTransport:
                     except BaseException:
                         if primary is not None:
                             primary.finalization_secondary = (
-                                *getattr(primary, "finalization_secondary", ()), "worker_cancel")
+                                *getattr(primary, "finalization_secondary", ()),
+                                "worker_cancel",
+                            )
                         else:
                             raise
             if failed:
@@ -1241,7 +1337,15 @@ class RustProductionTransport:
         with self._lane_lock:
             if self._operation_active or self._proof_group:
                 raise RemoteIOError("execution generation already outstanding")
-            self._admit_generation((16 << 20) + 16, 20, 5)
+            self._admit_generation(
+                checked_body_add(
+                    network_body_budget(1),
+                    network_body_budget(1),
+                    network_body_budget(1, condition="wrong"),
+                ),
+                6,
+                3,
+            )
             self._proof_group = True
             self._proof_owner = threading.get_ident()
         try:
@@ -1254,7 +1358,10 @@ class RustProductionTransport:
             confirmed = (
                 isinstance(error, RemoteIOError)
                 and error.accounting_state == "CONFIRMED"
-                and getattr(error, "_conservative_finalized", None) is _CONSERVATIVE_FINALIZED
+                and (
+                    getattr(error, "_conservative_finalized", None) is _CONSERVATIVE_FINALIZED
+                    or getattr(error, "_http_status_finalized", None) is _HTTP_STATUS_FINALIZED
+                )
                 and not getattr(error, "finalization_secondary", ())
                 and not getattr(self, "_unresolved_network", False)
             )
@@ -1314,7 +1421,14 @@ class RustProductionTransport:
         self._track_correct_worker = True
         try:
             root = self._owned_dir()
-            result = self._call(obj, root, condition="match")
+            self._http_status_candidate = None
+            self._request_terminal = False
+            self._conservative_candidate = None
+            self._capability_finalizer_owner = True
+            try:
+                result = self._call(obj, root, condition="match")
+            finally:
+                self._capability_finalizer_owner = False
             raw = (root / "body").read_bytes()
             if len(raw) != 1 or hashlib.sha256(raw).hexdigest() != result.get("sha256"):
                 raise RemoteIOError("conditional capability bytes invalid")
@@ -1333,7 +1447,12 @@ class RustProductionTransport:
                 # retained Popen. No handle means no successful spawn or already reaped.
                 stopped = proc is None or proc.poll() is not None
                 artifact_finished = delivered_snapshot is not None and primary is None
-                if stopped or (getattr(self, "_persistent", False) and artifact_finished):
+                status_terminal = getattr(
+                    self, "_http_status_candidate", None
+                ) is not None and getattr(self, "_request_terminal", False)
+                if stopped or (
+                    getattr(self, "_persistent", False) and (artifact_finished or status_terminal)
+                ):
                     try:
                         self.ledger.settle(memory_lease)
                     finally:
@@ -1358,7 +1477,34 @@ class RustProductionTransport:
                 if primary is None and not isinstance(secondary, Exception):
                     raise
                 failed = True
-            if primary is not None or failed:
+            status = getattr(self, "_http_status_candidate", None)
+            confirmed_status = (
+                isinstance(primary, RemoteIOError)
+                and status is not None
+                and primary.code == status["code"]
+                and not failed
+                and not getattr(primary, "finalization_secondary", ())
+                and not getattr(self, "_unresolved_network", False)
+            )
+            if confirmed_status:
+                primary.accounting_state = "CONFIRMED"
+                primary._http_status_finalized = _HTTP_STATUS_FINALIZED
+            if getattr(self, "_deferred_network_error", None) is not None:
+                self._deferred_network_error = None
+                if not confirmed_status:
+                    self._lane_failed = True
+                    try:
+                        if self._lane_worker is not None:
+                            self._lane_worker.cancel()
+                    except BaseException:
+                        if primary is not None:
+                            primary.finalization_secondary = (
+                                *getattr(primary, "finalization_secondary", ()),
+                                "worker_cancel",
+                            )
+                        else:
+                            raise
+            if (primary is not None and not confirmed_status) or failed:
                 # Capability/proof requests share this channel's uncertainty latch.
                 # Clearing bindings or later reproof cannot erase unresolved quota.
                 self._unresolved_network = True
@@ -1415,7 +1561,7 @@ class RustProductionTransport:
         if not 0 < length <= self.max_range_bytes:
             raise RemoteIOError("production Range exceeds bound")
         with self._lane_lock:
-            self._admit_generation(length * 2 + 16, 4, 1)
+            self._admit_generation(network_body_budget(length), 2, 1)
             needs_proof = (
                 getattr(self, "_persistent", False)
                 and proof_key(obj, test=self._test) not in self._live_proofs

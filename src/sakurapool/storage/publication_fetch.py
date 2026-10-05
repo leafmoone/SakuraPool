@@ -15,6 +15,7 @@ from .modelscope import ModelScopeDataset, _io_error
 from .prepared_fetch import stream_plan
 from .production import (
     _CONSERVATIVE_FINALIZED,
+    _HTTP_STATUS_FINALIZED,
     ProviderObject,
     RustProductionTransport,
 )
@@ -72,7 +73,10 @@ class PublicationFetchError(RemoteIOError):
         self.delivery_published = delivered
         self.cleanup_safe = cleanup_safe
         conservative = (
-            not delivered and cleanup_safe and output_lease == "CONFIRMED" and not secondary
+            not delivered
+            and cleanup_safe
+            and output_lease == "CONFIRMED"
+            and not secondary
             and isinstance(underlying, RemoteIOError)
             and underlying.accounting_state == "CONFIRMED"
             and getattr(underlying, "_conservative_finalized", None) is _CONSERVATIVE_FINALIZED
@@ -80,7 +84,19 @@ class PublicationFetchError(RemoteIOError):
             and not getattr(underlying, "finalization_secondary", ())
             and not getattr(underlying, "production_payload_lease", None)
         )
-        self.accounting_state = "CONFIRMED" if conservative else "UNKNOWN"
+        known_status = (
+            not delivered
+            and cleanup_safe
+            and output_lease == "CONFIRMED"
+            and not secondary
+            and isinstance(underlying, RemoteIOError)
+            and underlying.accounting_state == "CONFIRMED"
+            and getattr(underlying, "_http_status_finalized", None) is _HTTP_STATUS_FINALIZED
+            and underlying.code in {"origin_status", "cdn_status"}
+            and not getattr(underlying, "finalization_secondary", ())
+            and not getattr(underlying, "production_payload_lease", None)
+        )
+        self.accounting_state = "CONFIRMED" if conservative or known_status else "UNKNOWN"
         if conservative:
             self.accounting_basis = "CONSERVATIVE_MAX_CHARGE"
             self.actual_consumption = "UNKNOWN"
