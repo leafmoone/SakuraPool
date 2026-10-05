@@ -1,4 +1,8 @@
-# P6-A FINAL CLOSURE
+# P6-A ORIGIN COMPATIBILITY FINAL CLOSURE
+
+基线1d88cfedf5fe89d4da1ac837d3c040697557dd95。actualprofileOrigin ABC302；官方最小stream302→206/read1byte，正式同workspaceRust条件probePASS，未发现必要headerfix，PRODUCT_FIXNONE、ORIGIN_RANGE_REQUIREDUNKNOWN、历史400原因未确定。用户明确允许后仅创建并run一次metadata-origin-final（2ee1f9ef2dec435fb99f57b6c4bceb4a），runexit2 publication_range/causeorigin_transport/operationUNKNOWN，delivered0/3 UNKNOWN1，立即停，未resume/export/retry/newtask/refund。finallypending4→6/inflight0、saved2旧交付不增；两个旧UNKNOWN未动，新final亦禁重放。仅FOLLOWUP与plan文档收口，无产品/tests/Rustbuild/full/source重测，sole有限核后普通devcommitpush、main不动，停止P6_AWAITINGREVIEW/VALIDATION_PARTIAL。真实REAL_FINAL_WORKSPACE_TASKBLOCKED。
+
+## 历史 FINAL CLOSURE（1d88cfe）
 
 本次授权基线9aebcb74311d4e598ebf31e3e0f01873c91b20b8；唯一full已执行失败原66/45保，111精准复测108pass2skip1fail后唯一fixture修1pass，未第二full。官方SDK1.40.1与guard固定tree均200差分完成；同metadata-followup授权resume origin400/UNKNOWN立即停，delivered0/3 UNKNOWN1、pending4，不再重放。仅4tests及报告变，无产品代码/source包变。当前VALIDATION_PARTIAL，正常commitpush最终正文核SHA后停止P6_AWAITINGREVIEW。
 

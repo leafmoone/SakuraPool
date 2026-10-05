@@ -1,4 +1,63 @@
-# P6-A FINAL CLOSURE：送审，VALIDATION_PARTIAL
+# P6-A ORIGIN COMPATIBILITY FINAL CLOSURE
+
+## 当前 Origin 收口：P6_AWAITINGREVIEW / VALIDATION_PARTIAL
+
+|最终字段|实际结论|
+|---|---|
+|PROVIDER_ORIGIN_DIFFERENTIAL|CURRENT_PROFILE_ORIGIN_ABC302；历史400未复现、原因未确定|
+|SDK_ORIGIN_RESULT|Origin302→一个redirect destination206，实际read1byte后close|
+|RUST_EQUIVALENT_RESULT|正式同workspace独立conditional probe PASS，非任务交付|
+|REQUIRED_PUBLIC_HEADER_DELTA|NONE_OBSERVED|
+|ORIGIN_RANGE_REQUIRED|UNKNOWN|
+|PRODUCT_FIX|NONE|
+|REAL_FINAL_WORKSPACE_TASK|BLOCKED|
+|REAL_DELIVERED / REAL_UNKNOWN|新final0/3 / operationUNKNOWN1、itemUNKNOWN1、attemptUNKNOWN1（同一失败不同层，不加总）|
+|WORKSPACE_CORE / CONFIGURABLE_CAPACITY / CHUNKED_LARGE_MEMBER / SAFE_DIAGNOSTICS|既审范围PASS；不冒本次真实闭环PASS|
+|Danbooru / Konachan|PASS_OFFLINE；5196037records/1444122664bytes、33377records/11860113bytes，冻结不重测|
+|MAIN_MODIFIED / INDEX_MACHINE_OPERATIONS / NEXT_STAGE_STARTED|NO / 0 / NO|
+
+### 用户允许后唯一新final任务及finally只读审计
+
+用户明确允许现有当前兼容性证据后新final task，不降revision/身份门、不制造产品修复。原两个UNKNOWN永久不动。创建前实际HEAD1d88cfedf5fe89d4da1ac837d3c040697557dd95，dirty仅本轮FOLLOWUP与既有??uv.lock，无活job；workspace正式inspect exit0：policyversion1/capversion1原disk4GiB/inflight256MiB，historicalpending4/inflight0，usageattempts67 body2637164 metadata1206556 disk2719744 saved_samples2 saved_bytes515084。
+
+所有命令cwd D:/SakuraTool/SakuraPool-p5a-clean；PY=D:/SakuraTool/SakuraPool-Fix3-20260930a/python-env/Scripts/python.exe，PYTHONPATH同src，TMP/TEMP/TMPDIR指D:/SakuraTool/SakuraPool-P6A-origin-temp，run加SAKURAPOOL_RUST_WORKER=D:/SakuraTool/SakuraPool-p6-stream-target/debug/sakurapool-worker.exe。
+```text
+PY -m sakurapool task create --workspace "D:/SakuraTool/SakuraPool-P6A 验收 #/workspace" --publication D:/SakuraTool/SakuraPool-P5D-20261004T143905Z/publication --query "D:/SakuraTool/SakuraPool-P6A 验收 #/query.json" --selection records --records "D:/SakuraTool/SakuraPool-P6A 验收 #/records.json" --metadata --task-dir "D:/SakuraTool/SakuraPool-P6A 验收 #/workspace/tasks/metadata-origin-final"
+PY -m sakurapool task run "D:/SakuraTool/SakuraPool-P6A 验收 #/workspace/tasks/metadata-origin-final" --profile "D:/SakuraTool/SakuraPool-P6A 验收 #/profile.json" --workers 1
+```
+实际create bash257479b9 exit0，唯一新task2ee1f9ef2dec435fb99f57b6c4bceb4a；metadata=true、3records来自原records.json：bf0d3acda977634327904e3a01308469、98117af5261583921f9b3eb65f58a051、572fe3c5e783359c9d5d73ab1bd141f4，query{}。plan_digest9d5a5f3522e2d73efdf8b2504c4c8468d2603017d78e51f8792fb6a9fbc21d82，publication_digestc186f0a93d9bcf036f54a926ddae3b43aef35d6cfac4eb6dae2151abebcbd0eb，snapshot226a63935e73dc3d628024615425ad9d75b985686646d15dec151aec205feede，selection_digest2b6bfc24cbcab6f8468de0b08ae705b43314eec284f1e6f2cea12f4aeb990f19。正常create返回READY3/UNKNOWN0；无改selection/pin/profile/容量。
+
+唯一run bash8889d101 exit2，自然返回安全诊断：accountingUNKNOWN、accounting_scopeOPERATION、cause_accountingUNKNOWN、cause_codeorigin_transport、cause_phaseorigin、chunk_index0、member_kindimage、cleanupSAFE、codepublication_range、deliveryNOT_PUBLISHED、output_leaseCONFIRMED、phasepublication_fetch、recoverablefalse、secondary[]。本次为origin_transport，无http_status，不能沿历史400补HTTP400原因。立即停止全部该task网络，不resume、不重建替任务、不退款、不清pending、不再probe；无pause/partial/finalexport及freshresume，均NOT_COMPLETED，不能以SAFEcleanup/outputleaseCONFIRMED洗operationUNKNOWN或声称交付。
+
+finally正式task/workspace inspect exit0：新taskBLOCKED、delivered_confirmed0/3、error_count1、unknown_accounting_count1；items BLOCKED/accountingUNKNOWN1、READY/NONE2。TaskDB Path.as_uri()+mode=ro安全固定列投影：唯一attempt phaseOUTPUT_RESERVED/network_stateUNKNOWN/deliveryNONE/accountingUNKNOWN、codeNULL、receipt不存在、outputlease引用存在；不输出任何原receipt/URL/secret。output目录普通文件0。outeroperationUNKNOWN、itemUNKNOWN1、attemptUNKNOWN1是同一失败不同层，不合计为3个操作。
+
+权威前后（before确存于guard-probe-final-result.json并有创建前workspaceinspect，after为finallyworkspaceinspect）：pending_count4→6，是历史4+本次新增2的数量观测，不替逐lease消费确认；inflight0→0。usageattempts67→81(+14)，body2637164→3119045(+481881)，metadata1206556→1522449(+315893)，disk2719744→2760704(+40960)，saved_samples2→2、saved_bytes515084→515084、records0→0。usage含pending reservation，绝不把上述delta全部称实际consumed；saved2只指旧交付，本次新增0。两个旧UNKNOWN现场未操作，新final亦禁止恢复，除非另有可信durable settlement及单独恢复决策。
+
+最终仅本报告与plan的文档收口，不产品/Rust/测试改动，不full、不source再编译；SDK/Rust兼容通过不覆盖真实失败。安全raw最小结果必要证据保留，不新增hash清单；专用环境/cache/scripts回收只触本轮闲置普通自产文件，真实6pending资产不碰。审结后普通单docs语义commit/pushdev，最终SHA/tree及远端核写最终正文，停止P6_AWAITINGREVIEW。
+
+### Origin定位证据（以下不是实际任务成功）
+
+本轮基线1d88cfedf5fe89d4da1ac837d3c040697557dd95/treeee20b562ad4a9781a0f4b1860568e74c467b4621，fetch正式exit0 dev/HEAD/remote一致，main62f86cc487af41de7d84bfb5a14d2fb1e0e172ac，trackedclean仅??uv.lock；无活projectPython/worker。唯一写方swe，两个UNKNOWN task永久保留未操作，四pending不清。无full/Rustbuild/sourcecompile或全量再验。
+
+### 固定Origin最小矩阵与官方stream
+
+本轮D:/SakuraTool/SakuraPool-P6A-origin-temp/sdk-env隔离重装，PyPI官方ModelScope1.40.1、modelscope-hub0.4.5、Python3.13.15；安装bash4f71847f exit0，无keeper依赖改变。token仍仅进程内读取批准credentialref，未login/save_token；日志disable，禁止rawURL/Location/header秘密值/body输出。诊断明确不冒任务账务。
+
+实际profile.origin=https://modelscope.cn，Rust代码fixedpath/api/v1/datasets/leafmoone/webdataset_danbooru_v3/repo，query Revision=73306f1dc5459238710f477b376c36da997d020c/FilePath=anime_pictures/t0992-001.tar。第一矩阵误用SDK默认www.modelscope.cn，bash498c4fa6 exit0虽ABC均302，但撤回其Rust-equivalent标签，仅默认host背景证据，不覆盖原Origin。随后profilehost矩阵bash95c525a5 exit0：A实际Accept application/json,application/octet-stream、UserAgent SakuraMoon/1、identity、Rangebytes0-0、Bearer/cookiepresence true；B加Content-Typeapplication/json、freshX-Request-ID；C用官方DownloadManager._build_download_headers实际UserAgent及实际download构造snapshot-identifier。可选基础设施region探测显式disable，regionheader absent，非猜region。A/B/C均302，Location/ContentLengthpresence true、ETagpresence false，bodyread0，streamclose，不follow。ABC非全400，D未执行；B未改善失败，不发单项header试错。fixed preparedscheme/host/path/query在执行后离线assert一致（不冒执行前校验）。
+
+官方LegacyClient.download_stream源码实际stream=True，但_request错误会读resp.text、requests.resolve_redirects默认drain resp.content，故先SDK Session.send有界stop捕获Origin302，不冒完整SDK结果。后授权最小官方stream，实际download_stream原redirect流程，HTTPAdapter关闭redirectbody且置已消费empty，防无界drain，并在任何crossorigin send前移除Authorization/Cookie；maxredirect2，禁非https/userinfo，最终只rawread1byteclose。bash075206b6 exit0：origin302/authcookie true→一个redirectdestination206/authcookie false，最终status206实际read1byte，没有整TAR落盘、背景prefetch或保存signedURL。记录只阶段/跳数/status/presence，不以206证明整图片SHA或task交付。
+
+### 实际Rust正式workspace独立probe
+
+只读冻结mergedpublication catalog匹配批准object object_size=0x505dc000；仅该对象小范围probe，不扫描来源包。实际ProviderObject类型为modelscope_dataset_legacy，originalprofile origin/worker，RustProductionTransport.verify_conditions正式reserve/settle同workspace且计历史pending。最终bash4a8863eb exit0 PASS：actual freshLocation/CDNobserve、positive206同SHA、negative412，strongvalidator/cdnhostpresence true，不输出其值。attempts61→67、usagebody2636723→2637164；metadata1206556、disk2719744、saved_samples2/saved_bytes515084、pending4、inflight0不变。独立probe不重放任何task；saved2仍旧交付。
+
+前置临时脚本错误分开保：bashdfb72a2b exit1 BudgetLedger.inspect不存在，在网络前；bashcba7e406 exit0 caughtValueError为误用SDK datasetenum，权威attempts61/pending4前后完全不变，未发网络；改临时输入后才上述真正probe。不是产品修复，未把失败脚本计实际网络测试。
+
+当前PROVIDER_ORIGIN_DIFFERENTIAL=CURRENT_PROFILE_ORIGIN_ABC302；SDK_ORIGIN_RESULT=302_TO206_READ1；RUST_EQUIVALENT_RESULT=ACTUAL_GUARDED_CONDITIONAL_PASS；REQUIRED_PUBLIC_HEADER_DELTA=NONE_OBSERVED；ORIGIN_RANGE_REQUIRED=UNKNOWN（带Range成功仅证允许，不证必需）；PRODUCT_FIX=NONE；historical400仍NOT_REPRODUCED_CAUSE_UNDETERMINED，不称headers已修或外部永久故障。该诊断时点尚未创建任务；随后用户明确允许新final任务，实际失败及最终账务见本报告最前收口。两个旧UNKNOWN不恢复。
+
+---
+
+## 历史：上一 FINAL CLOSURE（1d88cfedf5fe89d4da1ac837d3c040697557dd95）
 
 ## 当前最终收口（以下历史补齐报告不覆盖此节）
 
