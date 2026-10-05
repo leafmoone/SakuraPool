@@ -1,4 +1,34 @@
-# P6-A ORIGIN COMPATIBILITY FINAL CLOSURE
+# P6-A NETWORK STABILITY / UNKNOWN RECOVERY
+
+当前唯一写入worktree D:/SakuraTool/SakuraPool-p6-origin-stability，branch work-p6-origin-stability，BASE c2db79263e4ad8927ad42d0b7516ad81bd7af0b0；只push此branch，不push/merge dev/main。旧三个UNKNOWN任务及6pending永久冻结；p5a-clean源码/uv.lock不写。source包冻结、不full/310/Linux/wheel/索引机。
+
+- [x] 实核新worktree分支/HEAD/dev/main，trackedclean。
+- [x] 读transport/worker/task/accounting生命周期；提交Conservative Network Finalization设计供sole集中审，核心实现在审结后。
+- [x] 安全分类reqwest timeout/connect/request/transport并同步Pythonfixedenum。
+- [ ] 固定publication/provideridentity一次repo/tree发现，独立diagnostic workspace，origin_soak cold100/persistent100；某modeUNKNOWN即停并保pending，persistent100全pass才追加persistent500（不以cold是否通过设额外门），原行为与postfix分列。
+- [x] 有证据才做origin短client/CDN池策略，不全局禁池。当前discovery阻断，无池因果证据，未改池策略。
+- [x] 实施获审安全全额charge终止网络失败；published/ownership/cleanup/worker/ledger未知仍UNKNOWN，READY recoverable仅explicitresume。
+- [x] 直接Rust/Python契约测试、Ruff/diff，专属worker target显式源码，不覆盖旧worker。
+- [ ] soak后正式同验收workspace新2~3records metadata workers1任务；父内存before保旧6pending身份，CONFIRMED transient boundedexplicitresume，真UNKNOWN立即停，finalexport仅成功后。
+- [ ] 集中delta审、最多2普通语义commit，push -u origin work-p6-origin-stability并核remote/dev/main，完整最终报告停止WAITING_REVIEW。
+
+## 当前离线验证与阻断
+
+- 初轮121631ce exit1：8 failed/4 passed/2.26s，worker fixture send_raw接口错误，已修；不能据此判产品功能通过或失败。
+- 08e976a2 exit1：8 failed/4 passed/2.55s，legacy ledger误用workspace inspect接口和crash异常期待错误，已修fixture。
+- 8d60a21f exit0：12 passed/2.49s。
+- e8231d5f exit1：13 passed/1 failed；duration NOT_RECORDED（回执截断），失败为真实basis元数据未INSERT，不冒称fixture错误。
+- 0d545949 exit1：2 failed/8.55s；basis同一真实bug及workspace-v3 fixture profile不匹配。
+- d869b96b exit0：16 passed/17.58s，含修复basisINSERT、explicit resume旧attempt保留、v3 pending共存/quota、earlyUNKNOWN、consume已持久成功再raise。
+- b4ec9cec exit0：1 passed/7.04s，TaskDB持久失败最终CLI UNKNOWN不可恢复且basis不泄出。
+- ddf632ec exit1：18 passed/1 failed/29.36s；persistent fixture直接设旗缺正式enable_persistent初始化，已修走正式入口并断言resident pending/inflight保留。
+- 最后集中小集合fbe48793 exit0：19 passed/34.75s，非累计统计；四个network testfiles集中验证通过，candidate准备冻结集中审。
+- 有界现有直接消费者13df9a16 exit0：8files pytest210 passed/430.21s；Rust production::4 passed/0 failed/0.00s。1b4d7329 exit0：worker bin8 passed/0.05s、worker_protocol12 passed/0.09s。分命令统计，不累计冒同轮。
+- sole对f7e7e933提出三项阻断；已最小修capability/proof失败latch（含consume/settle与BaseException清理窗口）、带真实finalizedtoken的outer独立负门及正例、soak安全basis三字段输出。8e205b3a exit0：定向network_finalization20 passed/5.07s，随后三改路径Ruff与diffcheck均0。无重跑210/full、无真实网络。
+- sole corrected tree4fc700eaa2c575d5cf22ebaff0e86b6cf371a910 PASS经root转达。授权postfix e881bcc8 exit0结构化BLOCKED（非soakPASS）：provider_tree_request/http_status400/CONFIRMED，attempts13/body76556/metadata76556/pending0/inflight0/saved0；root post-fix-4fc700ea。单bounded exactlookup含分页，不猜page/redirect数。COLD/PERSISTENT NOT_RUN_DISCOVERY_BLOCKED，REAL_FINAL_TASK BLOCKED_DEPENDENCY；停止网络/不建acceptance。原ws官方inspect before/after aggregate pending6与usage相同，不声称逐lease identityequal。完整NETWORK_STABILITY_FINAL待sole文档有限事实核，审结后普通branch-only commit/push。
+- 原冷/持久soak未启动；修后唯一discovery为provider_tree_request/http_status400/CONFIRMED/pending0。COLD和PERSISTENT均NOT_COMPLETED_DISCOVERY_BLOCKED，不重复猜分页参数，不因此停离线实现；新网络验证须待实现集中审和测试门。
+
+## 历史：P6-A ORIGIN COMPATIBILITY FINAL CLOSURE
 
 基线1d88cfedf5fe89d4da1ac837d3c040697557dd95。actualprofileOrigin ABC302；官方最小stream302→206/read1byte，正式同workspaceRust条件probePASS，未发现必要headerfix，PRODUCT_FIXNONE、ORIGIN_RANGE_REQUIREDUNKNOWN、历史400原因未确定。用户明确允许后仅创建并run一次metadata-origin-final（2ee1f9ef2dec435fb99f57b6c4bceb4a），runexit2 publication_range/causeorigin_transport/operationUNKNOWN，delivered0/3 UNKNOWN1，立即停，未resume/export/retry/newtask/refund。finallypending4→6/inflight0、saved2旧交付不增；两个旧UNKNOWN未动，新final亦禁重放。仅FOLLOWUP与plan文档收口，无产品/tests/Rustbuild/full/source重测，sole有限核后普通devcommitpush、main不动，停止P6_AWAITINGREVIEW/VALIDATION_PARTIAL。真实REAL_FINAL_WORKSPACE_TASKBLOCKED。
 

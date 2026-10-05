@@ -450,16 +450,24 @@ def run_task(
                                 and getattr(error, "safe_details", {}).get("accounting")
                                 == "CONFIRMED"
                             )
+                            error.recoverable = known
                             task.finish_item(
                                 item["seq"],
                                 state="READY" if known else "BLOCKED",
                                 code=error.code,
                                 accounting="CONFIRMED" if known else "UNKNOWN",
+                                accounting_basis=(error.safe_details.get("accounting_basis")
+                                                  if known else None),
                             )
                             error.delivery = (
                                 "PUBLISHED" if status == "PUBLISHED" else "NOT_PUBLISHED"
                             )
                         except BaseException:
+                            error.recoverable = False
+                            error.safe_details = getattr(error, "safe_details", {})
+                            error.safe_details["accounting"] = "UNKNOWN"
+                            for key in ("accounting_basis", "actual_consumption", "accounted"):
+                                error.safe_details.pop(key, None)
                             error.task_secondary = ("TASK_STATE_PERSIST_FAILED",)
                         raise error from None
                     task.finish_item(item["seq"], state="DONE")

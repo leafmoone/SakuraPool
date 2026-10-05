@@ -13,7 +13,11 @@ from .bounded_json import VALIDATION_INFLIGHT_BYTES, validate_file
 from .budget import BudgetExceeded, BudgetLedger, Reservation
 from .modelscope import ModelScopeDataset, _io_error
 from .prepared_fetch import stream_plan
-from .production import ProviderObject, RustProductionTransport
+from .production import (
+    _CONSERVATIVE_FINALIZED,
+    ProviderObject,
+    RustProductionTransport,
+)
 from .publication import PublicationCorrupt
 from .retrieval import EXTENSIONS, _publish_directory, _real_output_root
 from .transport import BoundObject, GuardedTransport, RemoteIOError
@@ -67,7 +71,20 @@ class PublicationFetchError(RemoteIOError):
         self.validation_failed = code == "publication_metadata"
         self.delivery_published = delivered
         self.cleanup_safe = cleanup_safe
-        self.accounting_state = "UNKNOWN"
+        conservative = (
+            not delivered and cleanup_safe and output_lease == "CONFIRMED" and not secondary
+            and isinstance(underlying, RemoteIOError)
+            and underlying.accounting_state == "CONFIRMED"
+            and getattr(underlying, "_conservative_finalized", None) is _CONSERVATIVE_FINALIZED
+            and getattr(underlying, "accounting_basis", None) == "CONSERVATIVE_MAX_CHARGE"
+            and not getattr(underlying, "finalization_secondary", ())
+            and not getattr(underlying, "production_payload_lease", None)
+        )
+        self.accounting_state = "CONFIRMED" if conservative else "UNKNOWN"
+        if conservative:
+            self.accounting_basis = "CONSERVATIVE_MAX_CHARGE"
+            self.actual_consumption = "UNKNOWN"
+            self.accounted = "CONSERVATIVE_MAX"
         self.output_lease_state = output_lease
         self.finalization_errors = tuple(secondary)
 
@@ -81,7 +98,7 @@ class PublicationFetchError(RemoteIOError):
             "accounting_scope": "OPERATION",
             "cleanup": "SAFE" if self.cleanup_safe else "PRESERVED",
             "secondary": list(self.finalization_errors),
-            "recoverable": False,
+            "recoverable": self.accounting_state == "CONFIRMED",
         }
 
 

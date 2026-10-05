@@ -96,6 +96,12 @@ _SAFE_CODES = frozenset(
         "metadata_limit",
         "origin_transport",
         "cdn_transport",
+        "origin_timeout",
+        "origin_connect",
+        "origin_request",
+        "cdn_timeout",
+        "cdn_connect",
+        "cdn_request",
         "rejected",
     }
 )
@@ -155,6 +161,14 @@ class RemoteIOError(RuntimeError):
                                         "accounting": self.accounting_state}
         if self.http_status is not None:
             result["http_status"] = self.http_status
+        if (
+            self.accounting_state == "CONFIRMED"
+            and getattr(self, "accounting_basis", None) == "CONSERVATIVE_MAX_CHARGE"
+            and getattr(self, "actual_consumption", None) == "UNKNOWN"
+            and getattr(self, "accounted", None) == "CONSERVATIVE_MAX"
+        ):
+            result.update(accounting_basis="CONSERVATIVE_MAX_CHARGE",
+                          actual_consumption="UNKNOWN", accounted="CONSERVATIVE_MAX")
         if getattr(self, "finalization_secondary", ()):
             result["secondary"] = list(self.finalization_secondary)
         return result

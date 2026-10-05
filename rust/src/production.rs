@@ -176,6 +176,33 @@ pub struct Outcome {
     pub error: Option<&'static str>,
     pub accounting: Accounting,
 }
+fn network_error(error: &reqwest::Error, origin: bool) -> &'static str {
+    network_error_predicates(
+        origin,
+        error.is_timeout(),
+        error.is_connect(),
+        error.is_request(),
+    )
+}
+
+fn network_error_predicates(
+    origin: bool,
+    timeout: bool,
+    connect: bool,
+    request: bool,
+) -> &'static str {
+    match (origin, timeout, connect, request) {
+        (true, true, _, _) => "origin_timeout",
+        (false, true, _, _) => "cdn_timeout",
+        (true, false, true, _) => "origin_connect",
+        (false, false, true, _) => "cdn_connect",
+        (true, false, false, true) => "origin_request",
+        (false, false, false, true) => "cdn_request",
+        (true, _, _, _) => "origin_transport",
+        (false, _, _, _) => "cdn_transport",
+    }
+}
+
 fn valid_atom(s: &str) -> bool {
     !s.is_empty()
         && s.bytes()
@@ -561,7 +588,7 @@ fn transfer(
     a.http_status = None;
     a.attempts += 1;
     a.complete = false;
-    let r = req.send().map_err(|_| "origin_transport")?;
+    let r = req.send().map_err(|error| network_error(&error, true))?;
     a.observe_headers(&r);
     headers(&r, t.http_header_bytes)?;
     a.complete = single(r.headers(), "content-length")? == Some("0")
@@ -602,7 +629,7 @@ fn transfer(
     a.content_encoding_present = false;
     a.attempts += 1;
     a.complete = false;
-    let mut r = req.send().map_err(|_| "cdn_transport")?;
+    let mut r = req.send().map_err(|error| network_error(&error, false))?;
     a.observe_headers(&r);
     headers(&r, t.http_header_bytes)?;
     a.complete = single(r.headers(), "content-length")? == Some("0")
@@ -802,6 +829,41 @@ pub fn run_with_context(t: Transfer, context: &mut ExecutionContext) -> Outcome 
 }
 #[cfg(test)]
 mod diagnostic_tests {
+    #[test]
+    fn network_predicate_priority_and_phase() {
+        for origin in [true, false] {
+            let expected = if origin {
+                [
+                    "origin_timeout",
+                    "origin_connect",
+                    "origin_request",
+                    "origin_transport",
+                ]
+            } else {
+                ["cdn_timeout", "cdn_connect", "cdn_request", "cdn_transport"]
+            };
+            for timeout in [true, false] {
+                for connect in [true, false] {
+                    for request in [true, false] {
+                        let index = if timeout {
+                            0
+                        } else if connect {
+                            1
+                        } else if request {
+                            2
+                        } else {
+                            3
+                        };
+                        assert_eq!(
+                            super::network_error_predicates(origin, timeout, connect, request),
+                            expected[index]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn reusable_clients_have_bounded_host_set() {
         let mut context = super::ExecutionContext::default();

@@ -33,6 +33,8 @@ from .rust_bridge import RustWorker, RustWorkerError
 from .transport import RemoteIOError
 
 MAX_RANGE = 8 * (1 << 20)
+# In-process evidence minted only after the request resource and ledger gates.
+_CONSERVATIVE_FINALIZED = object()
 _DIAGNOSTIC_FLAGS = (
     "content_length_present",
     "content_range_present",
@@ -56,6 +58,12 @@ _PUBLIC_ERROR_CODES = frozenset(
         "metadata_limit",  # Fixed Rust observer capacity enum; no raw scanner error.
         "origin_transport",
         "cdn_transport",
+        "origin_timeout",
+        "origin_connect",
+        "origin_request",
+        "cdn_timeout",
+        "cdn_connect",
+        "cdn_request",
     }
 )
 
@@ -807,8 +815,21 @@ class RustProductionTransport:
                     code if isinstance(code, str) and code in _PUBLIC_ERROR_CODES else "rejected"
                 )
             if not msg.get("ok") or "production_error" in result:
-                # Account first even when ok=true: the envelope is not business success.
+                # A valid terminal response is necessary, not sufficient, for reconciliation.
                 diagnostic = self.last_result["diagnostic"]
+                safe_code = self.last_result.get("production_error", "rejected")
+                if (
+                    not accounting["complete"]
+                    and safe_code in {
+                        "origin_timeout", "origin_connect", "origin_request", "origin_transport",
+                        "cdn_timeout", "cdn_connect", "cdn_request", "cdn_transport",
+                    }
+                    and safe_code.startswith(diagnostic["phase"] + "_")
+                ):
+                    self._conservative_candidate = {
+                        "leases": (lease1, lease2), "maximum": body_budget,
+                        "observed": accounting["body"], "used": False,
+                    }
                 raise RemoteIOError(
                     "Rust production request rejected",
                     code=self.last_result.get("production_error", "rejected"),
@@ -925,6 +946,7 @@ class RustProductionTransport:
             root = self._owned_dir()
             self._request_worker = None
             self._request_terminal = False
+            self._conservative_candidate = None
             result = self._call(
                 obj,
                 root,
@@ -1040,6 +1062,44 @@ class RustProductionTransport:
                 if first_secondary is None:
                     first_secondary = secondary
                 failed = True
+            candidate = getattr(self, "_conservative_candidate", None)
+            if (
+                primary is not None and isinstance(primary, RemoteIOError)
+                and candidate is not None and not candidate["used"]
+                and self._request_terminal and not failed and not raw and not retain
+                and not getattr(primary, "finalization_secondary", ())
+                and not getattr(primary, "production_payload_lease", None)
+            ):
+                # Sequential terminal envelope proves this request has unwound;
+                # the persistent resident lease remains independently admitted.
+                candidate["used"] = True
+                try:
+                    self.ledger.consume_body(
+                        candidate["leases"][0], candidate["maximum"] - candidate["observed"]
+                    )
+                    for network_lease in candidate["leases"]:
+                        self.ledger.settle(network_lease)
+                except BaseException:
+                    failed = True
+                    primary.finalization_secondary = (
+                        *getattr(primary, "finalization_secondary", ()),
+                        "conservative_network_settle",
+                    )
+                else:
+                    primary.accounting_state = "CONFIRMED"
+                    primary.accounting_basis = "CONSERVATIVE_MAX_CHARGE"
+                    primary.actual_consumption = "UNKNOWN"
+                    primary.accounted = "CONSERVATIVE_MAX"
+                    if not getattr(self, "_unresolved_network", False):
+                        primary._conservative_finalized = _CONSERVATIVE_FINALIZED
+            if primary is not None and (
+                not getattr(self, "_request_terminal", False)
+                or failed
+                or isinstance(primary, RemoteIOError) and primary.accounting_state == "UNKNOWN"
+            ):
+                # Earlier unresolved requests on this channel cannot be washed by
+                # a later confirmed chunk. Historical ledger leases are separate.
+                self._unresolved_network = True
             if failed:
                 if primary is None:
                     if first_secondary is not None and not isinstance(first_secondary, Exception):
@@ -1258,9 +1318,14 @@ class RustProductionTransport:
                 else:
                     failed = True  # Live/unknown worker retains both quota and artifacts.
             except BaseException as secondary:
+                self._unresolved_network = True
                 if primary is None and not isinstance(secondary, Exception):
                     raise
                 failed = True
+            if primary is not None or failed:
+                # Capability/proof requests share this channel's uncertainty latch.
+                # Clearing bindings or later reproof cannot erase unresolved quota.
+                self._unresolved_network = True
             if failed:
                 if primary is None:
                     raise RemoteIOError(

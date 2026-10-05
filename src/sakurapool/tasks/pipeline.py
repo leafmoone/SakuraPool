@@ -66,6 +66,9 @@ def _safe_diagnostic(error):
         "output_lease": {"CONFIRMED", "UNKNOWN"},
         "accounting_scope": {"OPERATION"},
         "cleanup": {"SAFE", "PRESERVED"},
+        "accounting_basis": {"CONSERVATIVE_MAX_CHARGE"},
+        "actual_consumption": {"UNKNOWN"},
+        "accounted": {"CONSERVATIVE_MAX"},
     }
     safe = {
         key: value
@@ -417,6 +420,7 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
         except BaseException:
             return error
         published = False
+        known = False
         try:
             if error is None:
                 task.finish_item(item["seq"], state="DONE")
@@ -433,8 +437,13 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
                 state="READY" if known else "BLOCKED",
                 code=safe.get("code", "FETCH_UNCONFIRMED"),
                 accounting="CONFIRMED" if known else "UNKNOWN",
+                accounting_basis=safe.get("accounting_basis") if known else None,
             )
         except BaseException as persistence:
+            known = False
+            safe["accounting"] = "UNKNOWN"
+            for key in ("accounting_basis", "actual_consumption", "accounted"):
+                safe.pop(key, None)
             if primary is None:
                 return persistence
             primary.task_secondary = (
@@ -443,7 +452,8 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
             )
         if not isinstance(primary, Exception):
             return primary
-        converted = TaskError(safe.get("code", "FETCH_UNCONFIRMED"), safe.get("phase", "fetch"))
+        converted = TaskError(safe.get("code", "FETCH_UNCONFIRMED"), safe.get("phase", "fetch"),
+                              recoverable=known)
         converted.safe_details = safe
         converted.delivery = "PUBLISHED" if published else safe.get("delivery", "NOT_PUBLISHED")
         safe["delivery"] = converted.delivery

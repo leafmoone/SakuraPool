@@ -499,13 +499,28 @@ class TaskDB:
                     (row["seq"],),
                 )
 
-    def finish_item(self, seq, *, state, code=None, accounting=None):
+    def finish_item(self, seq, *, state, code=None, accounting=None, accounting_basis=None):
         with self.transaction() as db:
             if state == "READY" and accounting == "CONFIRMED" and code is not None:
                 db.execute(
                     "UPDATE attempts SET accounting='CONFIRMED',network_state='CONFIRMED' "
                     "WHERE attempt_id=(SELECT attempt_id FROM items WHERE seq=?)",
                     (seq,),
+                )
+            if accounting_basis == "CONSERVATIVE_MAX_CHARGE":
+                if state != "READY" or accounting != "CONFIRMED" or code is None:
+                    raise ValueError("conservative attempt must be confirmed unpublished")
+                attempt = db.execute(
+                    "SELECT attempt_id FROM items WHERE seq=?", (seq,)
+                ).fetchone()[0]
+                if attempt is None:
+                    raise ValueError("conservative attempt identity absent")
+                db.execute(
+                    "INSERT INTO meta(key,value) VALUES(?,?)",
+                    ("accounting_basis:" + attempt, canonical({
+                        "accounting_basis": "CONSERVATIVE_MAX_CHARGE",
+                        "actual_consumption": "UNKNOWN", "accounted": "CONSERVATIVE_MAX",
+                    }).decode()),
                 )
             db.execute(
                 "UPDATE items SET state=?,code=?,accounting=COALESCE(?,accounting) WHERE seq=?",
