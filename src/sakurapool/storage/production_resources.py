@@ -1,14 +1,11 @@
-"""Hard production limits and lifecycle footprints; no TAR-size RAM multiplier.
+"""Simultaneous-live production admission ceilings, not throughput estimates.
 
-These are simultaneous-live admission ceilings, not a throughput guarantee.
-Production uses fresh disposable pre-publication SQLite files with journal_mode=OFF:
-no rollback/WAL/subjournal, no estimated VFS-sector bound. SQL/IO/crash failures can
-leave corrupt private databases, never a successful completion marker/COMMIT.
-Existing completed artifacts are never updated by this mode; local keeps DELETE.
-The all-member uniqueness table shares this capped database, then is dropped.
+Production private SQLite uses journal_mode=OFF; failures never publish success.
 """
 
 from dataclasses import dataclass
+
+from ..capacity import UINT64_MAX, CapacityConfig
 
 NEGATIVE_CONDITION_BODY_CAP = 65_536
 MAX_RANGE = 8 << 20
@@ -25,15 +22,41 @@ STAGE_DISK_CAP = STAGE_MAIN_CAP + (1 << 20)
 STAGE_PAGES = STAGE_MAIN_CAP // 4096
 STREAM_MEMORY = 128 << 20
 ALLOCATION_OVERHEAD = 16 << 10
-# Each P2 private spool<=60MiB, no journal. Shared fragment cap is the existing192MiB,
-# audit64MiB: 2*60+192+64=376MiB before allocation overhead within1152MiB allowance.
-# Stage and all Download transfer artifacts remain separately live.
+PROTOCOL_BOOTSTRAP_BYTES = 64 << 10
+PROTOCOL_MAX_DEPTH = 64
+PROTOCOL_MAX_NODES = 65_536
+PROTOCOL_NODE_BYTES = 256
+# Pinned hyper HTTP/1 parser default: 8192 + 4096 * 100. reqwest has no knob.
+HTTP_PARSER_BYTES = 417_792
 DURABLE_SPOOL_LIMITS = {
     "spool_pages": (60 << 20) // 4096,
     "row_bytes": 512 << 10,
     "batch_bytes": 256 << 10,
     "row_groups": 512,
 }
+
+
+def protocolmemory(capacity=None):
+    """Shared Python/Rust live protocol/header allocation contract (not RSS).
+
+    Five raw line extents cover producer pending, queue(1), consumer and
+    bytearray growth/copy slack. UTF-8 decode and decoded strings each charge
+    four bytes/source byte. Keys, values and container slots charge 256 bytes
+    per node, including sparse Python dict/list capacity and Rust typed copies.
+    Two hops charge parser growth, header values and 128 HeaderMap slots each.
+    Actual hyper parser allocation is charged even for tiny semantic limits.
+    Fixed pipe chunks, stderr and control charge 1 MiB. Legacy scan manifests
+    have their separate response contract, not this production-sidecar model.
+    """
+    capacity = CapacityConfig() if capacity is None else capacity
+    if not isinstance(capacity, CapacityConfig):
+        raise ValueError("typed capacity required")
+    line = max(PROTOCOL_BOOTSTRAP_BYTES, capacity.rpc_line_bytes)
+    memory = (1 << 20) + 13 * line + PROTOCOL_NODE_BYTES * min(PROTOCOL_MAX_NODES, line)
+    memory += 2 * (4 * max(HTTP_PARSER_BYTES, capacity.http_header_bytes) + 128 * 256)
+    if memory > UINT64_MAX:
+        raise ValueError("production memory integer boundary")
+    return memory
 
 
 @dataclass(frozen=True)
@@ -44,20 +67,29 @@ class ProductionFootprint:
     artifacts: int
 
     @classmethod
-    def admit(cls, mode: str, object_bytes: int):
-        if type(object_bytes) is not int or not 0 < object_bytes < 2**64:
+    def admit(cls, mode: str, object_bytes: int, capacity=None):
+        if type(object_bytes) is not int or not 0 < object_bytes <= UINT64_MAX:
             raise ValueError("production extent invalid")
+        capacity = capacity if capacity is not None else CapacityConfig()
+        protocol = protocolmemory(capacity)
         if mode == "range":
-            if object_bytes > MAX_RANGE:
-                raise ValueError("production Range exceeds 8MiB")
-            # One returned payload and one bounded consumer copy; Rust uses only 64KiB.
-            return cls(mode, object_bytes, (32 << 20) + 2 * object_bytes, object_bytes)
+            if object_bytes > capacity.range_chunk_bytes:
+                raise ValueError("production Range exceeds configured chunk capacity")
+            memory = (32 << 20) + 2 * object_bytes + protocol
+            if memory > UINT64_MAX:
+                raise ValueError("production memory integer boundary")
+            return cls(mode, object_bytes, memory, object_bytes)
         if mode not in ("download-then-scan", "remote-stream-scan"):
             raise ValueError("production mode invalid")
         artifacts = RECORD_CAP + FOOTER_CAP + METADATA_CAP
         if mode == "download-then-scan":
             artifacts += object_bytes
-        return cls(mode, object_bytes, STREAM_MEMORY, artifacts)
+        if artifacts + ALLOCATION_OVERHEAD > UINT64_MAX:
+            raise ValueError("production artifact integer boundary")
+        memory = STREAM_MEMORY + protocol
+        if memory > UINT64_MAX:
+            raise ValueError("production memory integer boundary")
+        return cls(mode, object_bytes, memory, artifacts)
 
     @property
     def transfer_disk(self):

@@ -251,6 +251,7 @@ fn fast_policy() -> HttpPolicy {
         retry_base_ms: 1,
         read_timeout: std::time::Duration::from_secs(5),
         extra_headers: Vec::new(),
+        ..HttpPolicy::default()
     }
 }
 

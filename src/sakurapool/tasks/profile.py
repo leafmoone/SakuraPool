@@ -1,4 +1,4 @@
-"""Task-specific connection profile; legacy single-object scope is unchanged."""
+"""Connection descriptions; validation never resolves credentials."""
 
 import json
 import os
@@ -7,6 +7,7 @@ from pathlib import Path
 from ..fs_safety import plain_entry
 from ..storage.location_gate import parse_repository
 from ..storage.production import RustProductionTransport
+from .context import effective_capacity
 from .store import TaskError
 
 FORMAT = "sakurapool-task-connection-v1"
@@ -23,11 +24,13 @@ def read_profile(path):
 
 
 def _validate_profile(profile):
-    if (not isinstance(profile, dict) or set(profile) - {
-            "format", "origin", "repositories", "worker", "credential_ref"}
-            or profile.get("format") != FORMAT
-            or profile.get("origin") not in ("https://modelscope.cn", "https://www.modelscope.cn")
-            or not isinstance(profile.get("worker"), str)):
+    if (
+        not isinstance(profile, dict)
+        or set(profile) - {"format", "origin", "repositories", "worker", "credential_ref"}
+        or profile.get("format") != FORMAT
+        or profile.get("origin") not in ("https://modelscope.cn", "https://www.modelscope.cn")
+        or not isinstance(profile.get("worker"), str)
+    ):
         raise TaskError("PROFILE_INVALID", "profile")
     repos = profile.get("repositories")
     if not isinstance(repos, list) or not 1 <= len(repos) <= 128:
@@ -36,11 +39,13 @@ def _validate_profile(profile):
         parse_repository(repo)
     ref = profile.get("credential_ref")
     if "credential_ref" in profile and (
-            not isinstance(ref, dict) or len(ref) != 1
-            or not set(ref).issubset({"env", "file"})
-            or not isinstance(next(iter(ref.values()), None), str)
-            or not next(iter(ref.values()), "").strip()
-            or ("env" in ref and ref["env"] != "MODELSCOPE_API_TOKEN")):
+        not isinstance(ref, dict)
+        or len(ref) != 1
+        or not set(ref).issubset({"env", "file"})
+        or not isinstance(next(iter(ref.values()), None), str)
+        or not next(iter(ref.values()), "").strip()
+        or ("env" in ref and ref["env"] != "MODELSCOPE_API_TOKEN")
+    ):
         raise TaskError("PROFILE_CREDENTIAL_REF_INVALID", "profile")
 
 
@@ -50,8 +55,15 @@ def validate_allowlist(profile, publication):
             raise TaskError("PROFILE_SCOPE_MISMATCH", "profile")
 
 
-def connect_profile(profile, ledger):
+def connect_profile(profile, ledger, *, capacity=None):
     _validate_profile(profile)
+    workspace = getattr(ledger, "workspace", None)
+    capacity = workspace if capacity is None else capacity
+    effective = getattr(capacity, "capacity", capacity)
+    if workspace is not None:
+        if effective != workspace.capacity:
+            raise TaskError("TASK_CAPACITY_CONFLICT", "profile")
+        workspace.check()
     ref = profile.get("credential_ref")
     token = None
     if ref is not None:
@@ -65,8 +77,17 @@ def connect_profile(profile, ledger):
                 token = path.read_text(encoding="utf-8").strip()
         except (OSError, ValueError, TypeError):
             token = None
-        if not token or len(token) > 4096 or any(ord(c) < 0x21 or ord(c) >= 0x7f for c in token):
+        if not token or len(token) > 4096 or any(ord(c) < 0x21 or ord(c) >= 0x7F for c in token):
             raise TaskError("PROFILE_CREDENTIAL_INVALID", "profile")
-    return RustProductionTransport(ledger, Path(profile["worker"]), origin=profile["origin"],
-                                   token=token, same_origin_cookie=("m_session_id=" + token)
-                                   if token else None)
+    options = {} if effective is None else {"capacity": effective}
+    transport = RustProductionTransport(
+        ledger,
+        Path(profile["worker"]),
+        origin=profile["origin"],
+        token=token,
+        same_origin_cookie=("m_session_id=" + token) if token else None,
+        **options,
+    )
+    if effective is not None and effective_capacity(transport) != effective:
+        raise TaskError("TASK_CAPACITY_CONFLICT", "profile")
+    return transport

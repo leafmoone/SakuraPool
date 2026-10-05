@@ -226,9 +226,9 @@ def test_control_disk_admission_refuses_before_rw_open(setup, monkeypatch, capsy
     opened = []
     original = store._connect
 
-    def connect(path, *, readonly=False):
+    def connect(path, *, readonly=False, capacity=None):
         opened.append(readonly)
-        return original(path, readonly=readonly)
+        return original(path, readonly=readonly, capacity=capacity)
 
     monkeypatch.setattr(store, "_connect", connect)
     monkeypatch.setattr(cli, "BudgetLedger", lambda root: ledger)
@@ -237,7 +237,7 @@ def test_control_disk_admission_refuses_before_rw_open(setup, monkeypatch, capsy
     before = (directory / "task.sqlite").read_bytes()
     assert main(["task", "pause", str(directory)]) == 2
     assert "RESOURCE_BLOCKED" in capsys.readouterr().out
-    assert opened == [] and calls == []
+    assert opened and all(opened) and calls == []
     assert (directory / "task.sqlite").read_bytes() == before
 
 

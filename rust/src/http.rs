@@ -25,6 +25,8 @@ pub struct HttpPolicy {
     /// reqwest blocking timeout, including response-body reads (not per-read).
     pub read_timeout: Duration,
     pub extra_headers: Vec<(String, String)>,
+    pub range_chunk_bytes: u64,
+    pub http_header_bytes: usize,
 }
 
 impl Default for HttpPolicy {
@@ -35,6 +37,8 @@ impl Default for HttpPolicy {
             retry_base_ms: 25,
             read_timeout: Duration::from_secs(30),
             extra_headers: Vec::new(),
+            range_chunk_bytes: HTTP_MAX_RANGE_BYTES,
+            http_header_bytes: HTTP_MAX_HEADER_BYTES,
         }
     }
 }
@@ -219,14 +223,14 @@ fn caller_headers(policy: &HttpPolicy) -> Result<Vec<(HeaderName, HeaderValue)>,
         .collect()
 }
 
-fn response_headers(response: &Response) -> Result<Vec<(String, String)>, &'static str> {
+fn response_headers(response: &Response, limit: usize) -> Result<Vec<(String, String)>, &'static str> {
     // reqwest/hyper parses a bounded header block first. This is the stricter
     // application bound on decoded fields; not a custom HTTP parser.
     let mut size = 0usize;
     let mut headers = Vec::new();
     for (name, value) in response.headers() {
         size = size.saturating_add(name.as_str().len() + value.as_bytes().len() + 4);
-        if size > HTTP_MAX_HEADER_BYTES {
+        if size > limit {
             return Err("response_headers_too_large");
         }
         headers.push((
@@ -262,7 +266,7 @@ pub fn http_request(
     let mut current_url = validated_url(url)?;
     if let HttpOp::Range { range, total } = op {
         ByteRange::new(range.start, range.end, *total)?;
-        if range.len() > max_body_bytes || range.len() > HTTP_MAX_RANGE_BYTES {
+        if range.len() > max_body_bytes || range.len() > policy.range_chunk_bytes || range.len() > isize::MAX as u64 {
             return Err("body_too_large");
         }
     }
@@ -298,7 +302,7 @@ pub fn http_request(
                     }
                 })?;
                 let status = response.status().as_u16();
-                let headers = response_headers(&response)?;
+                let headers = response_headers(&response, policy.http_header_bytes)?;
                 if matches!(status, 301 | 302 | 303 | 307 | 308) {
                     let location = header(&headers, "location").ok_or("missing_location")?;
                     // Url canonicalization drops an explicit default :80. Derive

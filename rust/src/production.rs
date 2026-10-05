@@ -8,11 +8,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-/// Only wrong-condition CDN 412 entities are streamed and discarded under this cap.
 pub const NEGATIVE_CONDITION_BODY_CAP: u64 = 65_536;
-
-// Fixed observer enum only: never expose arbitrary scanner errors or paths.
 fn public_scan_error(error: &'static str) -> &'static str {
     if error == "metadata_limit" {
         "metadata_limit"
@@ -20,32 +16,6 @@ fn public_scan_error(error: &'static str) -> &'static str {
         "scan_failed"
     }
 }
-
-#[cfg(test)]
-mod diagnostic_tests {
-    #[test]
-    fn reusable_clients_have_bounded_host_set() {
-        let mut context = super::ExecutionContext::default();
-        for port in 10000..10020 {
-            let url = reqwest::Url::parse(&format!("http://127.0.0.1:{port}/object")).unwrap();
-            context.cdn_client(&url).unwrap();
-            assert!(context.cdn_hosts.len() <= 8);
-        }
-        assert_eq!(context.cdn_hosts.len(), 4);
-        assert!(context.origin_client.is_none());
-    }
-
-    #[test]
-    fn metadata_capacity_is_public_unknown_is_redacted() {
-        assert_eq!(super::public_scan_error("metadata_limit"), "metadata_limit");
-        assert_eq!(
-            super::public_scan_error("private path or body"),
-            "scan_failed"
-        );
-        assert_eq!(super::public_scan_error("metadata_length"), "scan_failed");
-    }
-}
-
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Object {
@@ -74,33 +44,73 @@ pub struct Transfer {
     pub mode: String,
     #[serde(default = "default_json_limit")]
     pub json_limit: u64,
+    #[serde(default = "default_revision")]
+    pub payload_revision: u32,
+    #[serde(default = "default_range")]
+    pub range_chunk_bytes: u64,
+    #[serde(default = "default_header")]
+    pub http_header_bytes: usize,
+}
+fn default_revision() -> u32 {
+    1
+}
+fn default_range() -> u64 {
+    crate::HTTP_MAX_RANGE_BYTES
+}
+fn default_header() -> usize {
+    crate::HTTP_MAX_HEADER_BYTES
 }
 fn default_json_limit() -> u64 {
     crate::scan_sidecar::JSON_CAP
 }
-
-/// Capacity model reflects retained artifacts, not the remote object's RAM size.
+/// Shared Python/Rust protocol allocation contract; see production_resources.py.
+pub fn protocolmemory(rpc: usize, header: usize) -> Result<u64, &'static str> {
+    let line = (rpc as u64).max(65_536);
+    let headers = (header as u64)
+        .max(417_792)
+        .checked_mul(4)
+        .and_then(|n| n.checked_add(128 * 256))
+        .and_then(|n| n.checked_mul(2))
+        .ok_or("production_budget")?;
+    line.checked_mul(13)
+        .and_then(|n| n.checked_add(line.min(65_536) * 256))
+        .and_then(|n| n.checked_add(1 << 20))
+        .and_then(|n| n.checked_add(headers))
+        .ok_or("production_budget")
+}
 pub fn footprint(mode: &str, bytes: u64) -> Result<(u64, u64), &'static str> {
-    match mode {
-        "range" if bytes <= 8 * 1024 * 1024 => Ok((32 * 1024 * 1024 + bytes * 2, bytes)),
-        "download-then-scan" => Ok((
-            128 * 1024 * 1024,
+    footprint_with_capacity(mode, bytes, crate::MAX_LINE_BYTES, default_header())
+}
+pub fn footprint_with_capacity(
+    mode: &str,
+    bytes: u64,
+    rpc: usize,
+    header: usize,
+) -> Result<(u64, u64), &'static str> {
+    let protocol = protocolmemory(rpc, header)?;
+    let artifacts = crate::scan_sidecar::RECORD_CAP
+        + crate::scan_sidecar::METADATA_CAP
+        + crate::scan_sidecar::FOOTER_CAP;
+    let (memory, disk) = match mode {
+        "range" => (
             bytes
-                .checked_add(
-                    crate::scan_sidecar::RECORD_CAP
-                        + crate::scan_sidecar::METADATA_CAP
-                        + crate::scan_sidecar::FOOTER_CAP,
-                )
+                .checked_mul(2)
+                .and_then(|n| n.checked_add(32 * 1024 * 1024))
                 .ok_or("production_budget")?,
-        )),
-        "remote-stream-scan" => Ok((
+            bytes,
+        ),
+        "download-then-scan" => (
             128 * 1024 * 1024,
-            crate::scan_sidecar::RECORD_CAP
-                + crate::scan_sidecar::METADATA_CAP
-                + crate::scan_sidecar::FOOTER_CAP,
-        )),
-        _ => Err("production_budget"),
-    }
+            bytes.checked_add(artifacts).ok_or("production_budget")?,
+        ),
+        "remote-stream-scan" => (128 * 1024 * 1024, artifacts),
+        _ => return Err("production_budget"),
+    };
+    disk.checked_add(16 << 10).ok_or("production_budget")?;
+    Ok((
+        memory.checked_add(protocol).ok_or("production_budget")?,
+        disk,
+    ))
 }
 #[derive(Default, Serialize)]
 pub struct Accounting {
@@ -152,16 +162,12 @@ impl Accounting {
         self.content_encoding_present = h.contains_key("content-encoding");
     }
     pub fn observation(&self) -> serde_json::Value {
-        serde_json::json!({"origin_http_status":self.origin_http_status,
-            "cdn_http_status":self.cdn_http_status,"content_length":self.cdn_content_length})
+        serde_json::json!({"origin_http_status":self.origin_http_status,"cdn_http_status":self.cdn_http_status,"content_length":self.cdn_content_length})
     }
     pub fn diagnostic(&self) -> serde_json::Value {
-        serde_json::json!({"phase":self.phase,"http_status":self.http_status,
-            "attempts":self.attempts,"body_bytes_observed":self.body,
-            "accounting_complete":self.complete,
-            "content_length_present":self.content_length_present,
-            "content_range_present":self.content_range_present,
-            "etag_present":self.etag_present,"etag_is_strong":self.etag_is_strong,
+        serde_json::json!({"phase":self.phase,"http_status":self.http_status,"attempts":self.attempts,"body_bytes_observed":self.body,
+            "accounting_complete":self.complete,"content_length_present":self.content_length_present,
+            "content_range_present":self.content_range_present,"etag_present":self.etag_present,"etag_is_strong":self.etag_is_strong,
             "content_encoding_present":self.content_encoding_present})
     }
 }
@@ -231,10 +237,19 @@ fn origin(t: &Transfer) -> Result<Url, &'static str> {
         || (t.mode != "range" && (t.condition != "match" || t.report_name.is_none()))
         || (t.mode == "range"
             && (t.length == 0
-                || t.length > crate::HTTP_MAX_RANGE_BYTES
+                || t.length > t.range_chunk_bytes
                 || t.start
                     .checked_add(t.length)
                     .is_none_or(|n| n > o.object_size)))
+    {
+        return Err("object_profile_invalid");
+    }
+    if !matches!(t.payload_revision, 1 | 2)
+        || t.range_chunk_bytes == 0
+        || t.http_header_bytes == 0
+        || t.http_header_bytes > 16 * 1024 * 1024
+        || (t.payload_revision == 1
+            && (t.range_chunk_bytes != default_range() || t.http_header_bytes != default_header()))
     {
         return Err("object_profile_invalid");
     }
@@ -259,13 +274,13 @@ fn origin(t: &Transfer) -> Result<Url, &'static str> {
     Ok(u)
 }
 fn client() -> Result<Client, &'static str> {
-    // SakuraMoon _headers applies these public headers to origin AND redirected CDN.
-    // Static compatibility only; credentials still attach exclusively to origin.
     let mut headers = HeaderMap::new();
     headers.insert(
         reqwest::header::ACCEPT,
         HeaderValue::from_static("application/json, application/octet-stream"),
     );
+    // Pinned reqwest does not expose hyper's HTTP/1 allocation knobs. The shared
+    // admission model charges its 417792-byte parser ceiling even for tiny limits.
     Client::builder()
         .user_agent("SakuraMoon/1")
         .default_headers(headers)
@@ -288,12 +303,16 @@ fn single<'a>(h: &'a HeaderMap, name: &str) -> Result<Option<&'a str>, &'static 
         .map(|v| v.to_str().map_err(|_| "header_invalid"))
         .transpose()
 }
-fn headers(r: &Response) -> Result<(), &'static str> {
+fn headers(r: &Response, limit: usize) -> Result<(), &'static str> {
     let mut total = 0usize;
     for (k, v) in r.headers() {
-        total += k.as_str().len() + v.as_bytes().len() + 4;
+        total = total
+            .checked_add(k.as_str().len())
+            .and_then(|n| n.checked_add(v.as_bytes().len()))
+            .and_then(|n| n.checked_add(4))
+            .ok_or("headers_limit")?;
     }
-    if total > crate::HTTP_MAX_HEADER_BYTES {
+    if total > limit {
         return Err("headers_limit");
     }
     for k in [
@@ -465,7 +484,6 @@ impl Read for CountTee<'_> {
         Ok(n)
     }
 }
-/// Single-request-at-a-time context: credential-free defaults and bounded host pools.
 #[derive(Default)]
 pub struct ExecutionContext {
     origin_client: Option<Client>,
@@ -498,13 +516,11 @@ impl ExecutionContext {
         self.cdn_client.clone().ok_or("client_failed")
     }
 }
-
 fn transfer(
     t: &Transfer,
     a: &mut Accounting,
     context: &mut ExecutionContext,
 ) -> Result<serde_json::Value, &'static str> {
-    // Validate output ownership before making any request. Files remain job-owned until Python audits.
     let url = origin(t)?;
     let mut output = if t.mode == "remote-stream-scan" {
         None
@@ -547,7 +563,7 @@ fn transfer(
     a.complete = false;
     let r = req.send().map_err(|_| "origin_transport")?;
     a.observe_headers(&r);
-    headers(&r)?;
+    headers(&r, t.http_header_bytes)?;
     a.complete = single(r.headers(), "content-length")? == Some("0")
         && single(r.headers(), "transfer-encoding")?.is_none();
     if !a.complete {
@@ -562,7 +578,6 @@ fn transfer(
     )?;
     drop(r);
     drop(origin_client);
-    // Distinct credential-free CDN pool; every new Location is validated above.
     let cdn = context.cdn_client(&target)?;
     let mut req = cdn
         .get(target.clone())
@@ -589,7 +604,7 @@ fn transfer(
     a.complete = false;
     let mut r = req.send().map_err(|_| "cdn_transport")?;
     a.observe_headers(&r);
-    headers(&r)?;
+    headers(&r, t.http_header_bytes)?;
     a.complete = single(r.headers(), "content-length")? == Some("0")
         && single(r.headers(), "transfer-encoding")?.is_none();
     let status = r.status().as_u16();
@@ -598,8 +613,6 @@ fn transfer(
         if status != 412 {
             return Err("conditional_unsupported");
         }
-        // An error entity is not returned business bytes. Never parse/hash/write it.
-        // Require unambiguous framing and identity encoding; chunked is decoded by reqwest.
         let cl = single(r.headers(), "content-length")?;
         let te = single(r.headers(), "transfer-encoding")?;
         if cl.is_some() && te.is_some()
@@ -617,22 +630,21 @@ fn transfer(
             })
             .transpose()?;
         if declared.is_some_and(|n| n > NEGATIVE_CONDITION_BODY_CAP) {
-            return Err("body_length"); // Do not start reading an over-cap declared entity.
+            return Err("body_length");
         }
         let mut chunk = [0u8; 4096];
         loop {
-            let left = NEGATIVE_CONDITION_BODY_CAP + 1 - a.body;
-            let take = (left as usize).min(chunk.len());
+            let take = ((NEGATIVE_CONDITION_BODY_CAP + 1 - a.body) as usize).min(chunk.len());
             let n = r.read(&mut chunk[..take]).map_err(|_| "body_io")?;
             a.body += n as u64;
             if a.body > NEGATIVE_CONDITION_BODY_CAP {
-                return Err("body_length"); // Includes the actually read overflow byte.
+                return Err("body_length");
             }
             if n == 0 {
                 if declared.is_some_and(|n| n != a.body) {
                     return Err("body_length");
                 }
-                a.complete = true; // Only decoded reader EOF, never Content-Length alone.
+                a.complete = true;
                 break;
             }
         }
@@ -786,5 +798,37 @@ pub fn run_with_context(t: Transfer, context: &mut ExecutionContext) -> Outcome 
             error: Some(error),
             accounting,
         },
+    }
+}
+#[cfg(test)]
+mod diagnostic_tests {
+    #[test]
+    fn reusable_clients_have_bounded_host_set() {
+        let mut context = super::ExecutionContext::default();
+        for port in 10000..10020 {
+            context
+                .cdn_client(
+                    &reqwest::Url::parse(&format!("http://127.0.0.1:{port}/object")).unwrap(),
+                )
+                .unwrap();
+            assert!(context.cdn_hosts.len() <= 8);
+        }
+        assert_eq!(context.cdn_hosts.len(), 4);
+        assert!(context.origin_client.is_none());
+    }
+    #[test]
+    fn metadata_capacity_is_public_unknown_is_redacted() {
+        assert_eq!(super::public_scan_error("metadata_limit"), "metadata_limit");
+        assert_eq!(
+            super::public_scan_error("private path or body"),
+            "scan_failed"
+        );
+        assert_eq!(super::public_scan_error("metadata_length"), "scan_failed");
+    }
+    #[test]
+    fn protocol_footprint_checked_and_capacity_sensitive() {
+        assert!(super::protocolmemory(16 << 20, 16 << 20).unwrap() > 300 << 20);
+        assert!(super::protocolmemory(usize::MAX, usize::MAX).is_err());
+        assert!(super::footprint_with_capacity("range", u64::MAX, 65536, 65536).is_err());
     }
 }

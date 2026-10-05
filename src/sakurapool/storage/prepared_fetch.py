@@ -1,13 +1,72 @@
-"""Immutable single-record projection prepared only by the publication owner."""
+"""Owner-created immutable fetch descriptors and constant-space extent plans."""
 
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from threading import get_ident
 from types import MappingProxyType, SimpleNamespace
 
+from ..capacity import UINT64_MAX, CapacityConfig
 from .publication import PublicationCorrupt
 
 _FACTORY = object()
+
+
+@dataclass(frozen=True)
+class StreamPlan:
+    """Arithmetic only: planning never authorizes or performs remote IO."""
+
+    image_offset: int
+    image_bytes: int
+    metadata_offset: int
+    metadata_bytes: int
+    chunk_bytes: int
+
+    @property
+    def image_chunks(self):
+        return (self.image_bytes + self.chunk_bytes - 1) // self.chunk_bytes
+
+    @property
+    def metadata_chunks(self):
+        return (self.metadata_bytes + self.chunk_bytes - 1) // self.chunk_bytes
+
+    @property
+    def chunk_count(self):
+        return self.image_chunks + self.metadata_chunks
+
+    @property
+    def saved_bytes(self):
+        return self.image_bytes + self.metadata_bytes
+
+    def chunks(self, *, metadata=False):
+        offset = self.metadata_offset if metadata else self.image_offset
+        remaining = self.metadata_bytes if metadata else self.image_bytes
+        while remaining:
+            length = min(remaining, self.chunk_bytes)
+            yield offset, length
+            offset += length
+            remaining -= length
+
+
+def stream_plan(location, object_size, *, metadata=False, capacity=None):
+    capacity = capacity if capacity is not None else CapacityConfig()
+    if not isinstance(capacity, CapacityConfig):
+        raise ValueError("typed capacity required")
+    names = ("image_offset", "image_size", "metadata_offset", "metadata_size")
+    if (type(object_size) is not int or not 0 < object_size <= UINT64_MAX
+            or any(type(location[n]) is not int or not 0 <= location[n] <= UINT64_MAX
+                   for n in names)):
+        raise PublicationCorrupt("stream extent integer bound")
+    image, meta = location["image_size"], location["metadata_size"]
+    if (not 0 < image <= capacity.image_max_bytes
+            or meta > capacity.metadata_max_bytes
+            or location["image_offset"] + image > object_size
+            or location["metadata_offset"] + meta > object_size):
+        raise PublicationCorrupt("stream extent capacity or object bound")
+    meta = meta if metadata and location["flags"] & 1 else 0
+    if image + meta > UINT64_MAX:
+        raise PublicationCorrupt("stream saved byte integer bound")
+    return StreamPlan(location["image_offset"], image, location["metadata_offset"],
+                      meta, capacity.range_chunk_bytes)
 
 
 @dataclass(frozen=True)
@@ -29,7 +88,7 @@ class PreparedFetch:
             raise PublicationCorrupt("prepared descriptor must be owner-created")
 
     @classmethod
-    def _prepare(cls, pub, record_id):
+    def _prepare(cls, pub, record_id, *, capacity=None):
         from .publication import Publication
 
         if not isinstance(pub, Publication) or pub._closed or not pub.full_verified:
@@ -39,11 +98,8 @@ class PreparedFetch:
         raw_loc = rt.location(rid)
         loc = {name: raw_loc[name] for name in ("object_idx", "image_offset", "image_size",
                "metadata_offset", "metadata_size", "format_id", "flags")}
-        del raw_loc
         image_format = rt.image_format(loc["format_id"])
-        if (len(record_id) != 32 or not 0 < loc["image_size"] <= 8 << 20
-                or loc["metadata_size"] > 8 << 20
-                or image_format not in ("jpg", "jpeg", "png", "webp", "avif")):
+        if len(record_id) != 32 or image_format not in ("jpg", "jpeg", "png", "webp", "avif"):
             raise PublicationCorrupt("prepared extent or format invalid")
         row = pub.catalog.execute(
             "SELECT r.endpoint,r.repo_id,r.repo_type,o.revision_candidate,o.object_path,"
@@ -66,17 +122,15 @@ class PreparedFetch:
         if (row is None or row[8] != 1 or row[7] != row[6]
                 or not isinstance(row[7], bytes) or len(row[7]) != 32):
             raise PublicationCorrupt("prepared object unavailable")
-        if any(type(loc[name]) is not int or not 0 <= loc[name] < 1 << 64
-               for name in ("object_idx", "image_offset", "image_size", "metadata_offset",
-                            "metadata_size", "format_id", "flags")):
+        if any(type(loc[name]) is not int or not 0 <= loc[name] < 1 << 64 for name in loc):
             raise PublicationCorrupt("prepared location bound")
         if any(type(value) is not str or len(value) > 2048 for value in row[:5]):
             raise PublicationCorrupt("prepared identity text bound")
         size = int.from_bytes(row[5], "big")
+        stream_plan(loc, size, metadata=True, capacity=capacity)
         raw_ref = rt._prepared_object_ref(loc["object_idx"])
         object_ref = {name: raw_ref[name] for name in
                       ("object_path", "object_size", "object_version")}
-        del raw_ref
         if (type(object_ref["object_path"]) is not str
                 or len(object_ref["object_path"]) > 2048
                 or type(object_ref["object_size"]) is not int
@@ -84,15 +138,16 @@ class PreparedFetch:
                 or type(object_ref["object_version"]) is not str
                 or len(object_ref["object_version"]) != 64):
             raise PublicationCorrupt("prepared object reference bound")
-        if (loc["image_offset"] + loc["image_size"] > size
-                or loc["metadata_offset"] + loc["metadata_size"] > size
-                or object_ref["object_path"] != row[4]
-                or object_ref["object_size"] != size
+        if (object_ref["object_path"] != row[4] or object_ref["object_size"] != size
                 or object_ref["object_version"] != row[6].hex()):
             raise PublicationCorrupt("prepared object identity mismatch")
         return cls(pub.content_digest, rt.snapshot_id, record_id, rid,
                    MappingProxyType(loc), MappingProxyType(object_ref),
                    tuple(row), pub.expected_image_sha(rid), image_format, _FACTORY, get_ident())
+
+    def plan(self, *, metadata=False, capacity=None):
+        return stream_plan(self.location, self.object_ref["object_size"],
+                           metadata=metadata, capacity=capacity)
 
     def _projection(self, cache):
         if self._provenance is not _FACTORY:

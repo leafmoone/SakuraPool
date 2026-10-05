@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
+from ..capacity import CapacityConfig
 from .budget import BudgetLedger, Reservation, _cluster_bytes, _disk_usage, is_reparse
 from .location_gate import normalize_endpoint, two_hop_proof_key
 from .modelscope import ListedFile, ModelScopeDataset
@@ -26,6 +27,7 @@ from .production_resources import (
     STAGE_DISK_CAP,
     STREAM_MEMORY,
     ProductionFootprint,
+    protocolmemory,
 )
 from .rust_bridge import RustWorker, RustWorkerError
 from .transport import RemoteIOError
@@ -178,6 +180,7 @@ class RustProductionTransport:
         origin: str,
         token: str | None = None,
         same_origin_cookie: str | None = None,
+        capacity=None,
         _test=False,
     ):
         if ledger.offline_mode != _test:
@@ -185,6 +188,18 @@ class RustProductionTransport:
         if not _test and origin not in ("https://www.modelscope.cn", "https://modelscope.cn"):
             raise ValueError("explicit configured ModelScope origin required")
         self.ledger, self.worker, self.origin = ledger, Path(worker), origin
+        workspace = getattr(ledger, "workspace", None)
+        self.capacity = (
+            capacity
+            if capacity is not None
+            else (workspace.capacity if workspace is not None else CapacityConfig())
+        )
+        if not isinstance(self.capacity, CapacityConfig):
+            raise ValueError("typed capacity required")
+        if workspace is not None and workspace.capacity != self.capacity:
+            raise ValueError("workspace/transport capacity mismatch")
+        self.max_range_bytes = self.capacity.range_chunk_bytes
+        self._capacity_v2 = self.capacity != CapacityConfig()
         if same_origin_cookie is not None:
             from .transport import validate_same_origin_cookie
 
@@ -209,13 +224,18 @@ class RustProductionTransport:
 
     max_range_bytes = MAX_RANGE
 
+    def _worker_capacity(self):
+        return {"capacity": self.capacity} if self._capacity_v2 else {}
+
     @contextmanager
     def _execution_worker(self, worker_type, budget):
         with self._lane_lock:
             if self._closed:
                 raise RustWorkerError("execution channel closed")
         if not getattr(self, "_persistent", False):
-            with worker_type(self.worker, job_budget=budget, timeout_s=40) as worker:
+            with worker_type(
+                self.worker, job_budget=budget, timeout_s=40, **self._worker_capacity()
+            ) as worker:
                 yield worker
             return
         with self._persistent_worker(worker_type, budget) as worker:
@@ -235,22 +255,43 @@ class RustProductionTransport:
                     self._lane_worker.cancel()
                 except BaseException:
                     primary.finalization_secondary = (
-                        *getattr(primary, "finalization_secondary", ()), "worker_cancel")
+                        *getattr(primary, "finalization_secondary", ()),
+                        "worker_cancel",
+                    )
             raise
+
+    def _generation_budget(self):
+        # Session credit bounds protocol work, not a cumulative user quota.
+        # Real ledger reservations remain authoritative for every operation.
+        self.ledger.status()  # Refresh workspace policy under its authoritative lock.
+        maximum = max(self.capacity.range_chunk_bytes, self.capacity.metadata_max_bytes)
+        body = 256 * (maximum + 1)
+        if body >= 1 << 64:
+            raise RustWorkerError("generation body integer capacity exceeded")
+        return {
+            "body": body,
+            "attempts": 512,
+            "disk": self.ledger.limits["disk"],
+            "inflight": max(
+                0, self.ledger.limits["inflight"] - getattr(self.ledger, "effective_headroom", 0)
+            ),
+        }
 
     @contextmanager
     def _persistent_worker_body(self, worker_type, budget):
         if self._lane_failed:
             raise RustWorkerError("execution channel unavailable")
+        credit = self._generation_budget()
         if self._lane_worker is not None and (
-                self._lane_requests + 1 > 256
-                or self._lane_body + budget["body"] > 8 << 30
-                or self._lane_attempts + budget["attempts"] > 2000):
+            self._lane_requests + 1 > 256
+            or self._lane_body + budget["body"] > credit["body"]
+            or self._lane_attempts + budget["attempts"] > credit["attempts"]
+        ):
             raise RustWorkerError("execution generation budget exhausted")
         if self._lane_worker is None:
-            worker = worker_type(self.worker, job_budget={
-                "body": 8 << 30, "attempts": 2000,
-                "disk": 4 << 30, "inflight": 256 << 20}, timeout_s=40)
+            worker = worker_type(
+                self.worker, job_budget=credit, timeout_s=40, **self._worker_capacity()
+            )
             self._lane_worker = worker
             if "bounded_session_v1" not in worker.capabilities:
                 self._lane_failed = True
@@ -268,10 +309,12 @@ class RustProductionTransport:
             return
         if self._closed or self._operation_active or self._lane_failed or self._rotating:
             raise RemoteIOError("execution generation unavailable")
+        credit = self._generation_budget()
         if self._lane_worker is not None and (
-                self._lane_requests + requests > 256
-                or self._lane_body + body > 8 << 30
-                or self._lane_attempts + attempts > 2000):
+            self._lane_requests + requests > 256
+            or self._lane_body + body > credit["body"]
+            or self._lane_attempts + attempts > credit["attempts"]
+        ):
             worker = self._lane_worker
             self._rotating = True
             self._lane_lock.release()
@@ -313,7 +356,9 @@ class RustProductionTransport:
     def _enable_persistent(self):
         if self._closed or self._operation_active or getattr(self, "_persistent", False):
             raise RemoteIOError("execution channel lifecycle invalid")
-        self._lane_lease = self.ledger.reserve(Reservation(inflight=32 << 20))
+        self._lane_lease = self.ledger.reserve(
+            Reservation(inflight=(32 << 20) + protocolmemory(self.capacity))
+        )
         self._persistent = True
         self._lane_worker = None
         self._lane_failed = False
@@ -333,9 +378,13 @@ class RustProductionTransport:
             raise RemoteIOError("closed production transport")
         if getattr(self, "_control", None) is None:
             self._control = GuardedTransport(
-                self.ledger, trusted_hosts=frozenset({urlsplit(self.origin).hostname}),
-                token=self._token, credential_origin=self.origin,
-                same_origin_cookie=self._cookie)
+                self.ledger,
+                trusted_hosts=frozenset({urlsplit(self.origin).hostname}),
+                token=self._token,
+                credential_origin=self.origin,
+                same_origin_cookie=self._cookie,
+                capacity=self.capacity,
+            )
         return self._control
 
     def close(self):
@@ -374,7 +423,9 @@ class RustProductionTransport:
                     primary = error
                 else:
                     primary.finalization_secondary = (
-                        *getattr(primary, "finalization_secondary", ()), "worker_close")
+                        *getattr(primary, "finalization_secondary", ()),
+                        "worker_close",
+                    )
             if worker is None or worker._proc is None:
                 try:
                     resident_settle = getattr(self.ledger, "settle_resident", self.ledger.settle)
@@ -385,7 +436,9 @@ class RustProductionTransport:
                         primary = error
                     else:
                         primary.finalization_secondary = (
-                            *getattr(primary, "finalization_secondary", ()), "resident_settlement")
+                            *getattr(primary, "finalization_secondary", ()),
+                            "resident_settlement",
+                        )
         if primary is not None:
             raise primary
 
@@ -401,7 +454,9 @@ class RustProductionTransport:
             if primary is None:
                 raise
             primary.finalization_secondary = (
-                *getattr(primary, "finalization_secondary", ()), "transport_close")
+                *getattr(primary, "finalization_secondary", ()),
+                "transport_close",
+            )
         return False
 
     def clone(self):
@@ -467,23 +522,32 @@ class RustProductionTransport:
     def predict_warm(self, identity, lengths):
         """Scheduling hint only; never authorizes IO or replaces ledger admission."""
         with self._lane_lock:
-            if (self._closed or self._lane_failed or self._rotating
-                    or not getattr(self, "_persistent", False) or self._lane_worker is None):
+            if (
+                self._closed
+                or self._lane_failed
+                or self._rotating
+                or not getattr(self, "_persistent", False)
+                or self._lane_worker is None
+            ):
                 return False
             matches = [obj for key, obj in self._objects.items() if key[:6] == identity]
             if len(matches) != 1 or proof_key(matches[0], test=self._test) not in self._live_proofs:
                 return False
-            return (self._lane_requests + len(lengths) <= 256
-                    and self._lane_body + sum(n * 2 + 16 for n in lengths) <= 8 << 30
-                    and self._lane_attempts + 4 * len(lengths) <= 2000)
+            credit = self._generation_budget()
+            return (
+                self._lane_requests + len(lengths) <= 256
+                and self._lane_body + sum(n * 2 + 16 for n in lengths) <= credit["body"]
+                and self._lane_attempts + 4 * len(lengths) <= credit["attempts"]
+            )
 
     def verified_object(self, candidate: ProviderObject, *, lengths=None):
         with self._lane_lock:
             if lengths is None:
                 self._admit_generation((16 << 20) + 16, 20, 5)
             else:
-                self._admit_generation(sum(n * 2 + 16 for n in lengths),
-                                       4 * len(lengths), len(lengths))
+                self._admit_generation(
+                    sum(n * 2 + 16 for n in lengths), 4 * len(lengths), len(lengths)
+                )
         return self._verified_object_body(candidate)
 
     def _verified_object_body(self, candidate: ProviderObject):
@@ -510,8 +574,10 @@ class RustProductionTransport:
         key, obj = matches[0]
         if self.ledger.condition_proof(proof_key(obj, test=self._test)) is None:
             raise RemoteIOError("verified object proof unavailable")
-        if (getattr(self, "_persistent", False)
-                and proof_key(obj, test=self._test) not in self._live_proofs):
+        if (
+            getattr(self, "_persistent", False)
+            and proof_key(obj, test=self._test) not in self._live_proofs
+        ):
             raise RemoteIOError("fresh generation conditional proof required")
         self._objects.move_to_end(key)
         return obj
@@ -566,9 +632,12 @@ class RustProductionTransport:
             )
         except RustWorkerError as error:
             # Preserve fixed cleanup evidence, never raw worker diagnostics.
-            secondary = tuple(value for value in getattr(error, "finalization_secondary", ())
-                              if type(value) is str and value in {"worker_close", "worker_cancel",
-                                           "worker_constructor_shutdown"})[:16]
+            secondary = tuple(
+                value
+                for value in getattr(error, "finalization_secondary", ())
+                if type(value) is str
+                and value in {"worker_close", "worker_cancel", "worker_constructor_shutdown"}
+            )[:16]
         converted = RemoteIOError("Rust production request rejected; accounting uncertain")
         converted.finalization_secondary = secondary
         raise converted
@@ -589,7 +658,7 @@ class RustProductionTransport:
         if any(value in json.dumps(asdict(obj)) for value in secrets_in_memory):
             raise RemoteIOError("credential echo in object description rejected")
         size = length if mode == "range" else obj.object_size
-        footprint = ProductionFootprint.admit(mode, size)
+        footprint = ProductionFootprint.admit(mode, size, capacity=self.capacity)
         memory, disk = footprint.memory, footprint.artifacts
         body_budget = (
             NEGATIVE_CONDITION_BODY_CAP + 1
@@ -605,7 +674,9 @@ class RustProductionTransport:
                 self.ledger.settle(lease1)  # No network; admitted attempts stay charged.
             except BaseException:
                 primary.finalization_secondary = (
-                    *getattr(primary, "finalization_secondary", ()), "reservation_rollback")
+                    *getattr(primary, "finalization_secondary", ()),
+                    "reservation_rollback",
+                )
             raise
         payload = dict(
             profile="twohop_test" if self._test else "modelscope_https_v1",
@@ -621,6 +692,12 @@ class RustProductionTransport:
             mode=mode,
             json_limit=json_limit,
         )
+        if self._capacity_v2:
+            payload.update(
+                payload_revision=2,
+                range_chunk_bytes=self.max_range_bytes,
+                http_header_bytes=self.capacity.http_header_bytes,
+            )
         # Register the actual child owner for both execution modes.
         transport = self
 
@@ -724,8 +801,11 @@ class RustProductionTransport:
     @contextmanager
     def _operation(self):
         with self._lane_lock:
-            if (self._closed or self._operation_active
-                    or (self._proof_group and self._proof_owner != threading.get_ident())):
+            if (
+                self._closed
+                or self._operation_active
+                or (self._proof_group and self._proof_owner != threading.get_ident())
+            ):
                 raise RemoteIOError("execution channel lifecycle invalid")
             self._operation_active = True
             self._request_worker = None
@@ -743,7 +823,9 @@ class RustProductionTransport:
                         if primary is None:
                             raise
                         primary.finalization_secondary = (
-                            *getattr(primary, "finalization_secondary", ()), "channel_close")
+                            *getattr(primary, "finalization_secondary", ()),
+                            "channel_close",
+                        )
 
     @contextmanager
     def _transfer_owned(self, obj, **kwargs):
@@ -751,9 +833,11 @@ class RustProductionTransport:
             if not self._proof_group:
                 size = kwargs.get("length", 1)
                 self._admit_generation(size * 2 + 16, 4, 1)
-                if (getattr(self, "_persistent", False)
-                        and kwargs.get("condition", "match") == "match"
-                        and proof_key(obj, test=self._test) not in self._live_proofs):
+                if (
+                    getattr(self, "_persistent", False)
+                    and kwargs.get("condition", "match") == "match"
+                    and proof_key(obj, test=self._test) not in self._live_proofs
+                ):
                     raise RemoteIOError("fresh generation conditional proof required")
         with self._operation():
             with self._transfer_owned_body(obj, **kwargs) as result:
@@ -773,10 +857,10 @@ class RustProductionTransport:
     ):
         """Keep disk/inflight reserved through consumer audit; never publish partial files."""
         size = length if mode == "range" else obj.object_size
-        footprint = ProductionFootprint.admit(mode, size)
+        footprint = ProductionFootprint.admit(mode, size, capacity=self.capacity)
         memory, disk = footprint.memory, footprint.transfer_disk
         if getattr(self, "_persistent", False):
-            memory -= 32 << 20
+            memory -= (32 << 20) + protocolmemory(self.capacity)
         # Check profile/binding and working set before filesystem creation or network.
         if (
             condition == "match"
@@ -785,7 +869,11 @@ class RustProductionTransport:
             raise RemoteIOError("verified production binding required")
         lease = self.ledger.reserve(Reservation(disk=disk))
         worker_lease = None
-        worker_memory = 0 if getattr(self, "_persistent", False) or mode != "range" else 32 << 20
+        worker_memory = (
+            0
+            if getattr(self, "_persistent", False) or mode != "range"
+            else (32 << 20) + protocolmemory(self.capacity)
+        )
         try:
             if worker_memory:
                 worker_lease = self.ledger.reserve(Reservation(inflight=worker_memory))
@@ -798,7 +886,9 @@ class RustProductionTransport:
                     self.ledger.settle(rollback)
                 except BaseException:
                     primary.finalization_secondary = (
-                        *getattr(primary, "finalization_secondary", ()), "reservation_rollback")
+                        *getattr(primary, "finalization_secondary", ()),
+                        "reservation_rollback",
+                    )
             raise
         root = None
         raw = b""
@@ -827,6 +917,12 @@ class RustProductionTransport:
                     raw = body.read_bytes()
                     if len(raw) != size or hashlib.sha256(raw).hexdigest() != result.get("sha256"):
                         raise RemoteIOError("Rust Range artifact verification failed")
+                    if (
+                        result.get("status") != 206
+                        or result.get("etag") != obj.validator
+                        or result.get("cdn_host") != obj.cdn_host
+                    ) and condition == "match":
+                        raise RemoteIOError("Rust Range conditional binding changed")
             else:
                 if (
                     mode == "remote-stream-scan"
@@ -846,8 +942,9 @@ class RustProductionTransport:
             first_secondary = None
             failed = False
             worker = getattr(self, "_request_worker", None)
-            request_safe = (getattr(self, "_request_terminal", False)
-                            or worker is None or worker._proc is None)
+            request_safe = (
+                getattr(self, "_request_terminal", False) or worker is None or worker._proc is None
+            )
             try:
                 if not request_safe:
                     raise RemoteIOError("live request resources retained")
@@ -862,13 +959,15 @@ class RustProductionTransport:
                                 if primary is not None:
                                     primary.finalization_secondary = (
                                         *getattr(primary, "finalization_secondary", ()),
-                                        "worker_memory_settle")
+                                        "worker_memory_settle",
+                                    )
                         else:
                             failed = True
                             if primary is not None:
                                 primary.finalization_secondary = (
                                     *getattr(primary, "finalization_secondary", ()),
-                                    "worker_memory")
+                                    "worker_memory",
+                                )
                     if primary is not None and raw:
                         # Escaping exceptions can retain payload through arbitrary
                         # frames/containers. Do not guess its object graph or refund
@@ -884,7 +983,8 @@ class RustProductionTransport:
                     if primary is not None:
                         primary.finalization_secondary = (
                             *getattr(primary, "finalization_secondary", ()),
-                            "payload_memory_settle")
+                            "payload_memory_settle",
+                        )
                 finally:
                     # Always attempt ownership registration/cleanup, even if settlement rejects.
                     if root is None:
@@ -918,9 +1018,12 @@ class RustProductionTransport:
                     if first_secondary is not None and not isinstance(first_secondary, Exception):
                         raise first_secondary
                     raise RemoteIOError(
-                        "production resource finalization incomplete; quota retained")
+                        "production resource finalization incomplete; quota retained"
+                    )
                 primary.finalization_secondary = (
-                    *getattr(primary, "finalization_secondary", ()), "production_finalization")
+                    *getattr(primary, "finalization_secondary", ()),
+                    "production_finalization",
+                )
 
     def _owned_snapshot(self, root):
         try:
@@ -996,7 +1099,8 @@ class RustProductionTransport:
                     raise RemoteIOError("download release finalization incomplete") from None
                 primary.finalization_secondary = (
                     *getattr(primary, "finalization_secondary", ()),
-                    "download_release_finalization")
+                    "download_release_finalization",
+                )
 
     def _release_verified_downloads(self, p2_root):
         from ..runtime.inventory import load_p2_inventory
@@ -1063,17 +1167,23 @@ class RustProductionTransport:
     @contextmanager
     def _capability_match_body(self, obj):
         # Same bytes/header/size path; only the proof prerequisite differs.
-        footprint = ProductionFootprint.admit("range", 1)
+        footprint = ProductionFootprint.admit("range", 1, capacity=self.capacity)
         lease = self.ledger.reserve(Reservation(disk=footprint.transfer_disk))
         try:
-            memory = footprint.memory - ((32 << 20) if getattr(self, "_persistent", False) else 0)
+            memory = footprint.memory - (
+                ((32 << 20) + protocolmemory(self.capacity))
+                if getattr(self, "_persistent", False)
+                else 0
+            )
             memory_lease = self.ledger.reserve(Reservation(inflight=memory))
         except BaseException as primary:
             try:
                 self.ledger.settle(lease)
             except BaseException:
                 primary.finalization_secondary = (
-                    *getattr(primary, "finalization_secondary", ()), "reservation_rollback")
+                    *getattr(primary, "finalization_secondary", ()),
+                    "reservation_rollback",
+                )
             raise
         root = None
         delivered_snapshot = None
@@ -1108,9 +1218,11 @@ class RustProductionTransport:
                             self.ledger.settle(lease)
                         else:
                             snapshot = self._owned_snapshot(root)
-                            if (snapshot is not None and set(snapshot[1]) <= {"body"}
-                                    and (delivered_snapshot is None
-                                         or snapshot == delivered_snapshot)):
+                            if (
+                                snapshot is not None
+                                and set(snapshot[1]) <= {"body"}
+                                and (delivered_snapshot is None or snapshot == delivered_snapshot)
+                            ):
                                 self._delete_owned(root, snapshot)
                                 self.ledger.settle(lease)
                             else:
@@ -1125,9 +1237,12 @@ class RustProductionTransport:
             if failed:
                 if primary is None:
                     raise RemoteIOError(
-                        "conditional resource finalization incomplete; quota retained")
+                        "conditional resource finalization incomplete; quota retained"
+                    )
                 primary.finalization_secondary = (
-                    *getattr(primary, "finalization_secondary", ()), "conditional_finalization")
+                    *getattr(primary, "finalization_secondary", ()),
+                    "conditional_finalization",
+                )
 
     def _bound_object(self, bound):
         from urllib.parse import parse_qs, urlsplit
@@ -1169,8 +1284,18 @@ class RustProductionTransport:
         if length == 0:
             yield b""
             return
-        if not 0 < length <= MAX_RANGE:
+        if not 0 < length <= self.max_range_bytes:
             raise RemoteIOError("production Range exceeds bound")
+        with self._lane_lock:
+            self._admit_generation(length * 2 + 16, 4, 1)
+            needs_proof = (
+                getattr(self, "_persistent", False)
+                and proof_key(obj, test=self._test) not in self._live_proofs
+            )
+        if needs_proof:
+            refreshed = self.verify_conditions(obj)
+            if refreshed != obj:
+                raise RemoteIOError("chunk generation validator changed")
         with self._transfer_owned(obj, start=start, length=length) as (_, _, raw):
             yield raw
 

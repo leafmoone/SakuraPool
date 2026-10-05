@@ -13,6 +13,7 @@ from test_task_runner import setup as task_setup_fixture
 from sakurapool.runtime import RuntimeQuerySpec
 from sakurapool.storage import publication_fetch
 from sakurapool.storage.modelscope import ModelScopeDataset
+from sakurapool.storage.production_resources import protocolmemory
 from sakurapool.storage.transport import BoundObject, GuardedTransport, RemoteIOError
 from sakurapool.tasks import profile
 from sakurapool.tasks.runner import create_task
@@ -103,7 +104,7 @@ def test_profile_exact_origin_and_credentials_never_follow_host_cache(tmp_path, 
         credential_origin=origin, token="synthetic-token",
         same_origin_cookie="m_session_id=synthetic-token") as control:
         captured = []
-        control.session.get = lambda url, **kw: captured.append(kw) or object()
+        control.session.get = lambda url, **kw: captured.append(kw) or SimpleNamespace(headers={})
         for target in (origin, ORIGINS[1 - ORIGINS.index(origin)],
                        "https://cdn.example.invalid", origin + ":443"):
             control._once(target + "/api", max_body=1, metadata=True,
@@ -203,12 +204,13 @@ def bound_range(transport, candidate):
 def test_split_double_fault_preserves_first_interrupt(twohop, monkeypatch, later):
     _, ledger, transport, candidate = twohop
     bound = bound_range(transport, candidate)
+    worker_memory = (32 << 20) + protocolmemory(transport.capacity)
     first, second = KeyboardInterrupt(), SystemExit(9)
     original_reserve, original_settle = ledger.reserve, ledger.settle
     types, attempts = {}, []
     def reserve(reservation):
         lease = original_reserve(reservation)
-        types[lease] = "worker" if reservation.inflight == 32 << 20 else (
+        types[lease] = "worker" if reservation.inflight == worker_memory else (
             "payload" if reservation.inflight == 30 else "disk" if reservation.disk else "other")
         return lease
     def settle(lease, **kwargs):
@@ -225,7 +227,7 @@ def test_split_double_fault_preserves_first_interrupt(twohop, monkeypatch, later
             pass
     assert caught.value is first
     assert "disk" in attempts
-    assert ledger.status()["inflight"] == (32 << 20) + (30 if later == "payload" else 0)
+    assert ledger.status()["inflight"] == worker_memory + (30 if later == "payload" else 0)
 
 
 def test_split_live_unknown_retains_resources_after_late_wait(twohop, monkeypatch):
@@ -234,6 +236,7 @@ def test_split_live_unknown_retains_resources_after_late_wait(twohop, monkeypatc
 
     _, ledger, transport, candidate = twohop
     bound = bound_range(transport, candidate)
+    worker_memory = (32 << 20) + protocolmemory(transport.capacity)
     actual = production.RustWorker
     owned = []
     class LiveFailure(actual):
@@ -255,7 +258,7 @@ def test_split_live_unknown_retains_resources_after_late_wait(twohop, monkeypatc
                 pytest.fail("live request delivered")
         assert owned[0]._proc is not None and owned[0]._proc.poll() is None
         status = ledger.status()
-        assert status["inflight"] == (32 << 20) + 30
+        assert status["inflight"] == worker_memory + 30
         assert list(ledger.root.glob("rust-transfer-*"))
         actual.close(owned[0])
         assert owned[0]._proc is None
@@ -269,11 +272,12 @@ def test_split_live_unknown_retains_resources_after_late_wait(twohop, monkeypatc
 def test_payload_then_disk_cleanup_keeps_first_interrupt(twohop, monkeypatch, payload_error):
     _, ledger, transport, candidate = twohop
     bound = bound_range(transport, candidate)
+    worker_memory = (32 << 20) + protocolmemory(transport.capacity)
     original = ledger.settle
     types, attempts = {}, []
     def reserve(reservation):
         lease = original_reserve(reservation)
-        types[lease] = "worker" if reservation.inflight == 32 << 20 else (
+        types[lease] = "worker" if reservation.inflight == worker_memory else (
             "payload" if reservation.inflight == 30 else "disk" if reservation.disk else "other")
         return lease
     original_reserve = ledger.reserve
@@ -298,6 +302,7 @@ def test_payload_then_disk_cleanup_keeps_first_interrupt(twohop, monkeypatch, pa
 def test_split_success_settles_each_lease_once(twohop, monkeypatch):
     _, ledger, transport, candidate = twohop
     bound = bound_range(transport, candidate)
+    worker_memory = (32 << 20) + protocolmemory(transport.capacity)
     original = ledger.settle
     attempts = []
     def settle(lease, **kwargs):
@@ -305,7 +310,7 @@ def test_split_success_settles_each_lease_once(twohop, monkeypatch):
         return original(lease, **kwargs)
     monkeypatch.setattr(ledger, "settle", settle)
     with transport.read_range_owned(bound, 512, 15):
-        assert ledger.status()["inflight"] == (32 << 20) + 30
+        assert ledger.status()["inflight"] == worker_memory + 30
     assert len(attempts) == len(set(attempts))
     assert ledger.status()["inflight"] == 0
 
@@ -333,6 +338,7 @@ def test_split_reservation_rollback_is_reverse_and_independent(twohop, monkeypat
 
     _, ledger, transport, candidate = twohop
     bound = bound_range(transport, candidate)
+    worker_memory = (32 << 20) + protocolmemory(transport.capacity)
     original_reserve, original_settle = ledger.reserve, ledger.settle
     leases, settled = [], []
     def reserve(reservation):
@@ -352,7 +358,7 @@ def test_split_reservation_rollback_is_reverse_and_independent(twohop, monkeypat
         with transport.read_range_owned(bound, 512, 15):
             pytest.fail("reserve failure admitted IO")
     assert settled == list(reversed(leases))
-    assert ledger.status()["inflight"] == (32 << 20 if rollback_fails else 0)
+    assert ledger.status()["inflight"] == (worker_memory if rollback_fails else 0)
 
 
 @pytest.mark.parametrize("kind", ["interrupt", "exit", "ordinary"])
@@ -361,6 +367,7 @@ def test_split_worker_settlement_keeps_primary_and_attempts_safe_cleanup(twohop,
                                                                        kind, body_failure):
     _, ledger, transport, candidate = twohop
     bound = bound_range(transport, candidate)
+    worker_memory = (32 << 20) + protocolmemory(transport.capacity)
     marker = {"interrupt": KeyboardInterrupt(), "exit": SystemExit(7),
               "ordinary": RuntimeError("worker-settle")}[kind]
     body_primary = ValueError("consumer")
@@ -368,7 +375,7 @@ def test_split_worker_settlement_keeps_primary_and_attempts_safe_cleanup(twohop,
     worker_leases, attempts = [], []
     def reserve(reservation):
         lease = original_reserve(reservation)
-        if reservation.inflight == 32 << 20:
+        if reservation.inflight == worker_memory:
             worker_leases.append(lease)
         return lease
     def settle(lease, **kwargs):
@@ -380,19 +387,19 @@ def test_split_worker_settlement_keeps_primary_and_attempts_safe_cleanup(twohop,
     monkeypatch.setattr(ledger, "settle", settle)
     with pytest.raises(BaseException) as caught:
         with transport.read_range_owned(bound, 512, 15):
-            assert ledger.status()["inflight"] == (32 << 20) + 30
+            assert ledger.status()["inflight"] == worker_memory + 30
             if body_failure:
                 raise body_primary
     if body_failure:
         assert caught.value is body_primary
         assert "worker_memory_settle" in body_primary.finalization_secondary
-        assert ledger.status()["inflight"] == (32 << 20) + 30
+        assert ledger.status()["inflight"] == worker_memory + 30
     else:
         if kind != "ordinary":
             assert caught.value is marker
         else:
             assert isinstance(caught.value, RemoteIOError)
-        assert ledger.status()["inflight"] == 32 << 20
+        assert ledger.status()["inflight"] == worker_memory
     assert len(attempts) == len(set(attempts))
     assert not list(ledger.root.glob("rust-transfer-*"))
 

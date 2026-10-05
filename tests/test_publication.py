@@ -114,7 +114,10 @@ def test_fresh_fetch_requires_own_proof_and_sha(inputs, monkeypatch, failure):
                     if failure == "network_unknown":
                         raise OSError("SECRET_NETWORK CREDENTIAL_SENTINEL")
                 try:
-                    yield b"wrong" if failure in ("image", "image_settle") else b"image"
+                    if offset == 1024:
+                        yield b'{"a":1}'
+                    else:
+                        yield b"wrong" if failure in ("image", "image_settle") else b"image"
                 finally:
                     if failure in ("range_exit", "write_exit") or interrupt_fault:
                         raise OSError("SECRET_RANGE_EXIT https://secret.invalid/CREDENTIAL_SENTINEL")
@@ -152,11 +155,11 @@ def test_fresh_fetch_requires_own_proof_and_sha(inputs, monkeypatch, failure):
                     original(rid),
                     image_size=5,
                     flags=1 if failure in ("metadata", "empty_metadata") else 0,
-                    metadata_size=5 if failure == "metadata" else 0,
+                    metadata_size=7 if failure == "metadata" else 0,
                     metadata_offset=1024,
                 ),
             )
-            if failure in ("none", "metadata", "empty_metadata"):
+            if failure in ("none", "metadata"):
                 result = fetch.fetch_publication_sample(
                     pub, record, FakeTransport(), temp, control=object(), metadata=True
                 )
@@ -166,7 +169,7 @@ def test_fresh_fetch_requires_own_proof_and_sha(inputs, monkeypatch, failure):
                 )
                 if failure in ("metadata", "empty_metadata"):
                     assert (result / "metadata.json").read_bytes() == (
-                        b"image" if failure == "metadata" else b""
+                        b'{"a":1}'
                     )
             else:
                 expected_error = {
@@ -176,7 +179,8 @@ def test_fresh_fetch_requires_own_proof_and_sha(inputs, monkeypatch, failure):
                 expected_type = type(interrupt) if interrupt_fault else RemoteIOError
                 with pytest.raises(expected_type, match=expected_error) as caught:
                     fetch.fetch_publication_sample(
-                        pub, record, FakeTransport(), temp, control=object()
+                        pub, record, FakeTransport(), temp, control=object(),
+                        metadata=failure == "empty_metadata"
                     )
                 if failure in ("image_settle", "write_cleanup", "settle"):
                     import traceback

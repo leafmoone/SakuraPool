@@ -4,18 +4,21 @@ import queue
 from dataclasses import dataclass
 from threading import get_ident
 
+from .context import effective_capacity
+
 
 class OwnerAuthorityError(RuntimeError):
     """Fixed coordinator authority rejection, distinct from ledger IO failure."""
 
 
 def _lane_item(row):
-    item = {key: row[key] for key in
-            ("seq", "rid", "record_id", "attempt_id", "operation_id")}
-    if (any(type(item[key]) is not int or not 0 <= item[key] < 1 << 64
-            for key in ("seq", "rid"))
-            or any(type(item[key]) is not str or len(item[key]) != 32
-                   for key in ("record_id", "attempt_id", "operation_id"))):
+    item = {key: row[key] for key in ("seq", "rid", "record_id", "attempt_id", "operation_id")}
+    if any(
+        type(item[key]) is not int or not 0 <= item[key] < 1 << 64 for key in ("seq", "rid")
+    ) or any(
+        type(item[key]) is not str or len(item[key]) != 32
+        for key in ("record_id", "attempt_id", "operation_id")
+    ):
         raise OwnerAuthorityError("owner item bound")
     return item
 
@@ -39,8 +42,9 @@ def _envelope_bytes(value, depth=0):
     if type(value) in (tuple, list) and len(value) <= 32:
         return 128 + sum(_envelope_bytes(v, depth + 1) for v in value)
     if type(value) is dict and len(value) <= 32:
-        return 128 + sum(_envelope_bytes(k, depth + 1) + _envelope_bytes(v, depth + 1)
-                         for k, v in value.items())
+        return 128 + sum(
+            _envelope_bytes(k, depth + 1) + _envelope_bytes(v, depth + 1) for k, v in value.items()
+        )
     if type(value) is Reservation:
         return 512
     raise OwnerAuthorityError("owner RPC value invalid")
@@ -50,21 +54,31 @@ def _safe_diagnostic(error):
     from ..storage.transport import _SAFE_CODES, _SAFE_PHASES
 
     details = error.public_diagnostic()
-    allowed = {"code": _SAFE_CODES, "phase": _SAFE_PHASES,
-               "delivery": {"PUBLISHED", "NOT_PUBLISHED"},
-               "accounting": {"CONFIRMED", "UNKNOWN"},
-               "output_lease": {"CONFIRMED", "UNKNOWN"},
-               "accounting_scope": {"OPERATION"}, "cleanup": {"SAFE", "PRESERVED"}}
-    safe = {key: value for key, value in details.items()
-            if key in allowed and type(value) is str and value in allowed[key]}
+    allowed = {
+        "code": _SAFE_CODES,
+        "phase": _SAFE_PHASES,
+        "delivery": {"PUBLISHED", "NOT_PUBLISHED"},
+        "accounting": {"CONFIRMED", "UNKNOWN"},
+        "output_lease": {"CONFIRMED", "UNKNOWN"},
+        "accounting_scope": {"OPERATION"},
+        "cleanup": {"SAFE", "PRESERVED"},
+    }
+    safe = {
+        key: value
+        for key, value in details.items()
+        if key in allowed and type(value) is str and value in allowed[key]
+    }
     status = details.get("http_status")
     if type(status) is int and 100 <= status <= 599:
         safe["http_status"] = status
     secondary = details.get("secondary", ())
     if type(secondary) in (list, tuple) and len(secondary) <= 16:
-        safe["secondary"] = [v for v in secondary if type(v) is str and
-                             v in {"CLEANUP_FAILED", "ACCOUNTING_UNKNOWN",
-                                   "RANGE_FINALIZATION_FAILED"}]
+        safe["secondary"] = [
+            v
+            for v in secondary
+            if type(v) is str
+            and v in {"CLEANUP_FAILED", "ACCOUNTING_UNKNOWN", "RANGE_FINALIZATION_FAILED"}
+        ]
     return safe
 
 
@@ -97,8 +111,9 @@ class OwnerCall:
 class LedgerRPC:
     """Lane proxy; only explicit operations run on the coordinator thread."""
 
-    METHODS = frozenset({"reserve", "consume_body", "settle", "status",
-                         "condition_proof", "record_condition_proof"})
+    METHODS = frozenset(
+        {"reserve", "consume_body", "settle", "status", "condition_proof", "record_condition_proof"}
+    )
 
     def __init__(self, owner, calls, ledger, lane_id, channel):
         self._channel = channel
@@ -106,16 +121,28 @@ class LedgerRPC:
         self._owner = owner
         self._calls = calls
         self.root = ledger.root
-        self.limits = dict(ledger.limits)
+        self._ledger = ledger
+        self.workspace = getattr(ledger, "workspace", None)
+        self.effective_headroom = getattr(ledger, "effective_headroom", 0)
+        self.capacity = effective_capacity(channel)
+        self.effective_capacity = self.capacity
         self.offline_mode = ledger.offline_mode
+
+    @property
+    def limits(self):
+        if get_ident() == self._owner:
+            self._ledger.status()
+            return dict(self._ledger.limits)
+        return self._invoke("current_limits")
 
     def _invoke(self, method, *args, **kwargs):
         if get_ident() == self._owner:
             raise RuntimeError("lane RPC invoked by coordinator")
-        if method not in self.METHODS | {"event", "settle_resident", "generation_start"}:
+        allowed = self.METHODS | {"event", "settle_resident", "generation_start", "current_limits"}
+        if method not in allowed:
             raise OwnerAuthorityError("owner RPC method invalid")
 
-        if _envelope_bytes(args) + _envelope_bytes(kwargs) > 16384:
+        if _envelope_bytes(args) + _envelope_bytes(kwargs) > self.capacity.rpc_line_bytes:
             raise OwnerAuthorityError("owner RPC envelope exceeds bound")
         reply = queue.Queue(maxsize=1)
         generation = getattr(self._channel, "_generation", 0)
@@ -154,6 +181,9 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
         with task.transaction() as db:
             task.set_meta(db, "state", "COMPLETED")
         return
+    capacity = effective_capacity(transport, task.capacity)
+    if capacity != task.capacity:
+        raise TaskError("TASK_CAPACITY_CONFLICT", "preflight")
     owner = get_ident()
     calls = queue.Queue(maxsize=2 * workers)
     completions = queue.Queue(maxsize=workers)
@@ -164,14 +194,12 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
     first_error = None
     pump_error = None
     stop = False
-    # Per lane simultaneous metadata envelope (conservative UTF-32): catalog
-    # five text fields <=40KiB + fixed descriptor/item <=16KiB; projection/prepare
-    # temporary copies <=64KiB; 2W queued RPCs <=32KiB/lane, W replies <=16KiB,
-    # W completions <=16KiB and container overhead <=32KiB: <=216KiB/lane.
-    # 256KiB/lane covers these; payload and resident leases are separate.
+    # Catalog/projection/container metadata plus 2W calls, W replies and
+    # W completions at the configured envelope bound; payload leases are separate.
     from ..storage.budget import Reservation
 
-    queue_lease = transport.ledger.reserve(Reservation(inflight=workers * (256 << 10)))
+    queue_bytes = workers * ((192 << 10) + 4 * capacity.rpc_line_bytes)
+    queue_lease = transport.ledger.reserve(Reservation(inflight=queue_bytes))
     reservations = {}
     retained_receipts = {}
     completed = set()
@@ -187,10 +215,15 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
         result = ("ERROR", {})
         try:
             lane, cache = lanes[lane_index]
-            _fetch_publication_sample(prepared._projection(cache), item["record_id"], lane,
-                                     output, metadata=metadata, control=control,
-                                     attempt_hook=lambda name, data:
-                                     event(lane.ledger, item["attempt_id"], name, data))
+            _fetch_publication_sample(
+                prepared._projection(cache),
+                item["record_id"],
+                lane,
+                output,
+                metadata=metadata,
+                control=control,
+                attempt_hook=lambda name, data: event(lane.ledger, item["attempt_id"], name, data),
+            )
             result = None
         except BaseException as error:
             try:
@@ -212,6 +245,7 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
             completions.put((lane_index, item, result))
 
     close_errors = {}
+
     def close_lane(index, lane):
         try:
             lane.close()
@@ -237,14 +271,21 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
                 previous = generations.get(call.lane_id)
                 if previous is not None and call.generation < previous:
                     raise OwnerAuthorityError("owner generation regression")
-                if any(lease_owner[0] == call.lane_id and lease_owner[1] is not None
-                       for lease_owner in lease_owners.values()):
+                if any(
+                    lease_owner[0] == call.lane_id and lease_owner[1] is not None
+                    for lease_owner in lease_owners.values()
+                ):
                     raise OwnerAuthorityError("owner generation has unfinished request leases")
                 generations[call.lane_id] = call.generation
                 result = None
-            elif (call.generation != generations.get(call.lane_id)
-                  and call.method != "settle_resident"):
+            elif (
+                call.generation != generations.get(call.lane_id)
+                and call.method != "settle_resident"
+            ):
                 raise OwnerAuthorityError("owner generation unacknowledged")
+            elif call.method == "current_limits":
+                transport.ledger.status()
+                result = dict(transport.ledger.limits)
             elif call.method == "event":
                 attempt, name, payload = call.args
                 registered = active.get(call.lane_id)
@@ -258,9 +299,13 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
                     amount = descriptor.location["image_size"]
                     if metadata and descriptor.location["flags"] & 1:
                         amount += descriptor.location["metadata_size"]
-                    if (lease_owners.get(lease) != expected or reservation is None
-                            or reservation.saved_samples != 1 or reservation.saved_bytes != amount
-                            or reservation.disk < amount + 8192):
+                    if (
+                        lease_owners.get(lease) != expected
+                        or reservation is None
+                        or reservation.saved_samples != 1
+                        or reservation.saved_bytes != amount
+                        or reservation.disk < amount + 8192
+                    ):
                         raise OwnerAuthorityError("owner output reservation mismatch")
                 if name == "PREPARED":
                     descriptor = descriptors[call.lane_id]
@@ -272,11 +317,16 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
                         raise OwnerAuthorityError("owner receipt files mismatch")
                     for filename, length in names.items():
                         proof = receipt[filename]
-                        if (filename.startswith("image.")
-                                and proof.get("sha256") != descriptor.image_sha.hex()):
+                        if (
+                            filename.startswith("image.")
+                            and proof.get("sha256") != descriptor.image_sha.hex()
+                        ):
                             raise OwnerAuthorityError("owner receipt digest mismatch")
-                        if (proof.get("bytes") != length or len(proof.get("sha256", "")) != 64
-                                or len(proof.get("identity", ())) != 2):
+                        if (
+                            proof.get("bytes") != length
+                            or len(proof.get("sha256", "")) != 64
+                            or len(proof.get("identity", ())) != 2
+                        ):
                             raise OwnerAuthorityError("owner receipt extent mismatch")
                 if fault_hook:
                     fault_hook("BEFORE_" + name, payload)
@@ -292,8 +342,11 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
                     raise OwnerAuthorityError("owner resident ownership mismatch")
                 lane = lanes[call.lane_id][0]
                 worker = getattr(lane, "_lane_worker", None)
-                if (not lane._closed or lane._operation_active
-                        or (worker is not None and worker._proc is not None)):
+                if (
+                    not lane._closed
+                    or lane._operation_active
+                    or (worker is not None and worker._proc is not None)
+                ):
                     raise OwnerAuthorityError("owner resident lifecycle mismatch")
                 result = transport.ledger.settle(call.args[0])
                 lease_owners.pop(call.args[0], None)
@@ -302,9 +355,13 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
                     ownership = lease_owners.get(call.args[0])
                     current = active.get(call.lane_id)
                     attempt_id = current[0]["attempt_id"] if current else None
-                    if (ownership is None or ownership[0] != call.lane_id
-                            or ownership[1] is None or ownership[1] != attempt_id
-                            or ownership[2] != call.generation):
+                    if (
+                        ownership is None
+                        or ownership[0] != call.lane_id
+                        or ownership[1] is None
+                        or ownership[1] != attempt_id
+                        or ownership[2] != call.generation
+                    ):
                         raise OwnerAuthorityError("owner lease lane mismatch")
                 if call.method == "reserve" and call.lane_id not in active:
                     raise OwnerAuthorityError("owner reservation lacks active attempt")
@@ -320,12 +377,15 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
                     reservations.pop(call.args[0], None)
             else:
                 raise RuntimeError("unknown owner operation")
-            if _envelope_bytes(result) > 16384:
+            if _envelope_bytes(result) > capacity.rpc_line_bytes:
                 raise OwnerAuthorityError("owner RPC reply exceeds bound")
             call.reply.put((True, result))
         except BaseException as error:
-            if (call.method == "event" or not isinstance(error, Exception)
-                    or isinstance(error, OwnerAuthorityError)):
+            if (
+                call.method == "event"
+                or not isinstance(error, Exception)
+                or isinstance(error, OwnerAuthorityError)
+            ):
                 record_error(error, "OWNER_RPC_FAILED")
             if call.method == "event":
                 pump_error = pump_error or error
@@ -338,8 +398,7 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
         if first_error is None:
             first_error = error
         elif error is not first_error:
-            first_error.task_secondary = (
-                *getattr(first_error, "task_secondary", ()), secondary)
+            first_error.task_secondary = (*getattr(first_error, "task_secondary", ()), secondary)
 
     def finish(item, error):
         primary = error
@@ -352,17 +411,26 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
             if error is None:
                 task.finish_item(item["seq"], state="DONE")
                 return None
-            published = task.db.execute("SELECT delivery FROM items WHERE seq=?",
-                                        (item["seq"],)).fetchone()[0] == "PUBLISHED"
+            published = (
+                task.db.execute(
+                    "SELECT delivery FROM items WHERE seq=?", (item["seq"],)
+                ).fetchone()[0]
+                == "PUBLISHED"
+            )
             known = not published and safe.get("accounting") == "CONFIRMED"
-            task.finish_item(item["seq"], state="READY" if known else "BLOCKED",
-                             code=safe.get("code", "FETCH_UNCONFIRMED"),
-                             accounting="CONFIRMED" if known else "UNKNOWN")
+            task.finish_item(
+                item["seq"],
+                state="READY" if known else "BLOCKED",
+                code=safe.get("code", "FETCH_UNCONFIRMED"),
+                accounting="CONFIRMED" if known else "UNKNOWN",
+            )
         except BaseException as persistence:
             if primary is None:
                 return persistence
-            primary.task_secondary = (*getattr(primary, "task_secondary", ()),
-                                      "TASK_STATE_PERSIST_FAILED")
+            primary.task_secondary = (
+                *getattr(primary, "task_secondary", ()),
+                "TASK_STATE_PERSIST_FAILED",
+            )
         if not isinstance(primary, Exception):
             return primary
         converted = TaskError(safe.get("code", "FETCH_UNCONFIRMED"), safe.get("phase", "fetch"))
@@ -411,14 +479,19 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
 
     def observe_bookkeeping():
         if fault_hook:
-            fault_hook("BOOKKEEPING", {"active": len(active), "completed": len(completed),
-                                       "holds": len(holds)})
+            fault_hook(
+                "BOOKKEEPING",
+                {"active": len(active), "completed": len(completed), "holds": len(holds)},
+            )
+
     with ThreadPoolExecutor(max_workers=workers) as pool:
         try:
             for _ in range(workers):
                 lane = transport.clone()
                 # Admission occurs on the coordinator before assigning the proxy.
                 try:
+                    if effective_capacity(lane, task.capacity) != capacity:
+                        raise TaskError("TASK_CAPACITY_CONFLICT", "preflight")
                     if hasattr(lane, "enable_persistent"):
                         lane.enable_persistent()
                 except BudgetExceeded:
@@ -437,8 +510,7 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
             while True:
                 consume_completions()
                 observe_bookkeeping()
-                done_indices = [index for index, (item, future) in active.items()
-                                if future.done()]
+                done_indices = [index for index, (item, future) in active.items() if future.done()]
                 consume_completions()
                 if any(index in active for index in done_indices):
                     raise RuntimeError("lane completion publication failed")
@@ -450,12 +522,17 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
                     if not candidates:
                         stop = True
                         break
+
                     # Oldest eligible object wins: hot work never jumps an eligible
                     # older different key. A busy object waits rather than replicating
                     # its binding in every free lane. Window is always <=2W.
                     def object_key(descriptor):
-                        return (descriptor.content_digest, descriptor.snapshot_id,
-                                *descriptor.catalog_row[:8])
+                        return (
+                            descriptor.content_digest,
+                            descriptor.snapshot_id,
+                            *descriptor.catalog_row[:8],
+                        )
+
                     busy_keys = {object_key(descriptors[i]) for i in active}
                     selected = None
                     for candidate in candidates:
@@ -470,29 +547,48 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
                     amount = prepared.location["image_size"]
                     if metadata and prepared.location["flags"] & 1:
                         amount += prepared.location["metadata_size"]
-                    if (task.meta("confirmed_output_bytes") + sum(holds.values()) + amount
-                            > task.meta("max_output_bytes")):
+                    if task.meta("confirmed_output_bytes") + sum(
+                        holds.values()
+                    ) + amount > task.meta("max_output_bytes"):
                         record_error(TaskError("RESOURCE_BLOCKED", "preflight", recoverable=True))
                         stop = True
                         break
                     # Pick the real destination before estimating its topology.
-                    identity = (*prepared.catalog_row[:5],
-                                int.from_bytes(prepared.catalog_row[5], "big"))
+                    identity = (
+                        *prepared.catalog_row[:5],
+                        int.from_bytes(prepared.catalog_row[5], "big"),
+                    )
                     lengths = [prepared.location["image_size"]]
                     if metadata and prepared.location["flags"] & 1:
                         lengths.append(prepared.location["metadata_size"])
                     # Only free lanes are observed; transport validates its actual
                     # live proof and generation credit, never shared across lanes.
-                    warm = [i for i in free if hasattr(lanes[i][0], "predict_warm")
-                            and (prepared.content_digest, prepared.snapshot_id,
-                                 prepared.location["object_idx"], lanes[i][0],
-                                 lanes[i][0].ledger) in lanes[i][1]
-                            and lanes[i][0].predict_warm(identity, lengths)]
+                    warm = [
+                        i
+                        for i in free
+                        if hasattr(lanes[i][0], "predict_warm")
+                        and (
+                            prepared.content_digest,
+                            prepared.snapshot_id,
+                            prepared.location["object_idx"],
+                            lanes[i][0],
+                            lanes[i][0].ledger,
+                        )
+                        in lanes[i][1]
+                        and lanes[i][0].predict_warm(identity, lengths)
+                    ]
                     index = warm[0] if warm else free[0]
                     lane, _ = lanes[index]
                     try:
-                        output = preflight(task, publication, item, lane, prepared=prepared,
-                                           proof_warm=index in warm, ledger=transport.ledger)
+                        output = preflight(
+                            task,
+                            publication,
+                            item,
+                            lane,
+                            prepared=prepared,
+                            proof_warm=index in warm,
+                            ledger=transport.ledger,
+                        )
                     except BaseException as error:
                         record_error(error)
                         stop = True
@@ -525,8 +621,7 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
             while active:
                 pump()
                 consume_completions()
-                done_indices = [index for index, (item, future) in active.items()
-                                if future.done()]
+                done_indices = [index for index, (item, future) in active.items() if future.done()]
                 consume_completions()
                 for index in done_indices:
                     if index in active:
@@ -563,5 +658,8 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
         raise first_error
     request = task.meta("request")
     with task.transaction() as db:
-        task.set_meta(db, "state", "PAUSED" if request == "PAUSE" else
-                      "CANCELLED" if request == "CANCEL" else "COMPLETED")
+        task.set_meta(
+            db,
+            "state",
+            "PAUSED" if request == "PAUSE" else "CANCELLED" if request == "CANCEL" else "COMPLETED",
+        )

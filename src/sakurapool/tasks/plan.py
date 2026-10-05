@@ -1,4 +1,4 @@
-"""Bounded reproducible P3 selection; no credentials or network operations."""
+"""Frozen deterministic selection; selection is local and never fetches providers."""
 
 from __future__ import annotations
 
@@ -6,9 +6,11 @@ import hashlib
 import heapq
 import json
 import re
+import sys
 from dataclasses import dataclass
 from itertools import islice
 
+from ..capacity import CapacityConfig
 from ..runtime import RuntimeQuerySpec
 
 FORMAT = "sakurapool-task-v1"
@@ -19,8 +21,9 @@ BATCH_SIZE = 512
 
 
 def canonical(value):
-    return json.dumps(value, sort_keys=True, separators=(",", ":"),
-                      ensure_ascii=True, allow_nan=False).encode("ascii")
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+    ).encode("ascii")
 
 
 def normalize_query(spec):
@@ -49,17 +52,23 @@ def normalize_query(spec):
         unique = {canonical(value): value for value in normalized}
         return [unique[key] for key in sorted(unique)]
 
-    if spec.namespace is not None and (not isinstance(spec.namespace, str)
-                                       or not spec.namespace or len(spec.namespace) > 4096):
+    if spec.namespace is not None and (
+        not isinstance(spec.namespace, str) or not spec.namespace or len(spec.namespace) > 4096
+    ):
         raise ValueError("query namespace invalid")
     branches = {}
     for branch in spec.any_of:
         normalized = normalize_query(branch)
         branches[canonical(normalized)] = normalized
-    return {"sources": names(spec.sources), "datasets": names(spec.datasets),
-            "namespace": spec.namespace, "all_tags": tags(spec.all_tags),
-            "any_tags": tags(spec.any_tags), "none_tags": tags(spec.none_tags),
-            "any_of": [branches[key] for key in sorted(branches)]}
+    return {
+        "sources": names(spec.sources),
+        "datasets": names(spec.datasets),
+        "namespace": spec.namespace,
+        "all_tags": tags(spec.all_tags),
+        "any_tags": tags(spec.any_tags),
+        "none_tags": tags(spec.none_tags),
+        "any_of": [branches[key] for key in sorted(branches)],
+    }
 
 
 @dataclass(frozen=True)
@@ -70,13 +79,14 @@ class Selection:
     records: tuple[str, ...] = ()
     algorithm: str = ALGORITHM
 
-    def validate(self):
+    def validate(self, capacity=None):
+        capacity = CapacityConfig() if capacity is None else capacity
         if self.mode not in ("all", "first", "sample", "records"):
             raise ValueError("selection mode invalid")
         if self.algorithm != ALGORITHM:
             raise ValueError("selection algorithm unsupported")
         if self.mode in ("first", "sample"):
-            maximum = MAX_SAMPLE if self.mode == "sample" else MAX_SELECTION
+            maximum = capacity.sample_heap_count if self.mode == "sample" else capacity.freeze_count
             if type(self.limit) is not int or not 0 <= self.limit <= maximum:
                 raise ValueError("selection limit invalid")
         elif self.limit is not None:
@@ -88,17 +98,23 @@ class Selection:
             raise ValueError("seed only applies to sample")
         if self.mode != "records" and self.records:
             raise ValueError("explicit records require records selection")
-        if len(self.records) > MAX_SELECTION:
+        if len(self.records) > capacity.freeze_count:
             raise ValueError("explicit selection cap")
         if len(set(self.records)) != len(self.records) or any(
-                not isinstance(v, str) or not re.fullmatch(r"[0-9a-f]{32}", v)
-                for v in self.records):
+            not isinstance(v, str) or not re.fullmatch(r"[0-9a-f]{32}", v) for v in self.records
+        ):
             raise ValueError("explicit records invalid or duplicated")
+        if len(canonical(self.records)) > capacity.explicit_records_bytes:
+            raise ValueError("explicit records byte cap")
 
-    def header(self):
-        self.validate()
-        return {"mode": self.mode, "limit": self.limit, "seed": self.seed,
-                "algorithm": self.algorithm if self.mode == "sample" else "rid-order-v1"}
+    def header(self, capacity=None):
+        self.validate(capacity)
+        return {
+            "mode": self.mode,
+            "limit": self.limit,
+            "seed": self.seed,
+            "algorithm": self.algorithm if self.mode == "sample" else "rid-order-v1",
+        }
 
 
 @dataclass(frozen=True)
@@ -110,16 +126,30 @@ class SelectedRecord:
     post_id: str
 
 
-def selected_records(runtime, query, selection):
-    """Stream identities; sample uses bounded heap, never lists all candidates."""
-    selection.validate()
+def _entry_bytes(entry):
+    record = entry[2]
+    return (
+        sys.getsizeof(entry)
+        + sys.getsizeof(entry[0])
+        + sys.getsizeof(entry[1])
+        + sys.getsizeof(record)
+        + sys.getsizeof(record.__dict__)
+        + sum(sys.getsizeof(value) for value in record.__dict__.values())
+    )
+
+
+def selected_records(runtime, query, selection, capacity=None):
+    """Stream all candidates; sample ranks and ordering remain v1-compatible."""
+    capacity = CapacityConfig() if capacity is None else capacity
+    selection.validate(capacity)
     normalize_query(query)
     result = runtime.query(query)
 
     def candidates():
-        for batch in result.iter_record_batches(BATCH_SIZE):
-            for values in zip(batch.rid, batch.record_id, batch.source_name,
-                              batch.dataset_name, batch.post_id):
+        for batch in result.iter_record_batches(capacity.record_batch):
+            for values in zip(
+                batch.rid, batch.record_id, batch.source_name, batch.dataset_name, batch.post_id
+            ):
                 yield SelectedRecord(*values)
 
     if selection.mode == "records":
@@ -129,28 +159,43 @@ def selected_records(runtime, query, selection):
                 raise ValueError("explicit record outside query")
             row = runtime._catalog.execute(
                 "SELECT s.name,d.name FROM sources s,datasets d "
-                "WHERE s.source_id=? AND d.dataset_id=?", (record.source_id, record.dataset_id),
+                "WHERE s.source_id=? AND d.dataset_id=?",
+                (record.source_id, record.dataset_id),
             ).fetchone()
             yield SelectedRecord(record.rid, record_id, *row, record.post_id)
     elif selection.mode == "first":
         yield from islice(candidates(), selection.limit)
     elif selection.mode == "sample":
         heap = []
+        live_bytes = 0
         if selection.limit == 0:
             return
         for record in candidates():
-            rank = int.from_bytes(hashlib.sha256(
-                b"sakurapool-task-sample-v1\x00" + canonical([selection.seed, record.record_id])
-            ).digest(), "big")
+            rank = int.from_bytes(
+                hashlib.sha256(
+                    b"sakurapool-task-sample-v1\x00" + canonical([selection.seed, record.record_id])
+                ).digest(),
+                "big",
+            )
             entry = (-rank, -int(record.record_id, 16), record)
-            if len(heap) < selection.limit:
-                heapq.heappush(heap, entry)
-            elif entry > heap[0]:
-                heapq.heapreplace(heap, entry)
+            if len(heap) < selection.limit or entry > heap[0]:
+                amount = _entry_bytes(entry)
+                old = _entry_bytes(heap[0]) if len(heap) == selection.limit else 0
+                # Include the replacement candidate, list allocation and final sort scratch.
+                if (
+                    live_bytes + amount + sys.getsizeof(heap) + 32 * (len(heap) + 1)
+                    > capacity.heap_memory_bytes
+                ):
+                    raise ValueError("sample heap memory cap exceeded")
+                if len(heap) < selection.limit:
+                    heapq.heappush(heap, entry)
+                else:
+                    heapq.heapreplace(heap, entry)
+                live_bytes += amount - old
         for _, _, record in sorted(heap, key=lambda entry: (-entry[0], -entry[1])):
             yield record
     else:
-        if result.count() > MAX_SELECTION:
+        if result.count() > capacity.freeze_count:
             raise ValueError("selection entry cap exceeded")
         yield from candidates()
 

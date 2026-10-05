@@ -1,16 +1,26 @@
-"""Serial publication reader; no concurrent SQLite access or scheduler."""
+"""Serial publication session bound to one ledger and capacity."""
 
 from threading import get_ident
 
+from ..capacity import CapacityConfig
 from .publication import PublicationCorrupt, load_publication
 from .publication_fetch import fetch_publication_sample
 
 
 class PublicationSession:
-    def __init__(self, root, transport, *, control=None, scope=None):
+    def __init__(self, root, transport, *, control=None, scope=None, capacity=None):
         self._owner = get_ident()
         self.transport = transport
         self.ledger = transport.ledger
+        self.capacity = (
+            capacity if capacity is not None else getattr(transport, "capacity", CapacityConfig())
+        )
+        if not isinstance(self.capacity, CapacityConfig):
+            raise ValueError("typed capacity required")
+        if getattr(transport, "capacity", self.capacity) != self.capacity:
+            raise ValueError("session/transport capacity mismatch")
+        if control is not None and getattr(control, "capacity", self.capacity) != self.capacity:
+            raise ValueError("session/control capacity mismatch")
         self.control, self.scope = control, scope
         self.publication = load_publication(root, full_verify=True)
         self._publication = self.publication
@@ -42,6 +52,7 @@ class PublicationSession:
             control=self.control,
             scope=self.scope,
             attempt_hook=attempt_hook,
+            capacity=self.capacity,
         )
 
     def close(self):
@@ -62,5 +73,7 @@ class PublicationSession:
         except BaseException:
             if primary is None:
                 raise
-            primary.task_secondary = (*getattr(primary, "task_secondary", ()),
-                                      "PUBLICATION_SESSION_CLOSE_FAILED")
+            primary.task_secondary = (
+                *getattr(primary, "task_secondary", ()),
+                "PUBLICATION_SESSION_CLOSE_FAILED",
+            )

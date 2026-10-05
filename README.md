@@ -15,11 +15,58 @@ The task coordinator separately supports bounded concurrent lanes; this is not a
 concurrent scheduler inside a shared PublicationSession.
 See [P5 roadmap and task design](docs/P5_ROADMAP.md). P5-B serial task and real
 closure certification is complete; see the [closure report](reports/P5B/REAL_CLOSURE_REPORT.md).
-P5-C bounded pipeline is approved and merged; P5-D production-scale validation
-is now in progress, not yet a production-scale certification. Default task workers=1;
+P5-C bounded pipeline is approved and merged. P5-D validation is complete for the
+fixed `20261004T143905Z-upload` scope and merged at
+`62f86cc487af41de7d84bfb5a14d2fb1e0e172ac`; independent semantic comparison
+remains subset-only, and global index completion is not claimed. See
+[the P5-D report](reports/P5D/REPORT.md). P6-A now implements explicit user
+workspaces and resource/capacity policy; its current route is [plan.md](plan.md). Default task workers=1;
 2/4 are explicit upper bounds, with actual concurrency limited by object distribution
 and resource admission. Budget/ledger v2 migration is not implemented. Earlier P3/P4 CLI examples below are historical/admin
 interfaces, not the default task workflow.
+
+## P6-A workspace and implementation boundaries
+
+```text
+sakura workspace init WORKSPACE
+sakura workspace inspect WORKSPACE
+sakura doctor --workspace WORKSPACE --profile PROFILE.json
+sakura task create --workspace WORKSPACE --publication PUB --query QUERY.json --selection first --limit 3 --metadata --task-dir WORKSPACE/tasks/TASK
+```
+
+The immutable capacity/layout belongs to workspace manifest v1; workspace ledger
+v3 and TaskDB v2 retain physical-domain, identity and lineage binding. ResourcePolicy
+is mutable with a durable epoch (`--expected-epoch` is explicit CAS; omission is
+last-writer-wins). New cumulative quotas default to JSON null, not legacy P4 limits;
+disk/inflight remain bounded. No legacy ledger or UNKNOWN task migration is provided.
+
+Metadata is validated as a JSON object without materializing its object graph: strict
+UTF-8, no BOM, NaN or Infinity, depth at most 128 and at most 1,000,000 nodes.
+These are validator implementation boundaries, not adjustable metadata byte capacity.
+Duplicate keys and escaped unpaired surrogates remain accepted. Flagged empty metadata
+is invalid. This is intentionally narrower than every input accepted by `json.loads`.
+The fixed validator working reservation is 8,320 bytes; parse failure does not erase
+operation UNKNOWN or release a lease whose ownership has escaped.
+
+RPC capacity is negotiated, with a separate 64 KiB bootstrap and bounded queue/parser.
+The pinned reqwest/hyper HTTP/1 implementation has a 417,792-byte incomplete-head
+threshold and an independent 100-field limit. Configured decoded header bytes above
+417,760 are rejected before worker start. The boundary test reaches 417,760 with a
+canonical HTTP/1.1 206 status line; extra wire whitespace or a longer reason phrase
+can hit the underlying parser boundary earlier. It is not a universal response guarantee.
+
+Ledger and protocol admission model live working allocations and deduct ledger
+headroom once from available inflight. Python object sizes vary by interpreter;
+headroom is not a universal fixed number. The protocol header factor covers conservative
+pinned hyper 1.11.1 / bytes 1.12.1 growth/copy scenarios, not a formal allocator or RSS
+upper bound. Native/unrelated process memory and allocator caches are outside this model.
+Public ledger calls return small values and clear operation frames while locked;
+arbitrary external retention of private `_read_pair` results is outside the model.
+
+P6-A real-workspace metadata validation is **PARTIAL**: two of three items were
+published and exported after formal pause; fresh-process resume failed, and a subsequent
+resume retained one operation UNKNOWN and two pending leases. No final three-item
+closure is claimed. See the final P6-A report for the execution deviation and evidence.
 
 ## Task API (recoverable task workflow)
 
@@ -41,8 +88,9 @@ sakura task export TASK --manifest OUTPUT.jsonl
 ```
 
 Creation/inspection are local: no HTTP or token reading. Task/output/export paths
-must be contained in the existing production work root; publication can be read
-outside it. TaskDB uses DELETE journal and FULL synchronization with short explicit
+must be contained in their validated workspace physical domain; publication can be read
+outside it. Omit `--workspace` only for an existing workspace-bound task (automatic
+identity discovery) or the unchanged legacy P4 workflow. TaskDB uses DELETE journal and FULL synchronization with short explicit
 transactions, plus a real single-runner OS file lock. One serial session fully
 verifies the publication once per runner process. Pause/cancel CLI returns a
 **requested** state: the bounded current item finishes before another is claimed.

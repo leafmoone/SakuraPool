@@ -767,9 +767,9 @@ def test_rpc_request_near_boundaries():
 
     from sakurapool.tasks.pipeline import LedgerRPC, OwnerAuthorityError, _envelope_bytes
 
-    payload = ("x" * 3999,)
-    assert _envelope_bytes(payload) + _envelope_bytes({}) == 16380
-    assert _envelope_bytes(("x" * 4000,)) + _envelope_bytes({}) == 16384
+    payload = ("x" * 4095,)
+    assert _envelope_bytes(payload) + _envelope_bytes({}) == 16764
+    assert _envelope_bytes(("x" * 4096,)) + _envelope_bytes({}) == 16768
     class Capture(queue.Queue):
         def put(self, call, *args, **kwargs):
             super().put(call, *args, **kwargs)
@@ -777,10 +777,10 @@ def test_rpc_request_near_boundaries():
     calls = Capture(maxsize=1)
     ledger = SimpleNamespace(root=None, limits={}, offline_mode=False)
     rpc = LedgerRPC(get_ident() + 1, calls, ledger, 0, SimpleNamespace())
-    assert rpc._invoke("condition_proof", "x" * 4000) == "bounded-reply"
+    assert rpc._invoke("condition_proof", "x" * 4096) == "bounded-reply"
     calls.get()
     with pytest.raises(OwnerAuthorityError):
-        rpc._invoke("condition_proof", "x" * 4001)
+        rpc._invoke("condition_proof", "x" * 4097)
     assert calls.empty()
 
 
@@ -818,12 +818,16 @@ def test_exact_completion_queue_full_while_owner_pumps(multiple, monkeypatch):
     assert ledger.status()["inflight"] == 0
 
 
-@pytest.mark.parametrize("length,accepted", [(4064, True), (4065, False)])
+@pytest.mark.parametrize("length,accepted", [(4096, True), (4097, False)])
 def test_owner_reply_size_boundary(multiple, monkeypatch, length, accepted):
     from sakurapool.tasks import pipeline
 
     directory, ledger, Transport, calls = multiple
-    assert pipeline._envelope_bytes("x" * length) == 128 + length * 4
+    if accepted:
+        assert pipeline._envelope_bytes("x" * length) == 128 + length * 4
+    else:
+        with pytest.raises(pipeline.OwnerAuthorityError):
+            pipeline._envelope_bytes("x" * length)
     original = ledger.record_condition_proof
     def reply(*args, **kwargs):
         original(*args, **kwargs)
@@ -929,7 +933,13 @@ def test_workers_four_admits_only_one_resident_lane(multiple):
     from sakurapool.storage.budget import Reservation
 
     directory, ledger, Transport, calls = multiple
-    ledger.limits["inflight"] = (33 << 20) + (1 << 19)
+    from sakurapool.capacity import CapacityConfig
+    from sakurapool.tasks.pipeline import _envelope_bytes
+
+    # Exact owner queue reservation plus one fixture resident; a second cannot fit.
+    queue_bytes = 4 * ((192 << 10) + 4 * CapacityConfig().rpc_line_bytes)
+    ledger.limits["inflight"] = (32 << 20) + queue_bytes + (1 << 19)
+    assert _envelope_bytes("x") < CapacityConfig().rpc_line_bytes
     resident = []
     class Lane(Transport):
         def enable_persistent(self):

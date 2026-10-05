@@ -25,6 +25,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from ..capacity import CapacityConfig
 from .budget import MIB, BudgetLedger, Reservation
 from .location_gate import (
     LocationRejected,
@@ -287,6 +288,8 @@ class RawObjectStream:
         self.response = response
         self.lease = lease
         self.ledger = ledger
+        # Raw full-object streaming has a fixed bounded scratch read, not a Range cap.
+        # HTTP/capacity validation belongs to the owning GuardedTransport.
         self.expected_size = expected_size
         self.count = 0
         self._hash = hashlib.sha256()
@@ -364,6 +367,7 @@ class GuardedTransport:
         credential_origin: str | None = None,
         same_origin_cookie: str | None = None,
         max_retry_wait_s: float = 5.0,
+        capacity=None,
     ):
         if not trusted_hosts or any(
             not h or h != h.lower() or ":" in h or "/" in h for h in trusted_hosts
@@ -375,6 +379,14 @@ class GuardedTransport:
             if not trusted_hosts.issubset({"127.0.0.1"}):
                 raise ValueError("offline transport requires literal IPv4 loopback only")
         self.ledger = ledger
+        workspace = getattr(ledger, "workspace", None)
+        self.capacity = capacity if capacity is not None else (
+            workspace.capacity if workspace is not None else CapacityConfig())
+        if not isinstance(self.capacity, CapacityConfig):
+            raise ValueError("typed capacity required")
+        if workspace is not None and workspace.capacity != self.capacity:
+            raise ValueError("workspace/transport capacity mismatch")
+        self.max_range_bytes = self.capacity.range_chunk_bytes
         self._trusted_hosts = frozenset(trusted_hosts)
         self.allow_loopback_http = allow_loopback_http
         self.token = token  # never persisted, never included in exception
@@ -427,6 +439,7 @@ class GuardedTransport:
             credential_origin=self.credential_origin or None,
             same_origin_cookie=self.same_origin_cookie,
             max_retry_wait_s=self.max_retry_wait_s,
+            capacity=self.capacity,
         )
 
     def close(self) -> None:
@@ -524,6 +537,11 @@ class GuardedTransport:
                 "network attempt failed; body reservation retained",
                 phase="metadata_send" if metadata else "transport",
             )
+        if sum(len(k.encode("utf-8")) + len(v.encode("utf-8")) + 4
+               for k, v in response.headers.items()) > self.capacity.http_header_bytes:
+            response.close()
+            self.ledger.settle(lease)
+            raise RemoteIOError("response headers exceed capacity", phase="response_headers")
         return response, lease
 
     def _attach_origin_cookie(self, url: str, headers: dict[str, str]) -> None:
@@ -1066,7 +1084,7 @@ class GuardedTransport:
             or offset >= 2**64
             or length >= 2**64
             or offset + length > bound.size
-            or length > MAX_MEMBER
+            or length > self.max_range_bytes
         ):
             raise ValueError("range outside bound object, uint64, or 64 MiB member cap")
         if length == 0:
@@ -1242,7 +1260,7 @@ class GuardedTransport:
 
     def read_metadata(self, url: str, *, max_bytes: int = MIB) -> bytes:
         """Guarded, bounded provider-listing response; no SDK bypass."""
-        if max_bytes < 0 or max_bytes > 64 * MIB:
+        if type(max_bytes) is not int or not 0 <= max_bytes <= self.capacity.metadata_max_bytes:
             raise ValueError("metadata single-response cap exceeded")
         operation = {"unknown": False}
         response, lease = self._response(

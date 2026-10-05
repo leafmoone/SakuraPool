@@ -1,9 +1,11 @@
-"""Thin task CLI routing."""
+"""Task CLI resolves persisted context before writable DB or credentials."""
 
 import json
 from pathlib import Path
 
 from ..storage.budget import DEFAULT_WORK_ROOT, BudgetLedger
+from ..workspace import Workspace
+from .context import LEGACY_CAPACITY
 from .store import TaskDB, TaskError
 
 
@@ -13,6 +15,7 @@ def add_parser(subparsers):
     create = commands.add_parser("create")
     for option in ("publication", "query", "task-dir"):
         create.add_argument("--" + option, required=True)
+    create.add_argument("--workspace")
     create.add_argument("--selection", choices=("all", "first", "sample", "records"), default="all")
     create.add_argument("--limit", type=int)
     create.add_argument("--seed")
@@ -22,6 +25,7 @@ def add_parser(subparsers):
     for name in ("inspect", "run", "pause", "cancel", "resume", "export"):
         command = commands.add_parser(name)
         command.add_argument("task_dir")
+        command.add_argument("--workspace")
         if name in ("run", "resume"):
             command.add_argument("--profile", required=True)
             command.add_argument("--workers", type=int, choices=(1, 2, 4), default=1)
@@ -40,43 +44,71 @@ def bounded_json(path, cap=65536):
 def command(args):
     try:
         action = args.task_command
-        if action == "inspect":
-            with TaskDB(args.task_dir, readonly=True) as task:
-                result = task.inspect()
-        elif action in ("pause", "cancel"):
+        explicit = getattr(args, "workspace", None)
+        if action == "create":
+            workspace = Workspace.open(explicit) if explicit is not None else None
+            capacity = workspace.capacity if workspace is not None else LEGACY_CAPACITY
+        else:
+            with TaskDB(args.task_dir, readonly=True, workspace=explicit) as task:
+                workspace, capacity = task.workspace, task.capacity
+                task.validate_plan()
+                if action == "inspect":
+                    print(json.dumps(task.inspect(), sort_keys=True))
+                    return 0
+        ledger = workspace.ledger() if workspace is not None else BudgetLedger(DEFAULT_WORK_ROOT)
+        if action in ("pause", "cancel"):
             from .runner import admit_task_growth
 
-            ledger = BudgetLedger(DEFAULT_WORK_ROOT)
-            with admit_task_growth(args.task_dir, ledger), TaskDB(args.task_dir) as task:
+            with (
+                admit_task_growth(args.task_dir, ledger),
+                TaskDB(args.task_dir, workspace=workspace) as task,
+            ):
                 result = task.request("PAUSE" if action == "pause" else "CANCEL")
+        elif action == "create":
+            from ..cli import _spec_from_dict
+            from .plan import Selection
+            from .runner import create_task
+
+            records = (
+                bounded_json(args.records, capacity.explicit_records_bytes) if args.records else []
+            )
+            if not isinstance(records, list):
+                raise TaskError("RECORD_LIST_INVALID", "cli")
+            selection = Selection(args.selection, args.limit, args.seed, tuple(records))
+            with create_task(
+                args.publication,
+                args.task_dir,
+                ledger,
+                _spec_from_dict(bounded_json(args.query, capacity.task_header_bytes)),
+                selection,
+                metadata=args.metadata,
+                max_output_bytes=args.max_output_bytes,
+            ) as task:
+                result = task.inspect()
+        elif action == "export":
+            from .export import export_task
+
+            result = export_task(args.task_dir, args.manifest, ledger)
         else:
-            ledger = BudgetLedger(DEFAULT_WORK_ROOT)
-            if action == "create":
-                from ..cli import _spec_from_dict
-                from .plan import Selection
-                from .runner import create_task
+            from ..storage.publication import load_publication
+            from .profile import connect_profile, read_profile, validate_allowlist
+            from .runner import check_publication_identity, run_task
 
-                records = bounded_json(args.records, 4 << 20) if args.records else []
-                if not isinstance(records, list):
-                    raise TaskError("RECORD_LIST_INVALID", "cli")
-                selection = Selection(args.selection, args.limit, args.seed, tuple(records))
-                with create_task(args.publication, args.task_dir, ledger,
-                                 _spec_from_dict(bounded_json(args.query)), selection,
-                                 metadata=args.metadata,
-                                 max_output_bytes=args.max_output_bytes) as task:
-                    result = task.inspect()
-            elif action == "export":
-                from .export import export_task
-
-                result = export_task(args.task_dir, args.manifest, ledger)
-            else:
-                from .profile import connect_profile, read_profile
-                from .runner import run_task
-
-                profile = read_profile(args.profile)
-                with connect_profile(profile, ledger) as transport:
-                    result = run_task(args.task_dir, transport, resume=action == "resume",
-                                      connection_profile=profile, workers=args.workers)
+            profile = read_profile(args.profile)
+            with TaskDB(args.task_dir, readonly=True, workspace=workspace) as task:
+                with load_publication(task.meta("publication_path"), full_verify=True) as pub:
+                    check_publication_identity(task, pub)
+                    validate_allowlist(profile, pub)
+            with connect_profile(
+                profile, ledger, capacity=workspace if workspace is not None else capacity
+            ) as transport:
+                result = run_task(
+                    args.task_dir,
+                    transport,
+                    resume=action == "resume",
+                    connection_profile=profile,
+                    workers=args.workers,
+                )
         print(json.dumps(result, sort_keys=True))
         return 0
     except TaskError as error:

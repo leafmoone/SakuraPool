@@ -1,4 +1,4 @@
-"""Local task admission; frozen selection is never expanded during execution."""
+"""Task freeze, current-policy admission and coordinator execution."""
 
 import json
 import os
@@ -13,46 +13,77 @@ from ..storage.publication_fetch import PublicationFetchError, _content_sha
 from ..storage.publication_session import PublicationSession
 from ..storage.retrieval import _real_output_root
 from ..storage.transport import _SAFE_CODES, _SAFE_PHASES, RemoteIOError
+from .context import (
+    LEGACY_CAPACITY,
+    chunk_plan,
+    effective_capacity,
+    remaining_limits,
+    validate_ledger,
+)
 from .plan import Selection, normalize_query, selected_records
-from .store import MAX_DB_BYTES, MAX_JOURNAL_BYTES, TaskDB, TaskError
+from .store import TaskDB, TaskError
 
 
-def create_task(publication, directory, ledger, query, selection=None, *, metadata=False,
-                max_output_bytes=512 << 20):
-    """Freeze actual content identity and streamed selection without provider IO."""
+def create_task(
+    publication,
+    directory,
+    ledger,
+    query,
+    selection=None,
+    *,
+    metadata=False,
+    max_output_bytes=512 << 20,
+):
+    workspace = getattr(ledger, "workspace", None)
+    capacity = workspace.capacity if workspace is not None else LEGACY_CAPACITY
+    if workspace is not None:
+        workspace.task_path(directory)
     selection = selection if selection is not None else Selection()
-    selection.validate()
+    selection.validate(capacity)
     normalized = normalize_query(query)
     with load_publication(publication, full_verify=True) as pub:
-        header = {"publication_digest": pub.content_digest,
-                  "snapshot_id": pub.runtime.snapshot_id,
-                  "query": normalized, "selection": selection.header(), "metadata": metadata}
-        return TaskDB.create(directory, ledger, header,
-                             selected_records(pub.runtime, query, selection),
-                             publication_path=publication, max_bytes=max_output_bytes)
+        header = {
+            "publication_digest": pub.content_digest,
+            "snapshot_id": pub.runtime.snapshot_id,
+            "query": normalized,
+            "selection": selection.header(capacity),
+            "metadata": metadata,
+        }
+        return TaskDB.create(
+            directory,
+            ledger,
+            header,
+            selected_records(pub.runtime, query, selection, capacity),
+            publication_path=publication,
+            max_bytes=max_output_bytes,
+        )
 
 
 def check_publication_identity(task, publication):
-    """Local identity checks must precede credential/provider IO."""
     header = task.validate_plan()
-    if (publication.content_digest != header["publication_digest"]
-            or publication.runtime.snapshot_id != header["snapshot_id"]):
+    if (
+        publication.content_digest != header["publication_digest"]
+        or publication.runtime.snapshot_id != header["snapshot_id"]
+    ):
         raise TaskError("PUBLICATION_IDENTITY_MISMATCH", "plan")
     return header
 
 
 def verify_delivery(task, item):
-    """Check ownership, pinned plan, exact entries and streamed content."""
     if item["receipt"] is None:
         raise TaskError("OUTPUT_CONFLICT", "recovery")
     receipt = json.loads(item["receipt"])
-    attempt = task.db.execute("SELECT seq,operation_id,receipt FROM attempts WHERE attempt_id=?",
-                              (item["attempt_id"],)).fetchone()
-    if (receipt["task_id"] != task.meta("task_id")
-            or receipt["plan_digest"] != task.meta("plan_digest")
-            or attempt is None or attempt["seq"] != item["seq"]
-            or attempt["operation_id"] != receipt["operation_id"]
-            or attempt["receipt"] != item["receipt"]):
+    attempt = task.db.execute(
+        "SELECT seq,operation_id,receipt FROM attempts WHERE attempt_id=?", (item["attempt_id"],)
+    ).fetchone()
+    if (
+        receipt["task_id"] != task.meta("task_id")
+        or receipt["plan_digest"] != task.meta("plan_digest")
+        or attempt is None
+        or attempt["seq"] != item["seq"]
+        or attempt["operation_id"] != receipt["operation_id"]
+        or attempt["receipt"] != item["receipt"]
+    ):
         raise TaskError("OUTPUT_CONFLICT", "recovery")
     final = plain_entry(task.directory / "output" / item["record_id"], directory=True)
     info = final.stat()
@@ -61,45 +92,59 @@ def verify_delivery(task, item):
     if {path.name for path in final.iterdir()} != set(receipt["receipt"]):
         raise TaskError("OUTPUT_CONFLICT", "recovery")
     for name, proof in receipt["receipt"].items():
-        if name not in ("image.jpg", "image.jpeg", "image.png", "image.webp", "image.avif",
-                        "metadata.json"):
+        if name not in (
+            "image.jpg",
+            "image.jpeg",
+            "image.png",
+            "image.webp",
+            "image.avif",
+            "metadata.json",
+        ):
             raise TaskError("OUTPUT_CONFLICT", "recovery")
         path = plain_entry(final / name)
         info = path.stat()
-        if ([info.st_dev, info.st_ino] != proof["identity"] or info.st_size != proof["bytes"]
-                or _content_sha(path) != proof["sha256"]):
+        if (
+            [info.st_dev, info.st_ino] != proof["identity"]
+            or info.st_size != proof["bytes"]
+            or _content_sha(path) != proof["sha256"]
+        ):
             raise TaskError("OUTPUT_CORRUPT", "recovery")
     return receipt
 
 
 def reconcile(task):
-    """Unknown network/settlement is a blocker, never permission to retry/refund."""
+    """UNKNOWN is never permission to retry or reset accounting."""
     blocker = None
     for row in task.db.execute("SELECT * FROM items WHERE state IN ('IN_PROGRESS','DONE')"):
         final = task.directory / "output" / row["record_id"]
-        attempt = task.db.execute("SELECT * FROM attempts WHERE attempt_id=?",
-                                  (row["attempt_id"],)).fetchone()
+        attempt = task.db.execute(
+            "SELECT * FROM attempts WHERE attempt_id=?", (row["attempt_id"],)
+        ).fetchone()
         if os.path.lexists(final):
             try:
                 verify_delivery(task, row)
             except TaskError as error:
                 blocker = blocker or error
                 continue
-            if (row["accounting"] == "CONFIRMED"
-                    or (attempt is not None and attempt["accounting"] == "CONFIRMED"
-                        and attempt["phase"] == "SETTLED")):
+            if row["accounting"] == "CONFIRMED" or (
+                attempt is not None
+                and attempt["accounting"] == "CONFIRMED"
+                and attempt["phase"] == "SETTLED"
+            ):
                 task.finish_item(row["seq"], state="DONE", accounting="CONFIRMED")
                 continue
-            task.finish_item(row["seq"], state="BLOCKED", code="BLOCKED_ACCOUNTING",
-                             accounting="UNKNOWN")
+            task.finish_item(
+                row["seq"], state="BLOCKED", code="BLOCKED_ACCOUNTING", accounting="UNKNOWN"
+            )
             blocker = blocker or TaskError("BLOCKED_ACCOUNTING", "recovery")
             continue
         if row["state"] == "DONE":
             blocker = blocker or TaskError("OUTPUT_MISSING", "recovery")
             continue
         if attempt is None or attempt["network_state"] != "NOT_STARTED":
-            task.finish_item(row["seq"], state="BLOCKED", code="NETWORK_ACCOUNTING_UNKNOWN",
-                             accounting="UNKNOWN")
+            task.finish_item(
+                row["seq"], state="BLOCKED", code="NETWORK_ACCOUNTING_UNKNOWN", accounting="UNKNOWN"
+            )
             blocker = blocker or TaskError("NETWORK_ACCOUNTING_UNKNOWN", "recovery")
             continue
         task.finish_item(row["seq"], state="READY")
@@ -109,20 +154,26 @@ def reconcile(task):
 
 def preflight(task, pub, item, transport, *, prepared=None, proof_warm=None, ledger=None):
     ledger = transport.ledger if ledger is None else ledger
+    validate_ledger(task, ledger)
+    capacity = effective_capacity(transport, task.capacity)
+    if capacity != task.capacity:
+        raise TaskError("TASK_CAPACITY_CONFLICT", "preflight")
     runtime = pub.runtime
     if prepared is None:
         record = runtime.resolve_record(item["record_id"])
         rid = record.rid
         loc = runtime.location(rid)
-        obj = pub.catalog.execute("SELECT object_size,fetchable FROM objects WHERE object_idx=?",
-                                  (loc["object_idx"],)).fetchone()
+        obj = pub.catalog.execute(
+            "SELECT object_size,fetchable FROM objects WHERE object_idx=?", (loc["object_idx"],)
+        ).fetchone()
     else:
-        if (prepared.record_id != item["record_id"]
-                or prepared.content_digest != pub.content_digest
-                or prepared.snapshot_id != runtime.snapshot_id):
+        if (
+            prepared.record_id != item["record_id"]
+            or prepared.content_digest != pub.content_digest
+            or prepared.snapshot_id != runtime.snapshot_id
+        ):
             raise TaskError("RECORD_IDENTITY_MISMATCH", "preflight")
-        rid = prepared.rid
-        loc = prepared.location
+        rid, loc = prepared.rid, prepared.location
         obj = (prepared.catalog_row[5], prepared.catalog_row[8])
     if rid != item["rid"]:
         raise TaskError("RECORD_IDENTITY_MISMATCH", "preflight")
@@ -131,29 +182,33 @@ def preflight(task, pub, item, transport, *, prepared=None, proof_warm=None, led
     size = int.from_bytes(obj[0], "big")
     metadata = task.meta("header")["metadata"]
     meta_size = loc["metadata_size"] if metadata and loc["flags"] & 1 else 0
-    limit = getattr(transport, "max_range_bytes", 8 << 20)
-    if loc["image_size"] > limit or meta_size > limit:
+    if loc["image_size"] > capacity.image_max_bytes or meta_size > capacity.metadata_max_bytes:
         raise TaskError("RANGE_TOO_LARGE", "preflight")
-    if (loc["image_size"] <= 0 or loc["image_offset"] + loc["image_size"] > size
-            or loc["metadata_offset"] + meta_size > size):
+    if (
+        loc["image_size"] <= 0
+        or loc["image_offset"] + loc["image_size"] > size
+        or loc["metadata_offset"] + meta_size > size
+    ):
         raise TaskError("RECORD_EXTENT_INVALID", "preflight")
     output = _real_output_root(task.directory / "output", ledger)
     if os.path.lexists(output / item["record_id"]):
         raise TaskError("OUTPUT_CONFLICT", "preflight")
-    status = ledger.status()
-    proof_cached = ((pub.content_digest, runtime.snapshot_id, loc["object_idx"],
-                     transport, transport.ledger) in pub._verified
-                    if proof_warm is None else proof_warm)
-    range_count = 1 + int(meta_size > 0)
-    required = {"saved_samples": 1, "saved_bytes": loc["image_size"] + meta_size,
-                "body": loc["image_size"] + meta_size + range_count,
-                "attempts": 2 * range_count}
+    proof_cached = (
+        (pub.content_digest, runtime.snapshot_id, loc["object_idx"], transport, transport.ledger)
+        in pub._verified
+        if proof_warm is None
+        else proof_warm
+    )
+    range_count, max_chunk = chunk_plan(loc["image_size"], meta_size, capacity)
+    required = {
+        "saved_samples": 1,
+        "saved_bytes": loc["image_size"] + meta_size,
+        "body": loc["image_size"] + meta_size + range_count,
+        "attempts": 2 * range_count,
+    }
     if not proof_cached:
         from ..storage.production_resources import NEGATIVE_CONDITION_BODY_CAP
 
-        # Cold topology: two mandatory metadata responses (hub + first page),
-        # observe + positive + negative probes (each two hops). Later pages
-        # remain individually admitted by GuardedTransport before sending.
         listing_cap = (1 << 20) + 1
         required["body"] += 2 * listing_cap + 4 + NEGATIVE_CONDITION_BODY_CAP + 1
         required["metadata"] = 2 * listing_cap
@@ -161,42 +216,61 @@ def preflight(task, pub, item, transport, *, prepared=None, proof_warm=None, led
     if not ledger.offline_mode:
         from ..storage.production_resources import ProductionFootprint
 
-        footprint = ProductionFootprint.admit("range", max(loc["image_size"], meta_size))
-        required.update(inflight=footprint.memory,
-                        disk=footprint.transfer_disk + loc["image_size"] + meta_size + 12288)
-    remaining = {key: max(0, ledger.limits[key] - status[key]) for key in required}
+        footprint = ProductionFootprint.admit("range", max_chunk, capacity=capacity)
+        required.update(
+            inflight=footprint.memory,
+            disk=footprint.transfer_disk + loc["image_size"] + meta_size + 12288,
+        )
+    remaining = remaining_limits(ledger, required)
     delivered_bytes = task.meta("confirmed_output_bytes")
-    if (any(required[key] > remaining[key] for key in required)
-            or delivered_bytes + required["saved_bytes"] > task.meta("max_output_bytes")):
+    if any(required[key] > remaining[key] for key in required) or delivered_bytes + required[
+        "saved_bytes"
+    ] > task.meta("max_output_bytes"):
         error = TaskError("RESOURCE_BLOCKED", "preflight", recoverable=True)
-        error.resources = {"profile": "P4_LEGACY", "required": required,
-                           "network_requirement": "known_cold_steps_plus_per_request_admission",
-                           "remaining": remaining, "effective_limit": ledger.limits,
-                           "task_output_remaining": task.meta("max_output_bytes") - delivered_bytes}
+        error.resources = {
+            "profile": "WORKSPACE" if task.workspace is not None else "P4_LEGACY",
+            "required": required,
+            "network_requirement": "known_cold_steps_plus_per_request_admission",
+            "remaining": remaining,
+            "effective_limit": ledger.limits,
+            "task_output_remaining": task.meta("max_output_bytes") - delivered_bytes,
+        }
         raise error
     return output
 
 
 @contextmanager
 def admit_task_growth(directory, ledger):
-    """Physical DB growth/journal admission, not a parallel network reservation."""
     directory = plain_entry(Path(directory).absolute(), directory=True)
-    directory = _real_output_root(directory, ledger)
-    path = plain_entry(directory / "task.sqlite")
-    required = MAX_JOURNAL_BYTES + max(0, MAX_DB_BYTES - path.stat().st_size) + 16384
+    workspace = getattr(ledger, "workspace", None)
+    if workspace is None:
+        _real_output_root(directory, ledger)
+    else:
+        workspace.task_path(directory, must_exist=True)
+    probe = TaskDB(directory, readonly=True)
+    try:
+        validate_ledger(probe, ledger)
+        capacity, path = probe.capacity, probe.path
+    finally:
+        # This read-only ownership probe owns no task execution lifecycle.
+        probe.db.close()
+    required = (
+        capacity.task_journal_bytes + max(0, capacity.task_db_bytes - path.stat().st_size) + 16384
+    )
     try:
         lease = ledger.reserve(Reservation(disk=required))
     except BudgetExceeded:
         error = TaskError("RESOURCE_BLOCKED", "taskdb", recoverable=True)
-        remaining = max(0, ledger.limits["disk"] - ledger.status()["disk"])
-        error.resources = {"required": {"disk": required}, "effective_limit": ledger.limits,
-                           "remaining": {"disk": remaining}}
+        remaining = remaining_limits(ledger, {"disk": required})["disk"]
+        error.resources = {
+            "required": {"disk": required},
+            "effective_limit": ledger.limits,
+            "remaining": {"disk": remaining},
+        }
         raise error from None
     try:
         yield
     finally:
-        # Disk-only reservation: settlement verifies physical usage, no network
-        # or saved consumption may be inferred from this lease.
         primary = sys.exc_info()[1]
         try:
             ledger.settle(lease)
@@ -205,17 +279,32 @@ def admit_task_growth(directory, ledger):
                 if not isinstance(secondary, Exception):
                     raise
                 raise TaskError("TASK_RESOURCE_SETTLEMENT_UNKNOWN", "taskdb") from None
-            primary.task_secondary = (*getattr(primary, "task_secondary", ()),
-                                      "TASK_RESOURCE_SETTLEMENT_UNKNOWN")
+            primary.task_secondary = (
+                *getattr(primary, "task_secondary", ()),
+                "TASK_RESOURCE_SETTLEMENT_UNKNOWN",
+            )
 
 
-def run_task(directory, transport, *, control=None, resume=False, fault_hook=None,
-             connection_profile=None, workers=1):
-    """Coordinator authority; bounded lanes never receive SQLite handles."""
+def run_task(
+    directory,
+    transport,
+    *,
+    control=None,
+    resume=False,
+    fault_hook=None,
+    connection_profile=None,
+    workers=1,
+):
     if type(workers) is not int or workers not in (1, 2, 4):
         raise TaskError("WORKERS_INVALID", "preflight")
-    with (admit_task_growth(directory, transport.ledger),
-          TaskDB(directory) as task, task.runner_lock()):
+    with (
+        admit_task_growth(directory, transport.ledger),
+        TaskDB(directory) as task,
+        task.runner_lock(),
+    ):
+        validate_ledger(task, transport.ledger)
+        if effective_capacity(transport, task.capacity) != task.capacity:
+            raise TaskError("TASK_CAPACITY_CONFLICT", "preflight")
         _real_output_root(task.directory, transport.ledger)
         if task.meta("state") in ("PAUSED", "CANCELLED", "BLOCKED") and not resume:
             raise TaskError("EXPLICIT_RESUME_REQUIRED")
@@ -224,8 +313,9 @@ def run_task(directory, transport, *, control=None, resume=False, fault_hook=Non
                 task.set_meta(db, "request", None)
             task.set_meta(db, "state", "RUNNING")
         try:
-            with PublicationSession(task.meta("publication_path"), transport,
-                                    control=control) as session:
+            with PublicationSession(
+                task.meta("publication_path"), transport, control=control
+            ) as session:
                 header = check_publication_identity(task, session.publication)
                 if connection_profile is not None:
                     from .profile import validate_allowlist
@@ -237,9 +327,15 @@ def run_task(directory, transport, *, control=None, resume=False, fault_hook=Non
                 if hasattr(transport, "clone"):
                     from .pipeline import run_pipeline
 
-                    run_pipeline(task, session.publication, transport, workers=workers,
-                                 metadata=header["metadata"], fault_hook=fault_hook,
-                                 control=control)
+                    run_pipeline(
+                        task,
+                        session.publication,
+                        transport,
+                        workers=workers,
+                        metadata=header["metadata"],
+                        fault_hook=fault_hook,
+                        control=control,
+                    )
                     return task.inspect()
                 if workers != 1:
                     raise TaskError("WORKER_CHANNEL_UNAVAILABLE", "preflight")
@@ -247,8 +343,9 @@ def run_task(directory, transport, *, control=None, resume=False, fault_hook=Non
                     request = task.meta("request")
                     if request:
                         with task.transaction() as db:
-                            task.set_meta(db, "state",
-                                          "PAUSED" if request == "PAUSE" else "CANCELLED")
+                            task.set_meta(
+                                db, "state", "PAUSED" if request == "PAUSE" else "CANCELLED"
+                            )
                         break
                     item = task.claim()
                     if item is None:
@@ -265,8 +362,10 @@ def run_task(directory, transport, *, control=None, resume=False, fault_hook=Non
                         try:
                             task.finish_item(item["seq"], state="READY", code=error.code)
                         except BaseException:
-                            error.task_secondary = (*getattr(error, "task_secondary", ()),
-                                                    "TASK_STATE_PERSIST_FAILED")
+                            error.task_secondary = (
+                                *getattr(error, "task_secondary", ()),
+                                "TASK_STATE_PERSIST_FAILED",
+                            )
                         raise
 
                     def hook(event, payload):
@@ -277,17 +376,25 @@ def run_task(directory, transport, *, control=None, resume=False, fault_hook=Non
                             fault_hook(event, payload)
 
                     try:
-                        session.fetch(item["record_id"], output, metadata=header["metadata"],
-                                      attempt_hook=hook)
+                        session.fetch(
+                            item["record_id"],
+                            output,
+                            metadata=header["metadata"],
+                            attempt_hook=hook,
+                        )
                     except Exception as primary:
                         error = TaskError("FETCH_UNCONFIRMED", "fetch")
                         if isinstance(primary, (PublicationFetchError, RemoteIOError)):
                             details = primary.public_diagnostic()
-                            if (details.get("code") in _SAFE_CODES
-                                    and details.get("phase") in _SAFE_PHASES):
+                            if (
+                                details.get("code") in _SAFE_CODES
+                                and details.get("phase") in _SAFE_PHASES
+                            ):
                                 error = TaskError(details["code"], details["phase"])
-                                error.safe_details = {"code": details["code"],
-                                                      "phase": details["phase"]}
+                                error.safe_details = {
+                                    "code": details["code"],
+                                    "phase": details["phase"],
+                                }
                                 if details.get("accounting") in {"CONFIRMED", "UNKNOWN"}:
                                     error.safe_details["accounting"] = details["accounting"]
                                 if isinstance(primary, PublicationFetchError):
@@ -300,26 +407,37 @@ def run_task(directory, transport, *, control=None, resume=False, fault_hook=Non
                                     }.items():
                                         if details.get(key) in allowed:
                                             error.safe_details[key] = details[key]
-                                    allowed_secondary = {"CLEANUP_FAILED", "ACCOUNTING_UNKNOWN",
-                                                         "RANGE_FINALIZATION_FAILED"}
                                     error.safe_details["secondary"] = [
-                                        value for value in details.get("secondary", ())
-                                        if value in allowed_secondary
+                                        v
+                                        for v in details.get("secondary", ())
+                                        if v
+                                        in {
+                                            "CLEANUP_FAILED",
+                                            "ACCOUNTING_UNKNOWN",
+                                            "RANGE_FINALIZATION_FAILED",
+                                        }
                                     ]
                                 status_code = details.get("http_status")
                                 if type(status_code) is int and 100 <= status_code <= 599:
                                     error.safe_details["http_status"] = status_code
                         try:
-                            status = task.db.execute("SELECT delivery FROM items WHERE seq=?",
-                                                     (item["seq"],)).fetchone()[0]
-                            known = (status != "PUBLISHED"
-                                     and getattr(error, "safe_details", {}).get("accounting")
-                                     == "CONFIRMED")
-                            task.finish_item(item["seq"], state="READY" if known else "BLOCKED",
-                                             code=error.code,
-                                             accounting="CONFIRMED" if known else "UNKNOWN")
-                            error.delivery = ("PUBLISHED" if status == "PUBLISHED"
-                                              else "NOT_PUBLISHED")
+                            status = task.db.execute(
+                                "SELECT delivery FROM items WHERE seq=?", (item["seq"],)
+                            ).fetchone()[0]
+                            known = (
+                                status != "PUBLISHED"
+                                and getattr(error, "safe_details", {}).get("accounting")
+                                == "CONFIRMED"
+                            )
+                            task.finish_item(
+                                item["seq"],
+                                state="READY" if known else "BLOCKED",
+                                code=error.code,
+                                accounting="CONFIRMED" if known else "UNKNOWN",
+                            )
+                            error.delivery = (
+                                "PUBLISHED" if status == "PUBLISHED" else "NOT_PUBLISHED"
+                            )
                         except BaseException:
                             error.task_secondary = ("TASK_STATE_PERSIST_FAILED",)
                         raise error from None
@@ -329,7 +447,9 @@ def run_task(directory, transport, *, control=None, resume=False, fault_hook=Non
                 with task.transaction() as db:
                     task.set_meta(db, "state", "BLOCKED")
             except BaseException:
-                primary.task_secondary = (*getattr(primary, "task_secondary", ()),
-                                          "TASK_STATE_PERSIST_FAILED")
+                primary.task_secondary = (
+                    *getattr(primary, "task_secondary", ()),
+                    "TASK_STATE_PERSIST_FAILED",
+                )
             raise
         return task.inspect()

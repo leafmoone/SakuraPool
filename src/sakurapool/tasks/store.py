@@ -1,4 +1,4 @@
-"""Bounded SQLite authority with explicit short durable transactions."""
+"""Durable task state; v2 explicitly freezes workspace ownership and capacity."""
 
 from __future__ import annotations
 
@@ -10,10 +10,18 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
+from ..capacity import UINT64_MAX, CapacityConfig
 from ..fs_safety import plain_entry
 from ..storage.budget import BudgetExceeded, Reservation
 from ..storage.retrieval import _real_output_root
-from .plan import FORMAT, MAX_SELECTION, canonical, plan_digest, selection_digest
+from .context import (
+    LEGACY_CAPACITY,
+    WORKSPACE_FORMAT,
+    bootstrap_workspace,
+    remaining_limits,
+    resolve_workspace,
+)
+from .plan import FORMAT, canonical, plan_digest, selection_digest
 
 MAX_DB_BYTES = 32 << 20
 MAX_JOURNAL_BYTES = MAX_DB_BYTES + (1 << 20)
@@ -26,20 +34,28 @@ class TaskError(RuntimeError):
         self.code, self.phase, self.recoverable = code, phase, recoverable
 
     def public_diagnostic(self):
-        result = {"code": self.code, "phase": self.phase, "recoverable": self.recoverable,
-                  "delivery": getattr(self, "delivery", "NOT_PUBLISHED"),
-                  "accounting": getattr(self, "accounting", "UNKNOWN")}
+        result = {
+            "code": self.code,
+            "phase": self.phase,
+            "recoverable": self.recoverable,
+            "delivery": getattr(self, "delivery", "NOT_PUBLISHED"),
+            "accounting": getattr(self, "accounting", "UNKNOWN"),
+        }
         result.update(getattr(self, "safe_details", {}))
-        result["secondary"] = [*result.get("secondary", ()),
-                               *getattr(self, "task_secondary", ())]
+        result["secondary"] = [*result.get("secondary", ()), *getattr(self, "task_secondary", ())]
         if hasattr(self, "resources"):
             result["resources"] = self.resources
         return result
 
 
-def _connect(path, *, readonly=False):
-    db = sqlite3.connect(path.as_uri() + ("?mode=ro" if readonly else "?mode=rw"),
-                         uri=True, isolation_level=None, timeout=5)
+def _connect(path, *, readonly=False, capacity=None):
+    capacity = LEGACY_CAPACITY if capacity is None else capacity
+    db = sqlite3.connect(
+        path.as_uri() + ("?mode=ro" if readonly else "?mode=rw"),
+        uri=True,
+        isolation_level=None,
+        timeout=5,
+    )
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys=ON")
     if not readonly:
@@ -47,51 +63,156 @@ def _connect(path, *, readonly=False):
         db.execute("PRAGMA synchronous=FULL")
         db.execute("PRAGMA temp_store=MEMORY")
         page_size = db.execute("PRAGMA page_size").fetchone()[0]
-        db.execute(f"PRAGMA max_page_count={MAX_DB_BYTES // page_size}")
+        db.execute(f"PRAGMA max_page_count={capacity.task_db_bytes // page_size}")
     return db
 
 
+def _check_files(path, capacity):
+    if plain_entry(path).stat().st_size > capacity.task_db_bytes:
+        raise TaskError("RESOURCE_BLOCKED", "taskdb")
+    for suffix in ("-wal", "-shm", "-journal"):
+        sidecar = Path(str(path) + suffix)
+        if os.path.lexists(sidecar):
+            plain_entry(sidecar)
+            if suffix != "-journal" or sidecar.stat().st_size > capacity.task_journal_bytes:
+                raise TaskError("TASKDB_SIDECAR_CONFLICT")
+
+
+def _bounded_meta(db, key, limit, *, missing=False):
+    # length(TEXT) counts characters and stops at NUL; neither is a byte bound.
+    row = db.execute(
+        "SELECT CASE WHEN typeof(value)='text' AND length(value)<=? "
+        "AND length(CAST(value AS BLOB))<=? AND instr(value,char(0))=0 "
+        "THEN value ELSE NULL END FROM meta WHERE key=? LIMIT 2",
+        (limit, limit, key),
+    ).fetchall()
+    if not row:
+        if missing:
+            return None
+        raise TaskError("TASKDB_META_MISSING")
+    if len(row) != 1 or row[0][0] is None:
+        raise TaskError("TASK_HEADER_LIMIT")
+    raw = row[0][0]
+    # Bound nesting before the recursive JSON decoder or canonical writer runs.
+    depth = 0
+    quoted = escaped = False
+    for char in raw:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char in "[{":
+            depth += 1
+            if depth > 64:
+                raise TaskError("TASK_HEADER_LIMIT")
+        elif char in "]}":
+            depth -= 1
+    try:
+        value = json.loads(raw)
+        if len(canonical(value)) > limit:
+            raise TaskError("TASK_HEADER_LIMIT")
+        return value
+    except (ValueError, TypeError, RecursionError):
+        raise TaskError("TASK_HEADER_INVALID") from None
+
+
 class TaskDB:
-    def __init__(self, directory, *, readonly=False):
+    def __init__(self, directory, *, readonly=False, workspace=None):
         self.directory = plain_entry(Path(directory).absolute(), directory=True)
         self.path = plain_entry(self.directory / "task.sqlite")
-        if self.path.stat().st_size > MAX_DB_BYTES:
-            raise TaskError("RESOURCE_BLOCKED", "taskdb")
-        for suffix in ("-wal", "-shm", "-journal"):
-            sidecar = Path(str(self.path) + suffix)
-            if os.path.lexists(sidecar):
-                plain_entry(sidecar)
-                if suffix != "-journal" or sidecar.stat().st_size > MAX_JOURNAL_BYTES:
-                    raise TaskError("TASKDB_SIDECAR_CONFLICT")
-        self.db = _connect(self.path, readonly=readonly)
+        self.workspace = bootstrap_workspace(self.directory, workspace)
+        self.capacity = self.workspace.capacity if self.workspace is not None else LEGACY_CAPACITY
+        _check_files(self.path, self.capacity)
+        # Probe read-only first: no journal recovery, PRAGMA mutation or capacity
+        # defaults may precede durable ownership validation.
+        probe = _connect(self.path, readonly=True)
+        try:
+            version = probe.execute("PRAGMA user_version").fetchone()[0]
+            if version not in (1, 2):
+                raise TaskError("TASKDB_VERSION")
+            if version == 2 and self.workspace is None:
+                raise TaskError("TASK_WORKSPACE_CONFLICT", "plan")
+            if version == 1 and self.workspace is not None:
+                raise TaskError("TASK_WORKSPACE_CONFLICT", "plan")
+            # New tasks carry a small independent binding. Older v2 tasks use
+            # the same trusted ancestor capacity, then validate the bounded header.
+            durable_binding = _bounded_meta(probe, "workspace_binding", 16384, missing=True)
+            if durable_binding is not None:
+                resolve_workspace(durable_binding, self.directory, self.workspace)
+                if version != 2:
+                    raise TaskError("TASKDB_VERSION")
+            header = _bounded_meta(probe, "header", self.capacity.task_header_bytes)
+            if not isinstance(header, dict):
+                raise TaskError("TASK_HEADER_INVALID")
+            binding = header.get("workspace_binding") if version == 2 else None
+            if (version == 2 and (header.get("format") != WORKSPACE_FORMAT or binding is None)) or (
+                version == 1
+                and (
+                    header.get("format") != FORMAT
+                    or "workspace_binding" in header
+                    or "effective_capacity" in header
+                )
+            ):
+                raise TaskError("TASKDB_VERSION")
+            resolve_workspace(binding, self.directory, self.workspace)
+            declared_capacity = (
+                CapacityConfig.from_dict(header["effective_capacity"])
+                if version == 2
+                else LEGACY_CAPACITY
+            )
+            if declared_capacity != self.capacity:
+                raise TaskError("TASK_WORKSPACE_CONFLICT", "plan")
+            if _bounded_meta(probe, "plan_digest", 128) != plan_digest(header):
+                raise TaskError("PLAN_IDENTITY_MISMATCH", "plan")
+        except (ValueError, KeyError, TypeError, RecursionError):
+            raise TaskError("TASK_HEADER_INVALID") from None
+        finally:
+            probe.close()
+        _check_files(self.path, self.capacity)
+        self.db = _connect(self.path, readonly=readonly, capacity=self.capacity)
         self.readonly = readonly
-        if self.db.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
-            self.close()
-            raise TaskError("TASKDB_VERSION")
+        self.version = version
 
     @classmethod
     def create(cls, directory, ledger, header, rows, *, publication_path, max_bytes=512 << 20):
         directory = Path(directory).absolute()
+        workspace = getattr(ledger, "workspace", None)
+        capacity = workspace.capacity if workspace is not None else LEGACY_CAPACITY
+        binding = workspace.task_binding(directory) if workspace is not None else None
+        if "workspace_binding" in header or "effective_capacity" in header:
+            raise TaskError("TASK_HEADER_INVALID")
         parent = plain_entry(directory.parent, directory=True)
         _real_output_root(parent, ledger)
         if os.path.lexists(directory):
             raise TaskError("TASK_DIRECTORY_CONFLICT")
-        if type(max_bytes) is not int or not 0 <= max_bytes <= ledger.limits["saved_bytes"]:
+        ledger.status()
+        maximum = ledger.limits["saved_bytes"]
+        if type(max_bytes) is not int or not 0 <= max_bytes <= (
+            UINT64_MAX if maximum is None else maximum
+        ):
             raise TaskError("TASK_OUTPUT_LIMIT")
-        required = MAX_DB_BYTES + MAX_JOURNAL_BYTES + 16384
+        required = capacity.task_db_bytes + capacity.task_journal_bytes + 16384
         try:
             lease = ledger.reserve(Reservation(disk=required))
         except BudgetExceeded:
             error = TaskError("RESOURCE_BLOCKED", "create", recoverable=True)
-            remaining = max(0, ledger.limits["disk"] - ledger.status()["disk"])
-            error.resources = {"required": {"disk": required}, "remaining": {"disk": remaining},
-                               "effective_limit": ledger.limits}
+            remaining = remaining_limits(ledger, {"disk": required})["disk"]
+            error.resources = {
+                "required": {"disk": required},
+                "remaining": {"disk": remaining},
+                "effective_limit": ledger.limits,
+            }
             raise error from None
         directory.mkdir()
         path = directory / "task.sqlite"
         with path.open("xb"):
             pass
-        db = _connect(path)
+        db = _connect(path, capacity=capacity)
         try:
             db.executescript("""
                 CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -105,21 +226,23 @@ class TaskDB:
                     attempt_id TEXT PRIMARY KEY,seq INTEGER NOT NULL REFERENCES items(seq),
                     operation_id TEXT NOT NULL UNIQUE,phase TEXT NOT NULL,
                     output_lease TEXT,network_state TEXT NOT NULL DEFAULT 'NOT_STARTED',
-                    delivery TEXT NOT NULL DEFAULT 'NONE',
-                    accounting TEXT NOT NULL DEFAULT 'UNKNOWN',
+                    delivery TEXT NOT NULL DEFAULT 'NONE',accounting TEXT NOT NULL DEFAULT \
+'UNKNOWN',
                     receipt TEXT,code TEXT);
-                PRAGMA user_version=1;
             """)
+            db.execute(f"PRAGMA user_version={2 if workspace is not None else 1}")
             db.execute("BEGIN IMMEDIATE")
             count = 0
             for row in rows:
-                if count >= MAX_SELECTION:
+                if count >= capacity.freeze_count:
                     raise TaskError("RESOURCE_BLOCKED", "selection")
-                db.execute("INSERT INTO items(seq,rid,record_id,source,dataset,post_id) "
-                           "VALUES(?,?,?,?,?,?)",
-                           (count, row.rid, row.record_id, row.source, row.dataset, row.post_id))
+                db.execute(
+                    "INSERT INTO items(seq,rid,record_id,source,dataset,post_id) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (count, row.rid, row.record_id, row.source, row.dataset, row.post_id),
+                )
                 count += 1
-                if count % 512 == 0:
+                if count % capacity.record_batch == 0:
                     db.execute("COMMIT")
                     db.execute("BEGIN IMMEDIATE")
             actual_count, digest = selection_digest(
@@ -127,17 +250,34 @@ class TaskDB:
                     "SELECT seq,rid,record_id,source,dataset,post_id FROM items ORDER BY seq"
                 )
             )
-            frozen = {**header, "format": FORMAT, "selection_count": actual_count,
-                      "selection_digest": digest, "metadata": bool(header.get("metadata", False)),
-                      "output_policy": "task-relative-no-overwrite-v1"}
-            if len(canonical(frozen)) > 65536:
+            frozen = {
+                **header,
+                "format": WORKSPACE_FORMAT if workspace is not None else FORMAT,
+                "selection_count": actual_count,
+                "selection_digest": digest,
+                "metadata": bool(header.get("metadata", False)),
+                "output_policy": "task-relative-no-overwrite-v1",
+            }
+            if workspace is not None:
+                frozen.update(workspace_binding=binding, effective_capacity=capacity.to_dict())
+            if len(canonical(frozen)) > capacity.task_header_bytes:
                 raise TaskError("TASK_HEADER_LIMIT")
-            values = {"task_id": uuid.uuid4().hex, "header": frozen,
-                      "plan_digest": plan_digest(frozen), "state": "READY", "request": None,
-                      "publication_path": str(Path(publication_path).absolute()),
-                      "max_output_bytes": max_bytes, "confirmed_output_bytes": 0}
-            db.executemany("INSERT INTO meta VALUES(?,?)",
-                           [(key, canonical(value).decode()) for key, value in values.items()])
+            values = {
+                "task_id": uuid.uuid4().hex,
+                "header": frozen,
+                "plan_digest": plan_digest(frozen),
+                "state": "READY",
+                "request": None,
+                "publication_path": str(Path(publication_path).absolute()),
+                "max_output_bytes": max_bytes,
+                "confirmed_output_bytes": 0,
+            }
+            if binding is not None:
+                values["workspace_binding"] = binding
+            db.executemany(
+                "INSERT INTO meta VALUES(?,?)",
+                [(key, canonical(value).decode()) for key, value in values.items()],
+            )
             db.execute("COMMIT")
             (directory / "output").mkdir()
             with (directory / "runner.lock").open("xb") as lock:
@@ -149,11 +289,14 @@ class TaskDB:
                 if db.in_transaction:
                     db.execute("ROLLBACK")
             except BaseException:
-                error.task_secondary = (*getattr(error, "task_secondary", ()),
-                                        "TASK_ROLLBACK_FAILED")
-            # Preserve incomplete artifact, never broad cleanup or quota reset.
-            if (isinstance(error, sqlite3.OperationalError)
-                    and str(error) == "database or disk is full"):
+                error.task_secondary = (
+                    *getattr(error, "task_secondary", ()),
+                    "TASK_ROLLBACK_FAILED",
+                )
+            if (
+                isinstance(error, sqlite3.OperationalError)
+                and str(error) == "database or disk is full"
+            ):
                 converted = TaskError("RESOURCE_BLOCKED", "taskdb", recoverable=True)
                 converted.task_secondary = getattr(error, "task_secondary", ())
                 raise converted from None
@@ -165,10 +308,12 @@ class TaskDB:
             except BaseException:
                 if primary is None:
                     raise
-                primary.task_secondary = (*getattr(primary, "task_secondary", ()),
-                                          "TASK_CLOSE_FAILED")
+                primary.task_secondary = (
+                    *getattr(primary, "task_secondary", ()),
+                    "TASK_CLOSE_FAILED",
+                )
         ledger.settle(lease)
-        return cls(directory)
+        return cls(directory, workspace=workspace)
 
     @contextmanager
     def transaction(self):
@@ -183,16 +328,22 @@ class TaskDB:
                 if self.db.in_transaction:
                     self.db.execute("ROLLBACK")
             except BaseException:
-                error.task_secondary = (*getattr(error, "task_secondary", ()),
-                                        "TASK_ROLLBACK_FAILED")
-            if (isinstance(error, sqlite3.OperationalError)
-                    and str(error) == "database or disk is full"):
+                error.task_secondary = (
+                    *getattr(error, "task_secondary", ()),
+                    "TASK_ROLLBACK_FAILED",
+                )
+            if (
+                isinstance(error, sqlite3.OperationalError)
+                and str(error) == "database or disk is full"
+            ):
                 converted = TaskError("RESOURCE_BLOCKED", "taskdb", recoverable=True)
                 converted.task_secondary = getattr(error, "task_secondary", ())
                 raise converted from None
             raise
 
     def meta(self, key):
+        if key == "header":
+            return _bounded_meta(self.db, key, self.capacity.task_header_bytes)
         row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
         if row is None:
             raise TaskError("TASKDB_META_MISSING")
@@ -203,12 +354,17 @@ class TaskDB:
 
     def validate_plan(self):
         header = self.meta("header")
-        count, digest = selection_digest(self.db.execute(
-            "SELECT seq,rid,record_id,source,dataset,post_id FROM items ORDER BY seq"
-        ))
-        if (header.get("format") != FORMAT or count != header.get("selection_count")
-                or digest != header.get("selection_digest")
-                or plan_digest(header) != self.meta("plan_digest")):
+        count, digest = selection_digest(
+            self.db.execute(
+                "SELECT seq,rid,record_id,source,dataset,post_id FROM items ORDER BY seq"
+            )
+        )
+        if (
+            header.get("format") != (WORKSPACE_FORMAT if self.version == 2 else FORMAT)
+            or count != header.get("selection_count")
+            or digest != header.get("selection_digest")
+            or plan_digest(header) != self.meta("plan_digest")
+        ):
             raise TaskError("PLAN_IDENTITY_MISMATCH", "plan")
         return header
 
@@ -223,25 +379,26 @@ class TaskDB:
         if type(limit) is not int or not 1 <= limit <= 8:
             raise TaskError("TASK_IDENTITY_INVALID")
         connection = self.db if db is None else db
-        # CASE gates prevent materializing oversized selected values; selecting
-        # first READY before validation avoids silently skipping corrupt identity.
-        row = connection.execute(
+        rows = connection.execute(
             "SELECT CASE WHEN typeof(seq)='integer' THEN seq ELSE NULL END AS seq,"
             "CASE WHEN typeof(rid)='integer' THEN rid ELSE NULL END AS rid,"
             "CASE WHEN typeof(record_id)='text' AND length(record_id)=32 "
-            "AND instr(record_id,char(0))=0 "
-            "THEN record_id ELSE NULL END AS record_id FROM items "
-            "WHERE state='READY' ORDER BY seq LIMIT ?", (limit,)).fetchall()
-        for candidate in row:
-            if (candidate["record_id"] is None
-                    or type(candidate["seq"]) is not int
-                    or not 0 <= candidate["seq"] < 1 << 64
-                    or type(candidate["rid"]) is not int
-                    or not 0 <= candidate["rid"] < 1 << 64):
+            "AND instr(record_id,char(0))=0 THEN record_id ELSE NULL END AS record_id "
+            "FROM items WHERE state='READY' ORDER BY seq LIMIT ?",
+            (limit,),
+        ).fetchall()
+        for row in rows:
+            if (
+                row["record_id"] is None
+                or type(row["seq"]) is not int
+                or not 0 <= row["seq"] < 1 << 64
+                or type(row["rid"]) is not int
+                or not 0 <= row["rid"] < 1 << 64
+            ):
                 raise TaskError("TASK_IDENTITY_INVALID")
         if limit != 1:
-            return [dict(candidate) for candidate in row]
-        return None if not row else dict(row[0])
+            return [dict(row) for row in rows]
+        return None if not rows else dict(rows[0])
 
     def _pipeline_claim(self, expected=None, *, window=1):
         with self.transaction() as db:
@@ -253,108 +410,135 @@ class TaskDB:
                 candidates = self._pipeline_candidate(db, limit=window)
                 if window == 1:
                     candidates = [] if candidates is None else [candidates]
-                row = next((candidate for candidate in candidates
-                            if candidate == expected), None)
+                row = next((candidate for candidate in candidates if candidate == expected), None)
                 if row is None:
                     raise TaskError("TASK_IDENTITY_INVALID")
-            if row is None:
-                return None
-            attempt, operation = uuid.uuid4().hex, uuid.uuid4().hex
-            db.execute("INSERT INTO attempts(attempt_id,seq,operation_id,phase) VALUES(?,?,?,?)",
-                       (attempt, row["seq"], operation, "CLAIMED"))
-            db.execute("UPDATE items SET state='IN_PROGRESS',attempt_id=?,accounting='NONE' "
-                       "WHERE seq=?", (attempt, row["seq"]))
-            return row | {"attempt_id": attempt, "operation_id": operation}
+            return self._claim_row(db, row)
+
+    def _claim_row(self, db, row):
+        if row is None:
+            return None
+        attempt, operation = uuid.uuid4().hex, uuid.uuid4().hex
+        db.execute(
+            "INSERT INTO attempts(attempt_id,seq,operation_id,phase) VALUES(?,?,?,?)",
+            (attempt, row["seq"], operation, "CLAIMED"),
+        )
+        db.execute(
+            "UPDATE items SET state='IN_PROGRESS',attempt_id=?,accounting='NONE' WHERE seq=?",
+            (attempt, row["seq"]),
+        )
+        return dict(row) | {"attempt_id": attempt, "operation_id": operation}
 
     def claim(self):
-        """Claim one seq in a short transaction, only under runner ownership."""
         with self.transaction() as db:
             if self.meta("request") is not None:
                 return None
-            row = db.execute(
-                "SELECT * FROM items WHERE state='READY' ORDER BY seq LIMIT 1"
-            ).fetchone()
-            if row is None:
-                return None
-            attempt = uuid.uuid4().hex
-            operation = uuid.uuid4().hex
-            db.execute("INSERT INTO attempts(attempt_id,seq,operation_id,phase) VALUES(?,?,?,?)",
-                       (attempt, row["seq"], operation, "CLAIMED"))
-            db.execute("UPDATE items SET state='IN_PROGRESS',attempt_id=?,accounting='NONE' "
-                       "WHERE seq=?",
-                       (attempt, row["seq"]))
-            return dict(row) | {"attempt_id": attempt, "operation_id": operation}
+            return self._claim_row(
+                db,
+                db.execute(
+                    "SELECT * FROM items WHERE state='READY' ORDER BY seq LIMIT 1"
+                ).fetchone(),
+            )
 
     def event(self, attempt, event, payload):
-        allowed = {"NETWORK_START", "OUTPUT_RESERVED", "PREPARED", "PUBLISHED", "SETTLED"}
-        if event not in allowed:
+        previous = {
+            "NETWORK_START": "CLAIMED",
+            "OUTPUT_RESERVED": "NETWORK_START",
+            "PREPARED": "OUTPUT_RESERVED",
+            "PUBLISHED": "PREPARED",
+            "SETTLED": "PUBLISHED",
+        }
+        if event not in previous:
             raise TaskError("ATTEMPT_EVENT_INVALID")
         with self.transaction() as db:
-            # Only current newly-generated attempt is admitted here; payload
-            # receipt came through the 16KiB typed RPC gate, not historical items.
             row = db.execute("SELECT * FROM attempts WHERE attempt_id=?", (attempt,)).fetchone()
             if row is None:
                 raise TaskError("ATTEMPT_IDENTITY_MISSING")
-            previous = {"NETWORK_START": "CLAIMED", "OUTPUT_RESERVED": "NETWORK_START",
-                        "PREPARED": "OUTPUT_RESERVED", "PUBLISHED": "PREPARED",
-                        "SETTLED": "PUBLISHED"}
             if row["phase"] != previous[event]:
                 raise TaskError("ATTEMPT_EVENT_ORDER_INVALID")
             db.execute("UPDATE attempts SET phase=? WHERE attempt_id=?", (event, attempt))
             if event == "NETWORK_START":
-                db.execute("UPDATE attempts SET network_state='UNKNOWN' WHERE attempt_id=?",
-                           (attempt,))
+                db.execute(
+                    "UPDATE attempts SET network_state='UNKNOWN' WHERE attempt_id=?", (attempt,)
+                )
             elif event == "OUTPUT_RESERVED":
-                db.execute("UPDATE attempts SET output_lease=? WHERE attempt_id=?",
-                           (payload["lease"], attempt))
+                db.execute(
+                    "UPDATE attempts SET output_lease=? WHERE attempt_id=?",
+                    (payload["lease"], attempt),
+                )
             elif event == "PREPARED":
-                receipt = canonical({**payload, "task_id": self.meta("task_id"),
-                                     "plan_digest": self.meta("plan_digest"),
-                                     "operation_id": row["operation_id"]}).decode()
+                receipt = canonical(
+                    {
+                        **payload,
+                        "task_id": self.meta("task_id"),
+                        "plan_digest": self.meta("plan_digest"),
+                        "operation_id": row["operation_id"],
+                    }
+                ).decode()
                 db.execute("UPDATE attempts SET receipt=? WHERE attempt_id=?", (receipt, attempt))
                 db.execute("UPDATE items SET receipt=? WHERE seq=?", (receipt, row["seq"]))
             elif event == "PUBLISHED":
-                db.execute("UPDATE attempts SET delivery='PUBLISHED' WHERE attempt_id=?",
-                           (attempt,))
+                db.execute(
+                    "UPDATE attempts SET delivery='PUBLISHED' WHERE attempt_id=?", (attempt,)
+                )
                 db.execute("UPDATE items SET delivery='PUBLISHED' WHERE seq=?", (row["seq"],))
             elif event == "SETTLED":
                 prepared = json.loads(row["receipt"])
                 amount = sum(proof["bytes"] for proof in prepared["receipt"].values())
                 if row["accounting"] != "CONFIRMED":
-                    self.set_meta(db, "confirmed_output_bytes",
-                                  self.meta("confirmed_output_bytes") + amount)
-                # Evidence is this operation's successful settle return and all
-                # successful range context exits, not ledger absence/counter delta.
-                db.execute("UPDATE attempts SET accounting='CONFIRMED',network_state='CONFIRMED' "
-                           "WHERE attempt_id=?", (attempt,))
-                db.execute("UPDATE items SET delivery='PUBLISHED',accounting='CONFIRMED' "
-                           "WHERE seq=?", (row["seq"],))
+                    self.set_meta(
+                        db, "confirmed_output_bytes", self.meta("confirmed_output_bytes") + amount
+                    )
+                db.execute(
+                    "UPDATE attempts SET accounting='CONFIRMED',network_state='CONFIRMED' "
+                    "WHERE attempt_id=?",
+                    (attempt,),
+                )
+                db.execute(
+                    "UPDATE items SET delivery='PUBLISHED',accounting='CONFIRMED' WHERE seq=?",
+                    (row["seq"],),
+                )
 
     def finish_item(self, seq, *, state, code=None, accounting=None):
         with self.transaction() as db:
             if state == "READY" and accounting == "CONFIRMED" and code is not None:
-                db.execute("UPDATE attempts SET accounting='CONFIRMED',network_state='CONFIRMED' "
-                           "WHERE attempt_id=(SELECT attempt_id FROM items WHERE seq=?)", (seq,))
-            db.execute("UPDATE items SET state=?,code=?,accounting=COALESCE(?,accounting) "
-                       "WHERE seq=?", (state, code, accounting, seq))
+                db.execute(
+                    "UPDATE attempts SET accounting='CONFIRMED',network_state='CONFIRMED' "
+                    "WHERE attempt_id=(SELECT attempt_id FROM items WHERE seq=?)",
+                    (seq,),
+                )
+            db.execute(
+                "UPDATE items SET state=?,code=?,accounting=COALESCE(?,accounting) WHERE seq=?",
+                (state, code, accounting, seq),
+            )
 
     def inspect(self):
-        stats = [dict(row) for row in self.db.execute(
-            "SELECT state,delivery,accounting,count(*) AS count FROM items "
-            "GROUP BY state,delivery,accounting"
-        )]
+        stats = [
+            dict(row)
+            for row in self.db.execute(
+                "SELECT state,delivery,accounting,count(*) AS count FROM items "
+                "GROUP BY state,delivery,accounting"
+            )
+        ]
         errors = self.db.execute("SELECT count(*) FROM items WHERE code IS NOT NULL").fetchone()[0]
-        confirmed = self.db.execute("SELECT count(*) FROM items WHERE accounting='CONFIRMED' "
-                                    "AND delivery='PUBLISHED'").fetchone()[0]
+        confirmed = self.db.execute(
+            "SELECT count(*) FROM items WHERE accounting='CONFIRMED' AND delivery='PUBLISHED'"
+        ).fetchone()[0]
         unknown = self.db.execute(
             "SELECT count(*) FROM items WHERE accounting='UNKNOWN'"
         ).fetchone()[0]
-        return {"requested_count": self.meta("header")["selection_count"],
-                "delivered_confirmed": confirmed, "error_count": errors,
-                "unknown_accounting_count": unknown,
-                "task_id": self.meta("task_id"), "plan_digest": self.meta("plan_digest"),
-                "state": self.meta("state"), "request": self.meta("request"),
-                "header": self.meta("header"), "items": stats}
+        return {
+            "requested_count": self.meta("header")["selection_count"],
+            "delivered_confirmed": confirmed,
+            "error_count": errors,
+            "unknown_accounting_count": unknown,
+            "task_id": self.meta("task_id"),
+            "plan_digest": self.meta("plan_digest"),
+            "state": self.meta("state"),
+            "request": self.meta("request"),
+            "header": self.meta("header"),
+            "items": stats,
+        }
 
     @contextmanager
     def runner_lock(self):
@@ -364,9 +548,11 @@ class TaskDB:
             try:
                 if os.name == "nt":
                     import msvcrt
+
                     msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
                 else:
                     import fcntl
+
                     fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
                 raise TaskError("RUNNER_BUSY", recoverable=True) from None
@@ -386,8 +572,10 @@ class TaskDB:
                 except BaseException:
                     if primary is None:
                         raise
-                    primary.task_secondary = (*getattr(primary, "task_secondary", ()),
-                                              "TASK_UNLOCK_FAILED")
+                    primary.task_secondary = (
+                        *getattr(primary, "task_secondary", ()),
+                        "TASK_UNLOCK_FAILED",
+                    )
         finally:
             primary = sys.exc_info()[1]
             try:
@@ -395,8 +583,10 @@ class TaskDB:
             except BaseException:
                 if primary is None:
                     raise
-                primary.task_secondary = (*getattr(primary, "task_secondary", ()),
-                                          "TASK_LOCK_CLOSE_FAILED")
+                primary.task_secondary = (
+                    *getattr(primary, "task_secondary", ()),
+                    "TASK_LOCK_CLOSE_FAILED",
+                )
 
     def close(self):
         self.db.close()
@@ -410,5 +600,4 @@ class TaskDB:
         except BaseException:
             if primary is None:
                 raise
-            primary.task_secondary = (*getattr(primary, "task_secondary", ()),
-                                      "TASK_CLOSE_FAILED")
+            primary.task_secondary = (*getattr(primary, "task_secondary", ()), "TASK_CLOSE_FAILED")

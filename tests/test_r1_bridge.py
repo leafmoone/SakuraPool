@@ -171,7 +171,8 @@ def test_handshake_reports_protocol_version_and_capabilities(worker_path):
         # The constructor already validated protocol_version agreement; the
         # ready line also reports the worker build and its capabilities.
         assert worker.capabilities == (
-            "hash_file", "fetch_range", "scan_tar", "scan_http_tar", "bounded_session_v1")
+            "hash_file", "fetch_range", "scan_tar", "scan_http_tar", "bounded_session_v1",
+            "production_transfer_v2")
         assert worker.worker_version == "0.1.0"
         assert bridge.PROTOCOL_VERSION == 1
 

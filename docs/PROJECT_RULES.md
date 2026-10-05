@@ -1,6 +1,6 @@
 # SakuraPool 项目工作流程与边界
 
-本文件是项目唯一的当前工作流程与边界说明。阶段执行单决定本次授权；本文记录产品方向，不代表未实现能力已经存在，也不替代阶段授权。
+本文件记录当前产品边界；阶段执行单决定本次授权，plan.md为唯一当前执行路线，不代表进行中能力已实现。P5-D固定20261004T143905Z-upload范围验证已完成并合入main 62f86cc487af41de7d84bfb5a14d2fb1e0e172ac；全球索引完成不宣称。当前P6-A仅用户workspace/显式资源与容量配置，不重建索引或操作索引机器。P2 durable v4 / P3 runtime v2 / Publication v2（4/2/2）；旧R1/P3/P4描述均为历史阶段约束，P4固定路径及累计上限仅legacy域，旧账本/pending不自动迁移。
 
 ## 1. 产品路径
 
@@ -9,13 +9,13 @@ SakuraPool 是大型 TAR/WebDataset 的查询、定位和选择性提取工具�
 - 管理员链路：远端 TAR 的一次性索引构建 → durable 索引 → runtime 编译 → 校验 → 发布到数据仓库固定文件夹。
 - 用户链路：安装／校验已发布索引 → 查询 tag/source/dataset → 定位图片与 JSON → Range 读取目标字节 → 输出本地小数据集。
 
-远端扫描、索引发布和 Range 提取是后续阶段能力，不是当前 P3 已实现能力。普通用户不需要完整本地 TAR；P2 LocalTarScanner 保留为测试、本地数据输入和校验能力，不是线上用户的前置条件。
+历史P3阶段不含远端扫描/发布/Range；当前已验证Publication消费与固定版本有界Range提取，不由此自动授权索引扫描或上传。普通用户不需要完整本地 TAR；P2 LocalTarScanner 保留为测试、本地数据输入和校验能力，不是线上用户的前置条件。
 
 索引扫描可能读取完整远端对象，必须单独计量网络字节与临时空间；不能把“不落盘”称为“没有下载流量”。
 
 ## 2. 索引现状与构建时机
 
-目前没有可直接导入的现成索引，将来由管理员扫描一次 TAR 建立。不再把搜索 hfutils/CheeseChaser 旧索引设为前置任务。
+已有固定范围已验证Publication（见reports/P5D/REPORT.md），用户默认仅需完整Publication，不附P2或独立runtime副本；不等于全球索引覆盖。不再把搜索 hfutils/CheeseChaser 旧索引设为前置任务。
 
 P4 runtime 以合法已发布索引作为输入契约开展开发；经授权的小仓库可先生成测试索引完成联调。“以已有索引为开发假设”不等于远端现在已有索引。
 
@@ -43,7 +43,7 @@ P4 开始时按另行下发的执行单取得实际文件清单、对象版本�
 
 `storage_id` 是 Storage Profile ID；`object_id` 是确定版本对象身份；`repo_type` 与 `archive_format` 分离。
 
-当前 Local strong-SHA 输出与远端仓库位置须显式绑定并核验，不从目录猜 source，不静默改 backend。不推翻已验收 P2/P3；必要适配须明确提出、版本化并审查，保持 P2 durable v4 / P3 runtime v1 的已验收契约。
+当前 Local strong-SHA 输出与远端仓库位置须显式绑定并核验，不从目录猜 source，不静默改 backend。不推翻已验收 P2/P3；必要适配须明确提出、版本化并审查，保持 P2 durable v4 / P3 runtime v2 / Publication v2 的已验收契约。
 
 远端 Range 正常路径不得每次全 TAR 下载重算 SHA；普通下载也不得在 Range 失效时静默退回整 TAR 下载。
 
@@ -72,7 +72,7 @@ P4 开始时按另行下发的执行单取得实际文件清单、对象版本�
 
 明确 source、wheel、installed package 对应 SHA，不用旧 wheel 测新 tests。新 workload 必须重新绑定 generator/options/code/environment 指纹，不能将旧规模输出拼成新证据。
 
-使用真实 CLI 入口，记录命令、退出码、跳过项、日志字节数和哈希。源码未改不反复重跑 5M；代码或 workload 改动后按影响范围重测。保留历史证据，但明确唯一当前入口。
+使用真实 CLI 入口，记录命令、退出码与跳过项；仅当前用户明确要求时记录日志字节数/哈希，不默认生成日志或目录hash清单。源码未改不反复重跑 5M；代码或 workload 改动后按影响范围重测。保留历史证据，但明确唯一当前入口。
 
 当前 P3 性能入口：[`reports/P3/bench-repair/benchmark.json`](../reports/P3/bench-repair/benchmark.json)。完整报告见 [`reports/P3/report.md`](../reports/P3/report.md)，installed 验证另见 [`benchmark-installed.json`](../reports/P3/bench-repair/benchmark-installed.json)。这些是合成 workload 证据，不是网络性能、真实全库或 21M 性能保证；旧 benchmark 不是当前验收入口。
 

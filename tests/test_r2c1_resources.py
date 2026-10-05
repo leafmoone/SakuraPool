@@ -20,6 +20,7 @@ from sakurapool.storage.production_resources import (
     STAGE_DISK_CAP,
     STREAM_MEMORY,
     ProductionFootprint,
+    protocolmemory,
 )
 from sakurapool.storage.production_stage import _json_bounded
 from sakurapool.storage.rust_index import RustScanAuditError
@@ -30,7 +31,7 @@ twohop = _twohop
 @pytest.mark.parametrize("requested", [1, 64 << 10, 1 << 20, 8 << 20])
 def test_range_requested_bytes_only(requested):
     footprint = ProductionFootprint.admit("range", requested)
-    assert footprint.memory == (32 << 20) + 2 * requested
+    assert footprint.memory == (32 << 20) + 2 * requested + protocolmemory()
     assert footprint.artifacts == requested
     assert footprint.memory < 256 << 20
 
@@ -39,7 +40,8 @@ def test_range_requested_bytes_only(requested):
 def test_stream_memory_independent_tar_size(mode):
     small = ProductionFootprint.admit(mode, 64 << 20)
     large = ProductionFootprint.admit(mode, 128 << 20)
-    assert small.memory == large.memory == STREAM_MEMORY == 128 << 20
+    assert STREAM_MEMORY == 128 << 20
+    assert small.memory == large.memory == STREAM_MEMORY + protocolmemory()
     assert small.artifacts == METADATA_CAP + RECORD_CAP + 4096 + (
         small.object_bytes if mode == "download-then-scan" else 0
     )

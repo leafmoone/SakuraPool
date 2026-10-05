@@ -5,8 +5,13 @@ B: recoverable serial task plan/state; certified real closure complete, see
 [REAL_CLOSURE_REPORT](../reports/P5B/REAL_CLOSURE_REPORT.md).
 C: bounded local pipeline/concurrency; approved and merged. Default workers=1;
 2/4 are explicit upper bounds, constrained by object affinity and admission.
-D: production-scale validation; currently authorized and in progress, not completed.
-Existing small canaries do not certify complete production-scale input coverage.
+D: complete for the fixed 20261004T143905Z-upload scope, merged at
+62f86cc487af41de7d84bfb5a14d2fb1e0e172ac; see reports/P5D/REPORT.md.
+Independent semantics remain subset-only; global index completion is not claimed.
+P6-A: explicit user Workspace, resource policy and concentrated capacity config;
+[plan.md](../plan.md) is the single current implementation route. Prior B root/cap
+constraints below describe legacy P4 only, not permission to migrate its ledger.
+Index contracts are P2 durable v4 / P3 runtime v2 / Publication v2 (4/2/2).
 PublicationSession remains serial/same-thread; task concurrency is owned by the
 coordinator and its lanes, not a shared session scheduler.
 
