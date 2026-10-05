@@ -257,6 +257,16 @@ class RustProductionTransport:
             with self._persistent_worker_body(worker_type, budget) as worker:
                 yield worker
         except BaseException as primary:
+            candidate = getattr(self, "_conservative_candidate", None)
+            if (isinstance(primary, RemoteIOError)
+                    and getattr(self, "_transfer_finalizer_owner", False)
+                    and getattr(self, "_request_terminal", False)
+                    and candidate is not None and not candidate["used"]
+                    and primary.code == candidate["code"]
+                    and not getattr(primary, "finalization_secondary", ())):
+                # Defer, never confirm: outer resource/ledger gates own the verdict.
+                self._deferred_network_error = primary
+                raise
             self._lane_failed = True
             if self._lane_worker is not None:
                 try:
@@ -307,10 +317,13 @@ class RustProductionTransport:
                 worker.close()
                 raise RustWorkerError("execution channel capability unavailable")
             self._lane_requests = self._lane_body = self._lane_attempts = 0
-        yield self._lane_worker
-        self._lane_requests += 1
-        self._lane_body += budget["body"]
-        self._lane_attempts += budget["attempts"]
+        try:
+            yield self._lane_worker
+        finally:
+            if getattr(self, "_request_terminal", False):
+                self._lane_requests += 1
+                self._lane_body += budget["body"]
+                self._lane_attempts += budget["attempts"]
 
     def _admit_generation(self, body, attempts, requests):
         # Session credit only: every request still reserves its real ledger quota.
@@ -828,7 +841,7 @@ class RustProductionTransport:
                 ):
                     self._conservative_candidate = {
                         "leases": (lease1, lease2), "maximum": body_budget,
-                        "observed": accounting["body"], "used": False,
+                        "observed": accounting["body"], "used": False, "code": safe_code,
                     }
                 raise RemoteIOError(
                     "Rust production request rejected",
@@ -947,15 +960,14 @@ class RustProductionTransport:
             self._request_worker = None
             self._request_terminal = False
             self._conservative_candidate = None
-            result = self._call(
-                obj,
-                root,
-                start=start,
-                length=length,
-                condition=condition,
-                mode=mode,
-                json_limit=json_limit,
-            )
+            self._transfer_finalizer_owner = True
+            try:
+                result = self._call(
+                    obj, root, start=start, length=length, condition=condition,
+                    mode=mode, json_limit=json_limit,
+                )
+            finally:
+                self._transfer_finalizer_owner = False
             body = root / "body"
             raw = b""
             if mode == "range":
@@ -1100,6 +1112,23 @@ class RustProductionTransport:
                 # Earlier unresolved requests on this channel cannot be washed by
                 # a later confirmed chunk. Historical ledger leases are separate.
                 self._unresolved_network = True
+            deferred = getattr(self, "_deferred_network_error", None)
+            if deferred is not None:
+                self._deferred_network_error = None
+                if (deferred is not primary or failed
+                        or getattr(primary, "_conservative_finalized", None)
+                        is not _CONSERVATIVE_FINALIZED):
+                    self._lane_failed = True
+                    self._unresolved_network = True
+                    try:
+                        if self._lane_worker is not None:
+                            self._lane_worker.cancel()
+                    except BaseException:
+                        if primary is not None:
+                            primary.finalization_secondary = (
+                                *getattr(primary, "finalization_secondary", ()), "worker_cancel")
+                        else:
+                            raise
             if failed:
                 if primary is None:
                     if first_secondary is not None and not isinstance(first_secondary, Exception):
@@ -1219,10 +1248,17 @@ class RustProductionTransport:
             result = self._verify_conditions_body(candidate)
             self._live_proofs.add(proof_key(result, test=self._test))
             return result
-        except BaseException:
+        except BaseException as error:
             self._live_proofs.clear()
             self._objects.clear()
-            if getattr(self, "_persistent", False):
+            confirmed = (
+                isinstance(error, RemoteIOError)
+                and error.accounting_state == "CONFIRMED"
+                and getattr(error, "_conservative_finalized", None) is _CONSERVATIVE_FINALIZED
+                and not getattr(error, "finalization_secondary", ())
+                and not getattr(self, "_unresolved_network", False)
+            )
+            if getattr(self, "_persistent", False) and not confirmed:
                 self._lane_failed = True
             raise
         finally:
