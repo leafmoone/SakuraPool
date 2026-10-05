@@ -37,6 +37,24 @@ class StreamPlan:
     def saved_bytes(self):
         return self.image_bytes + self.metadata_bytes
 
+    @property
+    def max_chunk(self):
+        return min(self.chunk_bytes, max(self.image_bytes, self.metadata_bytes))
+
+    @property
+    def generation_body(self):
+        return 2 * self.saved_bytes + 16 * self.chunk_count
+
+    @property
+    def generation_attempts(self):
+        return 4 * self.chunk_count
+
+    def lengths(self):
+        """Yield actual Range lengths without constructing a chunk-sized list."""
+        for metadata in (False, True):
+            for _, length in self.chunks(metadata=metadata):
+                yield length
+
     def chunks(self, *, metadata=False):
         offset = self.metadata_offset if metadata else self.image_offset
         remaining = self.metadata_bytes if metadata else self.image_bytes
@@ -86,6 +104,12 @@ class PreparedFetch:
     def __post_init__(self):
         if self._provenance is not _FACTORY or self._owner != get_ident():
             raise PublicationCorrupt("prepared descriptor must be owner-created")
+
+    @property
+    def transport_identity(self):
+        # Authority tuple is selected by the bounded SQL projection below.
+        endpoint, repo_id, repo_type, revision, path, size = self.catalog_row[:6]
+        return endpoint, repo_id, repo_type, revision, path, int.from_bytes(size, "big")
 
     @classmethod
     def _prepare(cls, pub, record_id, *, capacity=None):

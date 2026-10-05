@@ -1,7 +1,6 @@
 """Locked HTTP/1 boundaries; loopback only, explicitly rebuilt worker."""
 
 import json
-import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -49,8 +48,10 @@ def test_configuration_boundary_before_spawn(monkeypatch):
     ids=["80k", "decoded-over-limit", "maximum-one-value", "maximum-100-fields", "101-fields"],
 )
 def test_actual_production_header_boundary(tmp_path, decoded_bytes, field_count, limit, accepted):
-    binary = Path(os.environ["SAKURAPOOL_STREAM_WORKER"]).resolve()
-    assert binary.is_file()
+    from conftest import resolve_r1_worker
+
+    binary = resolve_r1_worker()
+    assert binary, "set SAKURAPOOL_RUST_WORKER to the current built worker"
     hits = []
     fields = [("Content-Length", "1"), ("Content-Range", "bytes 0-0/1"), ("ETag", '"v1"')]
     fields.extend((f"X-{i}", "a") for i in range(field_count - 4))

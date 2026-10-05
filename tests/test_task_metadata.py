@@ -38,7 +38,7 @@ def test_metadata_actual_delivered_receipt(setup, monkeypatch, metadata_size):
         # Flagged metadata must be a JSON object; an empty extent is not one.
         with pytest.raises(TaskError) as caught:
             run_task(directory, Transport(), control=object())
-        assert caught.value.code == "publication_range"
+        assert caught.value.code == "publication_metadata"
         assert caught.value.safe_details["accounting"] == "UNKNOWN"
         assert caught.value.safe_details["delivery"] == "NOT_PUBLISHED"
         with TaskDB(directory, readonly=True) as task:

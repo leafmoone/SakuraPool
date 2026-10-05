@@ -193,12 +193,30 @@ def preflight(task, pub, item, transport, *, prepared=None, proof_warm=None, led
     output = _real_output_root(task.directory / "output", ledger)
     if os.path.lexists(output / item["record_id"]):
         raise TaskError("OUTPUT_CONFLICT", "preflight")
-    proof_cached = (
-        (pub.content_digest, runtime.snapshot_id, loc["object_idx"], transport, transport.ledger)
-        in pub._verified
-        if proof_warm is None
-        else proof_warm
-    )
+    if proof_warm is None:
+        predict = getattr(transport, "predict_warm", None)
+        if callable(predict):
+            from ..storage.prepared_fetch import PreparedFetch, stream_plan
+
+            descriptor = (
+                prepared
+                if prepared is not None
+                else PreparedFetch._prepare(pub, item["record_id"], capacity=capacity)
+            )
+            proof_cached = predict(
+                descriptor.transport_identity,
+                stream_plan(loc, size, metadata=metadata, capacity=capacity),
+            )
+        else:
+            proof_cached = (
+                pub.content_digest,
+                runtime.snapshot_id,
+                loc["object_idx"],
+                transport,
+                transport.ledger,
+            ) in pub._verified
+    else:
+        proof_cached = proof_warm
     range_count, max_chunk = chunk_plan(loc["image_size"], meta_size, capacity)
     required = {
         "saved_samples": 1,
@@ -407,6 +425,9 @@ def run_task(
                                     }.items():
                                         if details.get(key) in allowed:
                                             error.safe_details[key] = details[key]
+                                    from .pipeline import _safe_diagnostic
+
+                                    error.safe_details.update(_safe_diagnostic(primary))
                                     error.safe_details["secondary"] = [
                                         v
                                         for v in details.get("secondary", ())

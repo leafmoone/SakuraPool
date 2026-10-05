@@ -260,10 +260,11 @@ class RustProductionTransport:
                     )
             raise
 
-    def _generation_budget(self):
+    def _generation_budget(self, *, refresh=True):
         # Session credit bounds protocol work, not a cumulative user quota.
         # Real ledger reservations remain authoritative for every operation.
-        self.ledger.status()  # Refresh workspace policy under its authoritative lock.
+        if refresh:
+            self.ledger.status()  # Refresh policy only from an authorized lane operation.
         maximum = max(self.capacity.range_chunk_bytes, self.capacity.metadata_max_bytes)
         body = 256 * (maximum + 1)
         if body >= 1 << 64:
@@ -533,11 +534,23 @@ class RustProductionTransport:
             matches = [obj for key, obj in self._objects.items() if key[:6] == identity]
             if len(matches) != 1 or proof_key(matches[0], test=self._test) not in self._live_proofs:
                 return False
-            credit = self._generation_budget()
+            from .prepared_fetch import StreamPlan
+
+            if isinstance(lengths, StreamPlan):
+                requests = lengths.chunk_count
+                body = lengths.generation_body
+                attempts = lengths.generation_attempts
+            else:
+                requests = len(lengths)
+                body = sum(n * 2 + 16 for n in lengths)
+                attempts = 4 * requests
+            # Coordinator prediction cannot invoke the lane's owner-ledger RPC.
+            # Actual admission refreshes policy and reserves; this is credit only.
+            credit = self._generation_budget(refresh=False)
             return (
-                self._lane_requests + len(lengths) <= 256
-                and self._lane_body + sum(n * 2 + 16 for n in lengths) <= credit["body"]
-                and self._lane_attempts + 4 * len(lengths) <= credit["attempts"]
+                self._lane_requests + requests <= 256
+                and self._lane_body + body <= credit["body"]
+                and self._lane_attempts + attempts <= credit["attempts"]
             )
 
     def verified_object(self, candidate: ProviderObject, *, lengths=None):
@@ -545,9 +558,16 @@ class RustProductionTransport:
             if lengths is None:
                 self._admit_generation((16 << 20) + 16, 20, 5)
             else:
-                self._admit_generation(
-                    sum(n * 2 + 16 for n in lengths), 4 * len(lengths), len(lengths)
-                )
+                from .prepared_fetch import StreamPlan
+
+                if isinstance(lengths, StreamPlan):
+                    self._admit_generation(
+                        lengths.generation_body, lengths.generation_attempts, lengths.chunk_count
+                    )
+                else:
+                    self._admit_generation(
+                        sum(n * 2 + 16 for n in lengths), 4 * len(lengths), len(lengths)
+                    )
         return self._verified_object_body(candidate)
 
     def _verified_object_body(self, candidate: ProviderObject):
@@ -620,6 +640,7 @@ class RustProductionTransport:
         if self._closed:
             raise RemoteIOError("closed production transport")
         secondary = ()
+        worker_code = "worker_protocol"
         try:
             return self._call_accounted(
                 obj,
@@ -631,6 +652,7 @@ class RustProductionTransport:
                 json_limit=json_limit,
             )
         except RustWorkerError as error:
+            worker_code = error.diagnostic_code
             # Preserve fixed cleanup evidence, never raw worker diagnostics.
             secondary = tuple(
                 value
@@ -638,7 +660,12 @@ class RustProductionTransport:
                 if type(value) is str
                 and value in {"worker_close", "worker_cancel", "worker_constructor_shutdown"}
             )[:16]
-        converted = RemoteIOError("Rust production request rejected; accounting uncertain")
+        converted = RemoteIOError(
+            "Rust production request rejected; accounting uncertain",
+            code=worker_code,
+            phase="worker",
+            accounting="UNKNOWN",
+        )
         converted.finalization_secondary = secondary
         raise converted
 

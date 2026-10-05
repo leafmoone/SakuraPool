@@ -28,8 +28,25 @@ def resolve_r1_worker(environ: dict[str, str] | None = None) -> str | None:
     """
     env = os.environ if environ is None else environ
     explicit = env.get("SAKURAPOOL_RUST_WORKER", "")
-    if explicit:
-        return explicit if os.path.isfile(explicit) else None
+    stream = env.get("SAKURAPOOL_STREAM_WORKER", "")
+    expected = env.get("SAKURAPOOL_EXPECTED_STREAM_WORKER", "")
+    configured = [value for value in (explicit, stream, expected) if value]
+    if configured:
+        paths = [Path(value) for value in configured]
+        if any(not path.is_absolute() for path in paths):
+            raise ValueError("worker environment paths must be absolute")
+        if (
+            len(
+                {
+                    str(path.resolve()).casefold() if os.name == "nt" else str(path.resolve())
+                    for path in paths
+                }
+            )
+            != 1
+        ):
+            raise ValueError("worker environment aliases disagree")
+        chosen = explicit or stream or expected
+        return chosen if os.path.isfile(chosen) else None
     for candidate in R1_WORKER_CANDIDATES:
         if os.path.isfile(candidate):
             return candidate

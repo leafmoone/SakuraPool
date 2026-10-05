@@ -35,6 +35,14 @@ _ZERO_BUDGET = {"body": 0, "disk": 0, "inflight": 0, "attempts": 0}
 class RustWorkerError(RuntimeError):
     """Static failure surface for the Rust worker bridge."""
 
+    def __init__(self, message):
+        super().__init__(message)
+        self.diagnostic_code = {
+            "worker timed out": "worker_timeout",
+            "worker exited": "worker_eof",
+            "worker pipe failure": "worker_eof",
+        }.get(message, "worker_protocol")
+
 
 def _json_peak(raw, *, max_nodes=PROTOCOL_MAX_NODES):
     """Lexically bound allocations BEFORE UTF-8 decoding or json.loads.

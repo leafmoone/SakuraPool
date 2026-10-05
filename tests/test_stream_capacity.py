@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
 import pytest
 
@@ -71,11 +69,10 @@ def test_guarded_workspace_capacity_and_clone(tmp_path):
 
 @pytest.mark.parametrize("header_limit", [65536, 32])
 def test_actual_rust_range_over_eight_mib(tmp_path, header_limit):
-    binary = os.environ.get("SAKURAPOOL_STREAM_WORKER")
-    assert binary and Path(binary).is_file(), "set SAKURAPOOL_STREAM_WORKER to the rebuilt worker"
-    expected = Path(os.environ["SAKURAPOOL_EXPECTED_STREAM_WORKER"])
-    assert Path(binary).is_absolute() and expected.is_absolute()
-    assert Path(binary).resolve() == expected.resolve()
+    from conftest import resolve_r1_worker
+
+    binary = resolve_r1_worker()
+    assert binary, "set SAKURAPOOL_RUST_WORKER to the current built worker"
     body = b"x" * ((9 << 20) + 7)
     hits = []
 

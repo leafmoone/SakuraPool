@@ -31,10 +31,39 @@ class PublicationFetchError(RemoteIOError):
         "publication_metadata": "metadata JSON validation failed",
     }
 
-    def __init__(self, code, *, delivered, cleanup_safe, output_lease, secondary):
-        # Metadata remains within the existing safe range diagnostic protocol.
-        wire_code = "publication_range" if code == "publication_metadata" else code
-        super().__init__(self._MESSAGES[code], code=wire_code, phase="publication_fetch")
+    def __init__(
+        self,
+        code,
+        *,
+        delivered,
+        cleanup_safe,
+        output_lease,
+        secondary,
+        underlying=None,
+        member_kind=None,
+        chunk_index=None,
+    ):
+        super().__init__(self._MESSAGES[code], code=code, phase="publication_fetch")
+        self.underlying = {}
+        if isinstance(underlying, RemoteIOError):
+            from .transport import _SAFE_CODES, _SAFE_PHASES
+
+            if underlying.code in _SAFE_CODES and underlying.phase in _SAFE_PHASES:
+                self.underlying = {
+                    "cause_code": underlying.code,
+                    "cause_phase": underlying.phase,
+                    "cause_accounting": (
+                        underlying.accounting_state
+                        if underlying.accounting_state in ("CONFIRMED", "UNKNOWN")
+                        else "UNKNOWN"
+                    ),
+                }
+                if type(underlying.http_status) is int and 100 <= underlying.http_status <= 599:
+                    self.underlying["cause_http_status"] = underlying.http_status
+        if member_kind in ("image", "metadata"):
+            self.underlying["member_kind"] = member_kind
+        if type(chunk_index) is int and 0 <= chunk_index < 1 << 64:
+            self.underlying["chunk_index"] = chunk_index
         self.validation_failed = code == "publication_metadata"
         self.delivery_published = delivered
         self.cleanup_safe = cleanup_safe
@@ -45,6 +74,7 @@ class PublicationFetchError(RemoteIOError):
     def public_diagnostic(self):
         return {
             **super().public_diagnostic(),
+            **self.underlying,
             "delivery": "PUBLISHED" if self.delivery_published else "NOT_PUBLISHED",
             "accounting": self.accounting_state,
             "output_lease": self.output_lease_state,
@@ -82,34 +112,64 @@ def exact_provider_lookup(control, endpoint, repo_id, revision, path, size, dige
     hub = provider.legacy_hub_id()
     root = path.rpartition("/")[0] or "/"
     found = provider.find_legacy_file(hub, revision, root=root, path=path)
-    if (found.size != size or found.revision_candidate != revision
-            or found.provider_sha256 != digest):
-        raise _io_error(provider, "provider exact identity/digest mismatch", code="provider_shape",
-                        phase="provider_exact_lookup")
+    if (
+        found.size != size
+        or found.revision_candidate != revision
+        or found.provider_sha256 != digest
+    ):
+        raise _io_error(
+            provider,
+            "provider exact identity/digest mismatch",
+            code="provider_shape",
+            phase="provider_exact_lookup",
+        )
     return ProviderObject.from_tree(provider, found)
 
 
 def fetch_publication_sample(
-    pub, record_id, transport, output, metadata=False, control=None, scope=None,
-    attempt_hook=None, capacity=None,
+    pub,
+    record_id,
+    transport,
+    output,
+    metadata=False,
+    control=None,
+    scope=None,
+    attempt_hook=None,
+    capacity=None,
 ):
     from .publication import Publication
 
     if not isinstance(pub, Publication) or pub._closed or not pub.full_verified:
         raise PublicationCorrupt("fetch requires full verified publication")
-    return _fetch_publication_sample(pub, record_id, transport, output, metadata=metadata,
-                                    control=control, scope=scope, attempt_hook=attempt_hook,
-                                    capacity=capacity)
+    return _fetch_publication_sample(
+        pub,
+        record_id,
+        transport,
+        output,
+        metadata=metadata,
+        control=control,
+        scope=scope,
+        attempt_hook=attempt_hook,
+        capacity=capacity,
+    )
 
 
 def _fetch_publication_sample(
-    pub, record_id, transport, output, metadata=False, control=None, scope=None,
-    attempt_hook=None, capacity=None,
+    pub,
+    record_id,
+    transport,
+    output,
+    metadata=False,
+    control=None,
+    scope=None,
+    attempt_hook=None,
+    capacity=None,
 ):
     if pub._closed or not pub.full_verified:
         raise PublicationCorrupt("fetch requires full verified publication")
-    capacity = (capacity if capacity is not None
-                else getattr(transport, "capacity", CapacityConfig()))
+    capacity = (
+        capacity if capacity is not None else getattr(transport, "capacity", CapacityConfig())
+    )
     if not isinstance(capacity, CapacityConfig):
         raise ValueError("typed capacity required")
     if getattr(transport, "capacity", capacity) != capacity:
@@ -143,13 +203,20 @@ def _fetch_publication_sample(
     if suffix not in EXTENSIONS:
         raise PublicationCorrupt("image format")
     if scope is not None and (
-        scope.origin, scope.repo_id, scope.repo_type, scope.revision,
-        scope.object_path, scope.object_size,
+        scope.origin,
+        scope.repo_id,
+        scope.repo_type,
+        scope.revision,
+        scope.object_path,
+        scope.object_size,
     ) != (endpoint, repo, repo_type, revision, path, size):
         raise PublicationCorrupt("production profile scope mismatch")
     ro = rt.object_ref(idx)
-    if (ro["object_path"] != path or ro["object_size"] != size
-            or ro["object_version"] != content.hex()):
+    if (
+        ro["object_path"] != path
+        or ro["object_size"] != size
+        or ro["object_version"] != content.hex()
+    ):
         raise PublicationCorrupt("runtime locator mismatch")
     ledger = transport.ledger
     from ..tasks.pipeline import LedgerRPC
@@ -190,9 +257,12 @@ def _fetch_publication_sample(
             control = transport.metadata_control()
         elif owned:
             control = GuardedTransport(
-                ledger, trusted_hosts=frozenset({urlsplit(endpoint).hostname}),
-                token=transport._token, credential_origin=endpoint,
-                same_origin_cookie=transport._cookie, capacity=capacity,
+                ledger,
+                trusted_hosts=frozenset({urlsplit(endpoint).hostname}),
+                token=transport._token,
+                credential_origin=endpoint,
+                same_origin_cookie=transport._cookie,
+                capacity=capacity,
             )
         try:
             obj = exact_provider_lookup(control, endpoint, repo, revision, path, size, digest.hex())
@@ -210,7 +280,11 @@ def _fetch_publication_sample(
     bound = BoundObject(
         ModelScopeDataset(transport, obj.origin, obj.repo_id).download_url(
             obj.revision, obj.object_path
-        ), size, obj.revision, obj.validator, repository=obj.repo_id,
+        ),
+        size,
+        obj.revision,
+        obj.validator,
+        repository=obj.repo_id,
     )
     image_size, meta_size = plan.image_bytes, plan.metadata_bytes
     final = output / record_id
@@ -234,7 +308,8 @@ def _fetch_publication_sample(
         # A single exclusive writer; hash is accumulated inside each payload lease.
         with (stage / ("image" + suffix)).open("xb") as f:
             created["image" + suffix] = _file_identity(f)
-            for offset, length in plan.chunks():
+            for chunk_index, (offset, length) in enumerate(plan.chunks()):
+                state.update(member_kind="image", chunk_index=chunk_index)
                 with _owned_range(transport, bound, offset, length, state) as payload:
                     if len(payload) != length:
                         raise RemoteIOError("image exact extent")
@@ -249,14 +324,18 @@ def _fetch_publication_sample(
             state["code"] = "publication_write"
             f.flush()
             os.fsync(f.fileno())
-        receipts["image" + suffix] = {"sha256": image_digest.hexdigest(), "bytes": image_size,
-                                      "identity": list(created["image" + suffix])}
+        receipts["image" + suffix] = {
+            "sha256": image_digest.hexdigest(),
+            "bytes": image_size,
+            "identity": list(created["image" + suffix]),
+        }
         if metadata and loc["flags"] & 1:
             meta_digest = hashlib.sha256()
             state["code"] = "publication_write"
             with (stage / "metadata.json").open("xb") as f:
                 created["metadata.json"] = _file_identity(f)
-                for offset, length in plan.chunks(metadata=True):
+                for chunk_index, (offset, length) in enumerate(plan.chunks(metadata=True)):
+                    state.update(member_kind="metadata", chunk_index=chunk_index)
                     with _owned_range(transport, bound, offset, length, state) as payload:
                         if len(payload) != length:
                             raise RemoteIOError("metadata exact extent")
@@ -270,8 +349,9 @@ def _fetch_publication_sample(
             state["code"] = "publication_metadata"
             parse_lease = ledger.reserve(Reservation(inflight=VALIDATION_INFLIGHT_BYTES))
             try:
-                validate_file(stage / "metadata.json", meta_size,
-                              max_bytes=capacity.metadata_max_bytes)
+                validate_file(
+                    stage / "metadata.json", meta_size, max_bytes=capacity.metadata_max_bytes
+                )
             except BaseException as error:
                 # Preserve UNKNOWN admission on any escaping validator failure.
                 # In particular, allocation/IO failures can retain scratch in traceback.
@@ -280,13 +360,17 @@ def _fetch_publication_sample(
                 raise
             else:
                 ledger.settle(parse_lease)
-            receipts["metadata.json"] = {"sha256": meta_digest.hexdigest(), "bytes": meta_size,
-                                         "identity": list(created["metadata.json"]),
-                                         "verification": "BOUNDED_JSON_NO_PUBLICATION_SHA"}
+            receipts["metadata.json"] = {
+                "sha256": meta_digest.hexdigest(),
+                "bytes": meta_size,
+                "identity": list(created["metadata.json"]),
+                "verification": "BOUNDED_JSON_NO_PUBLICATION_SHA",
+            }
         state["code"] = "publication_publish"
         if attempt_hook is not None:
-            attempt_hook("PREPARED", {"receipt": receipts,
-                                      "directory_identity": list(stage_identity)})
+            attempt_hook(
+                "PREPARED", {"receipt": receipts, "directory_identity": list(stage_identity)}
+            )
         _publish_directory(stage, final)
         delivered = True
         if attempt_hook is not None:
@@ -310,17 +394,30 @@ def _fetch_publication_sample(
                 except BaseException:
                     finalization_errors.append("ACCOUNTING_UNKNOWN")
         output_lease = (
-            "UNKNOWN" if delivered or not safe or "ACCOUNTING_UNKNOWN" in finalization_errors
+            "UNKNOWN"
+            if delivered or not safe or "ACCOUNTING_UNKNOWN" in finalization_errors
             else "CONFIRMED"
         )
         if isinstance(primary, Exception):
             raise PublicationFetchError(
-                state["body_error_code"] or state["code"], delivered=delivered,
-                cleanup_safe=safe, output_lease=output_lease, secondary=finalization_errors,
+                state["body_error_code"] or state["code"],
+                delivered=delivered,
+                cleanup_safe=safe,
+                output_lease=output_lease,
+                secondary=finalization_errors,
+                underlying=primary,
+                member_kind=state.get("member_kind"),
+                chunk_index=state.get("chunk_index"),
             ) from None
         primary.publication_state = PublicationFetchError(
-            state["body_error_code"] or state["code"], delivered=delivered,
-            cleanup_safe=safe, output_lease=output_lease, secondary=finalization_errors,
+            state["body_error_code"] or state["code"],
+            delivered=delivered,
+            cleanup_safe=safe,
+            output_lease=output_lease,
+            secondary=finalization_errors,
+            underlying=primary,
+            member_kind=state.get("member_kind"),
+            chunk_index=state.get("chunk_index"),
         ).public_diagnostic()
         raise
 
@@ -349,16 +446,18 @@ def _cleanup_owned_stage(stage, identity, created):
     except ValueError:
         return False
     value = stage.lstat()
-    if (not stat.S_ISDIR(value.st_mode) or (value.st_dev, value.st_ino) != identity):
+    if not stat.S_ISDIR(value.st_mode) or (value.st_dev, value.st_ino) != identity:
         return False
     entries = {entry.name: entry for entry in stage.iterdir()}
     if set(entries) != set(created):
         return False
     for name, entry in entries.items():
         value = entry.lstat()
-        if (not stat.S_ISREG(value.st_mode)
-                or getattr(value, "st_file_attributes", 0) & 0x400
-                or (value.st_dev, value.st_ino) != created[name]):
+        if (
+            not stat.S_ISREG(value.st_mode)
+            or getattr(value, "st_file_attributes", 0) & 0x400
+            or (value.st_dev, value.st_ino) != created[name]
+        ):
             return False
     for entry in entries.values():
         entry.unlink()

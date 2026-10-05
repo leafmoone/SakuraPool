@@ -95,6 +95,7 @@ def remaining_limits(ledger, required):
 
 def chunk_plan(image_bytes, metadata_bytes, capacity):
     """Arithmetic only; streaming storage owns range issuance and assembly."""
-    chunk = capacity.range_chunk_bytes
-    counts = tuple((length + chunk - 1) // chunk for length in (image_bytes, metadata_bytes))
-    return sum(counts), min(chunk, max(image_bytes, metadata_bytes))
+    from ..storage.prepared_fetch import StreamPlan
+
+    plan = StreamPlan(0, image_bytes, image_bytes, metadata_bytes, capacity.range_chunk_bytes)
+    return plan.chunk_count, plan.max_chunk

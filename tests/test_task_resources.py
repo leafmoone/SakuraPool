@@ -33,6 +33,19 @@ def test_prepared_warm_preflight_real_ledger_range_only_credit(setup):
         ledger.limits["attempts"] = status["attempts"] + 2
         ledger.limits["body"] = status["body"] + length + 1
         transport = Transport()
+        predicted = []
+        def predict(identity, plan):
+            predicted.append((identity, plan))
+            return False
+        transport.predict_warm = predict
+        with pytest.raises(TaskError, match="RESOURCE_BLOCKED"):
+            preflight(task, publication, item, transport, prepared=prepared)
+        assert predicted[0][1].saved_bytes == length
+        assert predicted[0][1].chunk_count == 1
+        assert predicted[0][0] == prepared.transport_identity
+        with pytest.raises(TaskError, match="RESOURCE_BLOCKED"):
+            preflight(task, publication, item, transport)
+        assert predicted[1][0] == predicted[0][0]
         assert preflight(task, publication, item, transport, prepared=prepared,
                          proof_warm=True) == directory / "output"
         with pytest.raises(TaskError, match="RESOURCE_BLOCKED"):

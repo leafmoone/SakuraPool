@@ -57,6 +57,10 @@ def _safe_diagnostic(error):
     allowed = {
         "code": _SAFE_CODES,
         "phase": _SAFE_PHASES,
+        "cause_code": _SAFE_CODES,
+        "cause_phase": _SAFE_PHASES,
+        "cause_accounting": {"CONFIRMED", "UNKNOWN"},
+        "member_kind": {"image", "metadata"},
         "delivery": {"PUBLISHED", "NOT_PUBLISHED"},
         "accounting": {"CONFIRMED", "UNKNOWN"},
         "output_lease": {"CONFIRMED", "UNKNOWN"},
@@ -71,6 +75,12 @@ def _safe_diagnostic(error):
     status = details.get("http_status")
     if type(status) is int and 100 <= status <= 599:
         safe["http_status"] = status
+    chunk_index = details.get("chunk_index")
+    if type(chunk_index) is int and 0 <= chunk_index < 1 << 64:
+        safe["chunk_index"] = chunk_index
+    cause_status = details.get("cause_http_status")
+    if type(cause_status) is int and 100 <= cause_status <= 599:
+        safe["cause_http_status"] = cause_status
     secondary = details.get("secondary", ())
     if type(secondary) in (list, tuple) and len(secondary) <= 16:
         safe["secondary"] = [
@@ -554,13 +564,12 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
                         stop = True
                         break
                     # Pick the real destination before estimating its topology.
-                    identity = (
-                        *prepared.catalog_row[:5],
-                        int.from_bytes(prepared.catalog_row[5], "big"),
+                    identity = prepared.transport_identity
+                    from ..storage.prepared_fetch import stream_plan
+
+                    chunks = stream_plan(
+                        prepared.location, identity[5], metadata=metadata, capacity=capacity
                     )
-                    lengths = [prepared.location["image_size"]]
-                    if metadata and prepared.location["flags"] & 1:
-                        lengths.append(prepared.location["metadata_size"])
                     # Only free lanes are observed; transport validates its actual
                     # live proof and generation credit, never shared across lanes.
                     warm = [
@@ -575,7 +584,7 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
                             lanes[i][0].ledger,
                         )
                         in lanes[i][1]
-                        and lanes[i][0].predict_warm(identity, lengths)
+                        and lanes[i][0].predict_warm(identity, chunks)
                     ]
                     index = warm[0] if warm else free[0]
                     lane, _ = lanes[index]

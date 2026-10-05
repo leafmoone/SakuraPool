@@ -1,7 +1,6 @@
 """Production protocol working-set tests against the explicitly rebuilt worker."""
 
 import json
-import os
 import queue
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -71,13 +70,11 @@ def test_lexical_string_peak():
 
 
 def _binary():
-    configured = Path(os.environ["SAKURAPOOL_STREAM_WORKER"])
-    expected = Path(os.environ["SAKURAPOOL_EXPECTED_STREAM_WORKER"])
-    assert configured.is_absolute() and expected.is_absolute()
-    binary = configured.resolve()
-    assert binary == expected.resolve()
-    assert binary.is_file()
-    return binary
+    from conftest import resolve_r1_worker
+
+    binary = resolve_r1_worker()
+    assert binary, "set SAKURAPOOL_RUST_WORKER to the current built worker"
+    return Path(binary).resolve()
 
 
 @pytest.mark.parametrize("insufficient", [True, False])
