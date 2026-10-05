@@ -1,3 +1,39 @@
+# P6-A NETWORK STABILITY FINAL — latest delivery
+
+## New execution sheet after 98732034 (supersedes prior stop gate)
+
+Base commit 98732034cd369b389f8f3ef8dfaa40f97d4adec0 is preserved without amend/rebase. Current sole-reviewed execution tree 73f42293b5f87f7bdf09f224217077d9d6d78e61 adds real verify_conditions every iteration, full Publication verification as data-plane admission, independent tree diagnostics and narrowly deferred persistent cancellation. This execution reached data plane; earlier discovery-gated results below are historical, not its stop rule.
+
+DISCOVERY=BLOCKED_HTTP400_CONFIRMED (independent, not gating). Publication fullverify executed exactly once during52a08fbd: publication/snapshot226a63935e73dc3d628024615425ad9d75b985686646d15dec151aec205feede,8782107rids/8480objects. Fixed candidate identity from verified Publication, no validator/tree substitution. Same approved publication/profile and dedicated worker paths below; no Rust edits/rebuild this continuation.
+
+Command (explicit new src PYTHONPATH, current worktree): `P reports/P6A/origin_soak.py --root D:/SakuraTool/SakuraPool-P6-origin-soak/final-direct-73f42293 --publication D:/SakuraTool/SakuraPool-P5D-20261004T143905Z/publication --profile "D:/SakuraTool/SakuraPool-P6A 验收 #/profile.json" --worker D:/SakuraTool/SakuraPool-p6-origin-stability-target/debug/sakurapool-worker.exe --iterations 100 --extra-persistent 500 --label post-fix`. Job52a08fbd exit0 saves structured results, not success. Exact raw results: D:/SakuraTool/SakuraPool-P6-origin-soak/final-direct-73f42293/results.json; retained unchanged after later diagnostic-only fix.
+
+|Field|Cold|Persistent|
+|---|---:|---:|
+|Requested baseline|100|100|
+|Completed|12|4|
+|PASS|11|3|
+|CONFIRMED_TRANSIENT|0|0|
+|TRUE_UNKNOWN|1|1|
+|PENDING_FINAL after close|2|2|
+|Extra500 completed|not requested|0, gate failed|
+
+Cold iteration12: phaseorigin/status400/accounting incomplete/bodycharged3/pending2. Persistent iteration4: phaseorigin/status400/accounting incomplete/bodycharged2/runningpending3 (includes independent resident); close released resident, finalpending2. Each mode immediately stopped, no replay/replacement/extra500. Four diagnostic pending leases belong to two independent diagnostic domains, NOT the original user's six. saved/nooutput remained unchanged. Raw terminal safe_code=rejected because then unknown_row overwrote original code; phase/status safely prove observed Origin400, but missing original code is not reconstructed. Later offline fix preserves safe whitelist code, never edits raw results or claims real execution with corrected logger. All eight origin/CDN network-category counts in raw results are0; status rejection is not a network candidate and cannot be max-charged based on small body.
+
+Persistent observed one physical worker generation1, logical transportgeneration0, no actual rotation. Cold final request worker observation increments1..12; each round creates fresh transport, and verify_conditions includes multiple worker subprocesses, so that field is not a census of every cold subprocess. API always performs observe/positive/negative then proof; ledger proof cache does not bypass it. Safety rotation at256 request-credit remains enabled and is proven offline, not claimed observed here. No pool causality/throughput inference from these samples.
+
+TREE_DIFFERENTIAL=A6x200;B5x200+1x403_CONFIRMED. Fixed numeric218254/revision/rootanime_pictures/RecursiveTrue/Page1/Size20, max6 each. Every call actualattempt1, total12/pending0; B adds public Content-Type and fresh X-Request-ID, values not saved. No two-sided400 mixture or helpful-header causality. PRODUCT_FIX_TREE=NONE; RETRY_TESTS=NOT_APPLICABLE_NO_TREE_RETRY_IMPLEMENTED. No other tree network run/SDK probe was performed to manufacture external-blocking criteria.
+
+CONSERVATIVE_REAL_FAILURE=NOT_OBSERVED (natural terminal failures were status400, not approved conservative network candidates). REAL_FINAL=BLOCKED_DATA_PLANE_UNKNOWN; DELIVERED=0_NEW_ACCEPTANCE_NOT_CREATED; UNKNOWN=2_DIAGNOSTIC_MODE_OPERATIONS; NEW_PENDING_FROM_CONFIRMED_TRANSIENT=0_TRANSIENTS_NOT_OBSERVED. EXTERNAL_BLOCKED criteria not satisfied. Old3UNKNOWN tasks remain read-only; no original workspace task/create/resume/export or old pending settlement. OLD_UNKNOWN_TASKS_MODIFIED=NO; MAIN_MODIFIED=NO; DEV_MODIFIED=NO; INDEX_MACHINE_OPERATIONS=0. P6_ORIGIN_STABILITY=WAITING_REVIEW / PARTIAL after final reviewed branch-only delivery.
+
+New narrow lifecycle product delta: valid matching terminal error with unused current candidate may defer cancel ONLY inside transfer-owned finalizer. It does not confirm accounting. Outer resource/ledger gates mint true token or cancel/latch on any failure. Positive capability cannot defer; wrapper failure cancels and leaves UNKNOWN. Terminal requests consume generation credit exactly once even on errors. Confirmed proof-group failure continues only with actualtoken/no secondary/no unresolved latch. Nothing clears UNKNOWN or resurrects cancelled worker.
+
+Continuation tests (separate runs, no cumulative fictional total):3dfd51c9 exit0 24pass7.48s;618d934a pytest25pass7.82s but chainexit1 at Ruff2 formatting issues;ae08b015 exit0 fournetworkfiles31pass40.55s plusRuff/diff0; c74ba980 exit0 33pass11.40s;92570a40 exit1 33pass2fail9.52s (treefixture missing_host prerequisite corrected);0f73f7d9 pytest35pass9.74s but chainexit1 Ruff longline;386303da exit0 35pass9.72s plusRuff/diff0 at reviewed73f422tree. Coverage: real persistent wrapper continuation/cancel,consumeaftercommit/outerKeyboardInterrupt,positivefailure no deferred residue,exact256 rotation/resident samelease/close release,harness pending/saved/artifact gate,connect/close/usageinspect safety preservation and A/B completed samples retained. Sole17f688 required three residue fixes; sole73f422 PASS conveyed byroot before network.
+
+Postrun offline-only safe-code correction:14ae0d3a exit0 `P -m pytest tests/test_network_finalization.py -k unknown_row -q -p no:cacheprovider --basetemp=D:/SakuraTool/SakuraPool-P6-origin-soak/final-safe-code-only`:3passed/35deselected/0.31s, then changed3pathsRuff0/diff0. Unknown-row test preserves origin_status whitelist, rejects unsafe/missing code and strips CONFIRMEDbasis. No network rerun. Productdefer and harness/tests/report changes will be separate ordinary commits; actual SHAs/parents/remote verification supplied in final delivery rather than guessed before commit. Existing987 remains first historical commit. All diagnostics/target preserved for review. No broad cleanup, full matrix, index/source/wheel/stress activity. Durations are test/sample walltimes, not production throughput or proof of network-pool benefit.
+
+## Historical previous execution report (before new sheet)
+
 # P6-A NETWORK STABILITY / UNKNOWN RECOVERY — final evidence
 
 ## Scope/status

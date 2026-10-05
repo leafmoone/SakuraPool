@@ -1,3 +1,21 @@
+# P6-A NETWORK STABILITY FINAL — current authorization
+
+Current user execution sheet supersedes the previous discovery-gated stop. Continue only current worktree/branch from 98732034cd369b389f8f3ef8dfaa40f97d4adec0; preserve that commit without amend/rebase. Old three UNKNOWN tasks and original six pending remain read-only.
+
+- [ ] Minimal harness/API plan to sole: full-verify Publication once, read fixed candidate identity from publication, tree discovery independent of data-plane admission.
+- [ ] Every cold100/persistent100 iteration invokes real verify_conditions (observe, positive, negative, proof); no cache shortcuts or ledger deletion. Cold fresh transport each iteration; persistent same channel, 100 without TRUE_UNKNOWN permits same transport extra500 including recovered confirmed transients.
+- [ ] Narrow safe continuation for confirmed proof-group failure if necessary; never clear uncertainty latch or substitute worker liveness for termination. Fault tests before real execution.
+- [ ] Independent bounded tree A/B fixed numeric218254/pin/root/page1/page20; B public Content-Type and fresh X-Request-ID. Evidence-dependent minimal headers or shared-budget provider-tree-only400 retry; no other endpoint/auth/shape retry widening.
+- [ ] Related retry fault tests and four network/affected consumer tests only; no full matrix. Real diagnostics independently authorized after limited plan/review gates, no repetitive permission requests.
+- [ ] Original workspace new approved2~3record metadata workers1 task only after direct soak has no TRUE_UNKNOWN and tree completes/stabilizes; retain old pending identity in parent memory, pause/partialexport/freshresume/finalexport, one confirmed-conservative explicitresume at most; TRUE_UNKNOWN stops without replacement.
+- [ ] Preserve old987 commit; harness/tests/reports commit separately from any required productfix, normal work-branch-only push and verify dev/main unchanged; complete continuous report and WAITING_REVIEW.
+
+## Current final evidence
+
+Sole73f422 PASS; real52a08fbd exit0 saved raw final-direct-73f42293/results.json. fullverify exactlyonce PASS; discovery independently400CONFIRMED pending0; A6x200/B5x200+403CONFIRMED no400retry/headercausality evidence. Cold11PASS/1TRUEUNKNOWN completed12of100 pendingfinal2; persistent3PASS/1TRUEUNKNOWN completed4of100 runningpending3/residentclose→2, noextra500. Both stopped no replay; REAL_FINAL BLOCKED_DATA_PLANE_UNKNOWN noacceptance. CONSERVATIVE_REAL_FAILURE NOT_OBSERVED; original6 pending/old3UNKNOWN untouched. Offline logger fix14ae0d3a3pass35deselected0.31s exit0+Ruff/diff0; raw results not rewritten. Full latest report NETWORK_STABILITY_FINAL before historical section; finaldocdelta await solelimitedreview, productdefer separate normalcommit from harness/tests/reports, preserve987.
+
+## Previous execution (historical, not current stop gate)
+
 # P6-A NETWORK STABILITY / UNKNOWN RECOVERY
 
 当前唯一写入worktree D:/SakuraTool/SakuraPool-p6-origin-stability，branch work-p6-origin-stability，BASE c2db79263e4ad8927ad42d0b7516ad81bd7af0b0；只push此branch，不push/merge dev/main。旧三个UNKNOWN任务及6pending永久冻结；p5a-clean源码/uv.lock不写。source包冻结、不full/310/Linux/wheel/索引机。
