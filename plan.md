@@ -1,4 +1,8 @@
-# P6-A 集中补齐执行路线
+# P6-A FINAL CLOSURE
+
+本次授权基线9aebcb74311d4e598ebf31e3e0f01873c91b20b8；唯一full已执行失败原66/45保，111精准复测108pass2skip1fail后唯一fixture修1pass，未第二full。官方SDK1.40.1与guard固定tree均200差分完成；同metadata-followup授权resume origin400/UNKNOWN立即停，delivered0/3 UNKNOWN1、pending4，不再重放。仅4tests及报告变，无产品代码/source包变。当前VALIDATION_PARTIAL，正常commitpush最终正文核SHA后停止P6_AWAITINGREVIEW。
+
+## 历史执行路线（以下未resume/UNKNOWN0指9aeb交付当时）
 
 当前授权：BASE `2d196f10b7747b3c34429e2de644bf5b08dbfff6`；MAIN `62f86cc487af41de7d84bfb5a14d2fb1e0e172ac` 不动；INDEX_BUILD_SHA `57864e5dd456251b457238b196e8fed5668d909b` 不动。仅 dev、普通显式 stage/commit/push。此为本轮完整执行路线，不是新增准备阶段。
 

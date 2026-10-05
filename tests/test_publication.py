@@ -197,6 +197,9 @@ def test_fresh_fetch_requires_own_proof_and_sha(inputs, monkeypatch, failure):
                         "accounting_scope": "OPERATION",
                         "cleanup": "SAFE" if failure == "image_settle" else "PRESERVED",
                         "secondary": secondary, "recoverable": False,
+                        "member_kind": "image", "chunk_index": 0,
+                        **({"cause_code": "remote_io", "cause_phase": "transport",
+                            "cause_accounting": "UNKNOWN"} if failure == "image_settle" else {}),
                     }
                     exposed = (str(caught.value) + json.dumps(caught.value.public_diagnostic())
                                + "".join(traceback.format_exception(caught.value)))
@@ -221,6 +224,7 @@ def test_fresh_fetch_requires_own_proof_and_sha(inputs, monkeypatch, failure):
                         "output_lease": "CONFIRMED", "cleanup": "SAFE", "recoverable": False,
                         "secondary": (["RANGE_FINALIZATION_FAILED"]
                                       if failure == "write_exit" or interrupt_fault else []),
+                        "member_kind": "image", "chunk_index": 0,
                     }
                     with ledger._locked():
                         _, (_, _, pending, _) = ledger._read_pair()

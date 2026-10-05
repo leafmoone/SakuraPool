@@ -1,4 +1,69 @@
-# P6-A 集中补齐：VALIDATION_PARTIAL（交付候选）
+# P6-A FINAL CLOSURE：送审，VALIDATION_PARTIAL
+
+## 当前最终收口（以下历史补齐报告不覆盖此节）
+
+本次基线9aebcb74311d4e598ebf31e3e0f01873c91b20b8/treea2f73ed325a37eef830e6c1cab39b608e7679192。唯一写方swe；产品源码未改，仅4tests旧fixture契约修及文档。FINAL_COMMIT由最终正文给出，报告不自含自身SHA；main62f86cc487af41de7d84bfb5a14d2fb1e0e172ac不动。
+
+|最终字段|实际结论|
+|---|---|
+|状态|P6_AWAITINGREVIEW / VALIDATION_PARTIAL|
+|REGULAR_REGRESSION|FAILED_ENVIRONMENT_AND_FIXTURES；不冒一轮fullPASS|
+|TARGETED_RECOVERY|108PASS2SKIP + 1PASS，分两轮，非109同轮|
+|PROVIDER_DIFFERENTIAL|SDK_AND_GUARD_TREE_PASS / HISTORICAL400_UNDETERMINED；旧400 NOT_REPRODUCED_CAUSE_UNDETERMINED|
+|REAL_METADATA_CLOSURE|BLOCKED：同task授权resume发生origin400/operationUNKNOWN，立即停保|
+|DELIVERED / UNKNOWN（新task）|0/3 / 1|
+|WORKSPACE_CORE|PASS_OFFLINE（现有selected及本次定向消费者）|
+|CONFIGURABLE_CAPACITY|PASS_OFFLINE（现有native边界及定向容量消费者）|
+|CHUNKED_LARGE_MEMBER|PASS_OFFLINE（现有chunk/generation/reproof验收，不冒真实任务成功）|
+|SAFE_DIAGNOSTICS|PASS：安全CLI/TaskError透传，TaskDB仅fixedcode不完整cause持久|
+|Danbooru / Konachan|PASS_OFFLINE，5196037records/1444122664bytes；33377records/11860113bytes|
+|OLD_UNKNOWN_TASK_MODIFIED|NO|
+|LEGACY_LEDGER_MIGRATED|NO|
+|MAIN_MODIFIED|NO|
+|INDEX_MACHINE_OPERATIONS|0|
+|NEXT_STAGE_STARTED|NO|
+
+### 一次full与精确受影响复测
+
+授权唯一full命令：cwd D:/SakuraTool/SakuraPool-p5a-clean，PYTHONPATH同src，SAKURAPOOL_RUST_WORKER=D:/SakuraTool/SakuraPool-p6-stream-target/debug/sakurapool-worker.exe；PY=D:/SakuraTool/SakuraPool-Fix3-20260930a/python-env/Scripts/python.exe。
+```text
+PY -m pytest tests -q -m 'not stress' -p no:cacheprovider --tb=short -rs
+```
+整个full产品/tests冻结于上述基线tree；bash33d3c9f8 timeout0，exit1：66 failed, 1650 passed, 6 skipped, 1 deselected, 45 errors in3339.92s(55:39)。逐111trace核：49fail+45setupERROR直接NoSpace/dbdiskfull；17独立assert旧fixture期待不归环境。C盘首实际Free0，D210457436160B，full temp实际pytest-1169。
+
+6skip逐node原因：test_local_partition_builder::test_lock_symlink_is_rejected symlink权限；test_p4_package symlink参数分支权限；test_p5b_prerequisites Windows literal ?路径分支、symlink权限分支；test_query_batch_compat nativegetlimit缺失运行时条件；test_runtime_remediation symlink权限分支。单deselect为notstress排除stress项，不宣其通过。完整原shortsummary在临时regular.stdout核后必要统计保此，不计算hash。
+
+仅本轮pytest-1169普通自产synthetic643231388B安全回收，root非reparse、无活pytest/worker、无lock；两reparse及ancestor保留，不跟target，不清父/未知历史。回收即时C free277766144→931971072；此前Free0到即时值自主变化不全归删除。后续全部TMP/TEMP/TMPDIR及basetemp/cache指向本轮Downed。
+
+17最小tests修：bounded_json三项code改publication_metadata，validationfailed/外UNKNOWN/pending/秘密负例不删；p5c_c1六失败及同公式断言用(32<<20)+protocolmemory(transport.capacity)，不写新魔数，峰值payload+2/+14保持exact且旧仅32MiB会失败；publication八exactdict新增固定image/chunk0及image_settle固定remote_io/transport/UNKNOWNcause，不放宽subset、不忽略未知字段，旧accounting/cleanup/secretassert保。
+
+受影响集合逐node保reports/P6A/final-closure-affected-nodes.txt（111unique，由full每个traceheader+首tests文件提取，49+45+17对账）。命令：
+```text
+PY -m pytest <该文件每行node作为独立argv，按原顺序> -q -p no:cacheprovider --tb=short -rs --basetemp=D:/SakuraTool/SakuraPool-P6A-finalclosure-temp/affected-tests
+```
+实际bash1555c605 exit1：108 passed,2 skipped,1 failed in906.84s。两skip精确test_task_safety.py::test_linked_task_journal_rejected、test_workspace.py::test_link_task_path_rejected，均symlink权限。唯一fail为test_task_workspace_workflow.py::test_local_workspace_run_resume_and_unknown_network：假LocalTransport未super初始化却继承nativepredict，_lane_lock缺失；检索该类唯一定义在test文件非产品子类。仅fixture显式predict_warmFalse走coldproof，proof/range/receipt/预算assert保。单该node相同环境新的workflow-test basetemp复测exit0：1 passed in1.41s。不能把108+1冒109同轮。前启动shell转义SyntaxError发生pytest前exit1，非测试轮。4testRuff最终exit0（先行长行3项修后0），产品未改，不第二full/111。
+
+### 官方SDK/guard A→B→C→D与同taskresume
+
+本轮授权官方SDK例外A/B直接调用不冒guard预算结果。用户批准安装，仅D短期sdk-env Python3.13.15，uv --index-url https://pypi.org/simple，实际ModelScope1.40.1/modelscope-hub0.4.5，import D:/SakuraTool/SakuraPool-P6A-finalclosure-temp/sdk-env/Lib/site-packages/modelscope/__init__.py；未改keeper。官方HubApi内存token+legacy内存cookie，不login/save_token，maxretries0/trust_envFalse/logdisable，不打印rawexception/body/token/cookie或signedURL，不搜其它凭证。credential_ref仍D:/sm_data/ms-token.tmp仅进程内读。
+
+固定repo leafmoone/webdataset_danbooru_v3、numeric218254、rev73306f1dc5459238710f477b376c36da997d020c、Rootanime_pictures、RecursiveTrue、PageNumber1 PageSize20，没有参数循环/Range图片。SDK A get_dataset_id_and_type实际repoGET200 id218254/type4，B get_dataset_files固定treeGET200/20entries，bash5515f853exit0。A证明该配置repo访问可用，不以公共repo200冒用户身份专门校验。
+
+C keeper connect_profile.metadata_control→ModelScopeDataset.legacy_hub_id/legacy_tree_page，同既有ws正式reserve/settle，bash6fe12afaexit0，repo/tree200/20entries。usageattempts51→53、body2311884→2320828、metadata881719→890663、pending2/inflight0/saved2不变；body字段含历史pending不全部consumed。
+
+D实际methodGET/path/api/v1/datasets/218254/repo/tree与query所有key/value一致；SDKheadernames Accept,Accept-Encoding,Authorization,Connection,Content-Type,Cookie,User-Agent,X-Request-ID；guard缺Content-Type/X-Request-ID其余名称同，两侧credentialpresence/cookiepresence均true。未保秘密header值/额外hash。当前皆成功，无证据把header差异当旧400产品因果；不改下载代码、不称外部当前拒绝请求。
+
+在tree实际guard200后，只读existing metadata-followup task仍BLOCKED0/3UNKNOWN0首CONFIRMEDREADY3无output，正式freshprocessexplicitresume sameba84a6c5e2b84f7f8eda488a9c75f1be，不建第三task：
+```text
+PY -m sakurapool task resume "D:/SakuraTool/SakuraPool-P6A 验收 #/workspace/tasks/metadata-followup" --profile "D:/SakuraTool/SakuraPool-P6A 验收 #/profile.json" --workers 1
+```
+实际bash0ed9b17e exit2安全诊断：accountingUNKNOWN、coderejected、deliveryNOT_PUBLISHED、http_status400、phaseorigin、recoverablefalse、secondary[]。立即停止所有该task网络，不再resume/reset/refund/replay/export冒成功；tree200与origin400是不同阶段不归同因。最终只读inspectexit0：BLOCKED，delivered0/3，unknown1，itemBLOCKEDUNKNOWN1 READY2；workspacepending4(旧2+新增2)、inflight0，attempts61 body2636723 metadata1206556 disk2719744 saved_samples2 saved_bytes515084。新任务也保UNKNOWN现场，今后禁止自动/显式重放、reset/refund/改receipt；除非有完整可信durable settlement与单独恢复决策不得恢复。pending4是数量观测，旧2+新增2不替逐lease消费确认；saved_samples2指旧交付，非新task交付。绝不以底层CONFIRMED洗外UNKNOWN。旧metadata-three永只读原partial2UNKNOWN1，未操作。
+
+本次真实闭环未完成，无finalexport；既有pause/partial证据不追认此次成功。source两包冻结未compile/全量对照/压缩或上传；既有全components/DBSTAT见下述来源节。普通提交最终SHA/远端核在最终正文，完成后停止送审，不下一阶段。
+
+---
+
+## 历史：集中补齐交付（9aebcb7，以下任务UNKNOWN0/未resume描述仅当时事实）
 
 BASE2d196f10b7747b3c34429e2de644bf5b08dbfff6；main62f86cc487af41de7d84bfb5a14d2fb1e0e172ac不改。源码唯一写入方swe，其他协作只读。两个独立语义提交：core15paths保持已验证审查树，sourcepack包含两个离线脚本和本完整报告/历史入口/执行单。core提交1a612e396a608bd6ba391a8955c370e19213dee7（tree3577915b55aa47fa8dd6a37866e8945c7ab4f98b）已普通push origin/dev并ls-remote精确一致，main仍62f86cc487af41de7d84bfb5a14d2fb1e0e172ac；source提交SHA最终由正文交付回执给出（本报告作为该commit内容不能自含自身SHA，不另evidencecommit）。
 

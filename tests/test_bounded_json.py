@@ -140,7 +140,7 @@ def test_fetch_validation_failure_preserves_unknown(tmp_path, monkeypatch, failu
             pub.runtime.location = lambda rid: dict(location(rid), metadata_size=0)
         with pytest.raises(fetch.PublicationFetchError) as caught:
             fetch._fetch_publication_sample(pub, record, transport, workspace.tmp, metadata=True)
-        assert caught.value.code == "publication_range"
+        assert caught.value.code == "publication_metadata"
         assert caught.value.validation_failed
         assert caught.value.accounting_state == "UNKNOWN"
         assert not (workspace.tmp / record).exists()

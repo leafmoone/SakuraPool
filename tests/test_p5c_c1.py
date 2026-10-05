@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 import pytest
 from test_r2_production import twohop as _twohop
 
+from sakurapool.storage.production_resources import protocolmemory
 from sakurapool.storage.rust_bridge import RustWorker, RustWorkerError
 from sakurapool.storage.transport import GuardedTransport, RemoteIOError
 
@@ -28,7 +29,7 @@ def test_persistent_worker_single_pid_and_idle_reservation(twohop, monkeypatch):
 
     monkeypatch.setattr(ThreadingHTTPServer, "get_request", observed_accept)
     transport.enable_persistent()
-    assert ledger.status()["inflight"] == 32 << 20
+    assert ledger.status()["inflight"] == ((32 << 20) + protocolmemory(transport.capacity))
     verified = transport.verify_conditions(obj)
     worker = transport._lane_worker
     pid = worker.pid
@@ -39,8 +40,8 @@ def test_persistent_worker_single_pid_and_idle_reservation(twohop, monkeypatch):
             assert body == state["raw"][start:start + 7]
             assert hashlib.sha256(body).hexdigest() == result["sha256"]
             assert transport._lane_worker is worker and worker.pid == pid
-            assert ledger.status()["inflight"] > 32 << 20
-        assert ledger.status()["inflight"] == 32 << 20
+            assert ledger.status()["inflight"] > ((32 << 20) + protocolmemory(transport.capacity))
+        assert ledger.status()["inflight"] == ((32 << 20) + protocolmemory(transport.capacity))
     assert transport._lane_requests == 6
     assert len(connections) == 2  # one actual accepted origin TCP + one CDN TCP
     transport.close()
@@ -239,7 +240,7 @@ def test_actual_process_failure_cannot_reassign_response(twohop, failure):
         with transport.transfer(verified, start=512, length=7):
             pytest.fail("failed lane reused")
     assert len(state["calls"]) == count
-    assert ledger.status()["inflight"] == 32 << 20
+    assert ledger.status()["inflight"] == ((32 << 20) + protocolmemory(transport.capacity))
     transport.close()
     assert ledger.status()["inflight"] == 0
 
@@ -314,8 +315,8 @@ def test_positive_probe_uses_resident_plus_payload_once(twohop, monkeypatch):
 
     monkeypatch.setattr(ledger, "reserve", observe)
     transport.verify_conditions(obj)
-    assert max(peaks) == (32 << 20) + 2
-    assert ledger.status()["inflight"] == 32 << 20
+    assert max(peaks) == ((32 << 20) + protocolmemory(transport.capacity)) + 2
+    assert ledger.status()["inflight"] == ((32 << 20) + protocolmemory(transport.capacity))
     transport.close()
 
 
@@ -350,7 +351,7 @@ def test_close_serializes_with_first_spawn(twohop, monkeypatch):
     closer = threading.Thread(target=close)
     closer.start()
     assert completed.wait(timeout=1)
-    assert ledger.status()["inflight"] >= 32 << 20
+    assert ledger.status()["inflight"] >= ((32 << 20) + protocolmemory(transport.capacity))
     release.set()
     thread.join(timeout=5)
     closer.join(timeout=5)
@@ -378,7 +379,7 @@ def test_constructor_and_cancel_fault_preserve_primary(twohop, monkeypatch):
             transport.verify_conditions(obj)
         assert transport._lane_failed
         assert transport._lane_worker.pid is not None
-        assert ledger.status()["inflight"] >= 32 << 20
+        assert ledger.status()["inflight"] >= ((32 << 20) + protocolmemory(transport.capacity))
     finally:
         original_cancel(transport._lane_worker)
         transport.close()
@@ -420,12 +421,12 @@ def test_live_cancel_failure_preserves_payload_artifact(twohop, monkeypatch):
             with transport.transfer(verified, start=512, length=7):
                 pytest.fail("uncertain body delivered")
         assert worker.pid is not None
-        assert ledger.status()["inflight"] == (32 << 20) + 14
+        assert ledger.status()["inflight"] == ((32 << 20) + protocolmemory(transport.capacity)) + 14
         assert roots[0].exists() and (roots[0] / "body").exists()
         with pytest.raises(RustWorkerError):
             transport.cancel()
         assert roots[0].exists()
-        assert ledger.status()["inflight"] == (32 << 20) + 14
+        assert ledger.status()["inflight"] == ((32 << 20) + protocolmemory(transport.capacity)) + 14
     finally:
         release.set()
         original_cancel(worker)
@@ -441,7 +442,7 @@ def test_close_from_consumer_retains_payload_until_exit(twohop):
     with transport.transfer(verified, start=512, length=7) as (root, _):
         transport.close()
         assert root.exists()
-        assert ledger.status()["inflight"] == (32 << 20) + 14
+        assert ledger.status()["inflight"] == ((32 << 20) + protocolmemory(transport.capacity)) + 14
         with pytest.raises(RemoteIOError):
             with transport.transfer(verified, start=512, length=7):
                 pytest.fail("second outstanding operation")
@@ -516,7 +517,7 @@ def test_close_registered_before_bridge_initialization(twohop, monkeypatch):
 
     def barrier(worker, *args, **kwargs):
         transport.close()
-        assert ledger.status()["inflight"] >= 32 << 20
+        assert ledger.status()["inflight"] >= ((32 << 20) + protocolmemory(transport.capacity))
         original(worker, *args, **kwargs)
         children.append(worker)
 

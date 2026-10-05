@@ -132,6 +132,10 @@ def test_local_workspace_run_resume_and_unknown_network(tmp_path, monkeypatch):
         def clone(self):
             raise AttributeError("serial mock")
 
+        def predict_warm(self, identity, lengths):
+            # This serial stub has no initialized native lane or cached proof.
+            return False
+
         def metadata_control(self):
             return SimpleNamespace(close=lambda: None)
 
