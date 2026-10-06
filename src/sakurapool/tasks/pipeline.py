@@ -31,7 +31,7 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
     """At most W active operations and 2W event envelopes; payloads stay lane-local."""
     from ..storage.bounded_json import VALIDATION_INFLIGHT_BYTES
     from ..storage.production_resources import ProductionFootprint
-    from .runner import preflight, verify_delivery
+    from .runner import delivery_mapping, preflight, verify_delivery
 
     lane_memory = ProductionFootprint.admit(
         "range", task.capacity.range_chunk_bytes, capacity=task.capacity
@@ -60,7 +60,7 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
         if error is not None:
             raise error
 
-    def execute(index, item, prepared):
+    def execute(index, item, prepared, mapping):
         error = None
         try:
             lane, cache = lanes[index]
@@ -74,6 +74,7 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
                 image_extensions=extensions,
                 control=control,
                 attempt_hook=lambda name, data: hook(index, item, name, data),
+                delivery_mapping=mapping,
             )
         except BaseException as caught:
             error = caught
@@ -196,7 +197,8 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
             free.pop(0)
             active[index] = (item, prepared)
             try:
-                executor.submit(execute, index, item, prepared)
+                mapping = delivery_mapping(task, item, publication)
+                executor.submit(execute, index, item, prepared, mapping)
             except BaseException:
                 active.pop(index)
                 free.append(index)

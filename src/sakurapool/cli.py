@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import tarfile
 from pathlib import Path
@@ -186,6 +187,9 @@ def main(argv: list[str] | None = None) -> int:
         publication_fetch.add_argument("--" + option, required=True)
     publication_fetch.add_argument("--metadata", action="store_true")
     publication_fetch.add_argument("--image-extensions", help="comma-separated registered suffixes")
+    publication_fetch.add_argument("--filename-template", default="{tag}_{index}")
+    publication_fetch.add_argument("--filename-prefix")
+    publication_fetch.add_argument("--filename-index", type=int, default=1)
     publication_fetch.add_argument("--workspace")
     validate = subparsers.add_parser("validate", help="validate a query JSON document")
     validate.add_argument("query", type=Path)
@@ -317,7 +321,24 @@ def main(argv: list[str] | None = None) -> int:
                     full_verify=args.publication_command == "fetch" or getattr(args, "full", False),
                 ) as pub:
                     if args.publication_command == "fetch":
+                        from .download_naming import FilenameConfig
+                        from .storage.flat_delivery import DeliveryMapping
                         from .storage.publication_fetch import fetch_publication_sample
+
+                        if args.filename_index < 1:
+                            raise ValueError("FILENAME_INDEX_INVALID")
+                        naming = FilenameConfig.resolve(template=args.filename_template,
+                                                        prefix=args.filename_prefix)
+                        loc = pub.runtime.location(pub.runtime.resolve_record(args.record_id).rid)
+                        from .image_formats import image_filename
+
+                        suffix = image_filename(pub.runtime.image_format(loc["format_id"]),
+                                                args.image_extensions).removeprefix("image")
+                        mapping = DeliveryMapping(naming.stem(args.filename_index - 1), suffix,
+                                                  bool(args.metadata and loc["flags"] & 1))
+                        mapping.check_paths(Path(args.output).absolute())
+                        if any(os.path.lexists(Path(args.output) / name) for name in mapping.names):
+                            raise ValueError("OUTPUT_CONFLICT")
 
                         if args.publication_command == "fetch":
                             from .tasks.cli import bounded_json
@@ -367,8 +388,6 @@ def main(argv: list[str] | None = None) -> int:
                                     else {"env": "MODELSCOPE_API_TOKEN"},
                                 }
                                 # Legacy optional env token remains optional.
-                                import os
-
                                 if "token_file" not in profile_data and not os.environ.get(
                                     "MODELSCOPE_API_TOKEN"
                                 ):
@@ -400,6 +419,7 @@ def main(argv: list[str] | None = None) -> int:
                                         metadata=args.metadata,
                                         image_extensions=args.image_extensions,
                                         scope=scope,
+                                        delivery_mapping=mapping,
                                     )
                                 )
                             }

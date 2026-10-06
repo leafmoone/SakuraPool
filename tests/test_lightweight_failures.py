@@ -29,9 +29,10 @@ def test_published_directory_moved_to_stage_never_deleted(lightweight, phase):
     with TaskDB(env.directory) as task:
         row = dict(task.db.execute("SELECT * FROM items").fetchone())
         stage = json.loads(row["stage"])
-        final = env.directory / "output" / row["record_id"]
+        final = env.directory / "output" / (row["output_stem"] + ".jpg")
         moved = env.directory / "output" / stage["name"]
-        final.rename(moved)
+        moved.mkdir()
+        final.rename(moved / "image.jpg")
         delivery = "NONE" if phase == "PREPARED" else "PUBLISHED"
         row.update(state="IN_PROGRESS", phase=phase, delivery=delivery)
         task.db.execute(
@@ -230,7 +231,14 @@ def test_reconcile_keyset_pages_close_before_updates(tmp_path, monkeypatch):
             return finish(seq, **kwargs)
 
         monkeypatch.setattr(task, "finish_item", tracked_finish)
+        from sakurapool.storage.flat_delivery import DeliveryMapping
+
         monkeypatch.setattr(runner, "verify_delivery", lambda *_args: {})
+        monkeypatch.setattr(runner, "delivery_mapping", lambda _task, row, _pub:
+                            DeliveryMapping(row["output_stem"], ".jpg"))
+        monkeypatch.setattr(runner, "_flat_receipt", lambda _task, row, _pub:
+                            ({}, DeliveryMapping(row["output_stem"], ".jpg")))
+        original.execute("UPDATE items SET phase='PUBLISHED' WHERE state='DONE'")
         task.db = Connection()
         try:
             runner.reconcile(task, object())

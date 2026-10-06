@@ -140,7 +140,7 @@ def test_large_image_clone_route(tmp_path, monkeypatch, workers, image_format):
     assert result["delivered_verified"] == 1
     assert "unknown_accounting_count" not in result
     assert chunks == [8 << 20, (1 << 20) + 7]
-    image = next((directory / "output").glob("*/image." + image_format))
+    image = next((directory / "output").glob("image_1." + image_format))
     assert image.read_bytes() == payload
     assert not list(workspace.state.iterdir())
     from sakurapool.storage.publication import PublicationCorrupt, load_publication
@@ -160,7 +160,7 @@ def test_large_image_clone_route(tmp_path, monkeypatch, workers, image_format):
     with TaskDB(directory) as task:
         item = dict(task.db.execute("select * from items").fetchone())
         receipt = json.loads(item["receipt"])
-        proof = receipt["receipt"].pop("image." + image_format)
+        proof = receipt["receipt"].pop("image_1." + image_format)
         wrong = "image.png"
         receipt["receipt"][wrong] = proof
         image.rename(image.with_name(wrong))
@@ -187,6 +187,6 @@ def test_large_image_clone_route(tmp_path, monkeypatch, workers, image_format):
         with PublicationSession(
             pub, Transport(), image_extensions=SUPPORTED_IMAGE_EXTENSIONS, control=object()
         ) as session:
-            session.fetch(record_id, workspace.root / "session")
-        assert (workspace.root / "direct" / record_id / "image.gif").read_bytes() == payload
-        assert (workspace.root / "session" / record_id / "image.gif").read_bytes() == payload
+            session.fetch(record_id, workspace.root / "session", filename_index=1)
+        assert (workspace.root / "direct" / "image_1.gif").read_bytes() == payload
+        assert (workspace.root / "session" / "image_1.gif").read_bytes() == payload

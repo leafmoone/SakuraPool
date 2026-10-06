@@ -25,18 +25,22 @@ from sakurapool.workspace import Workspace
 
 
 @pytest.fixture
-def lightweight(tmp_path, monkeypatch):
+def lightweight(tmp_path, monkeypatch, request):
     payload = b"x" * 128
     metadata = b'{"hello":"safe"}'
     p2 = tmp_path / "p2"
+    config = getattr(request, "param", 4)
+    count = config["count"] if isinstance(config, dict) else config
+    formats = config.get("formats", ["jpg"]) if isinstance(config, dict) else ["jpg"]
     objects = [
         ObjectSpec(
             f"object{i}.tar",
-            [SampleSpec(f"{i}.jpg", str(i), tags=[("1girl", None)], json_size=len(metadata))],
+            [SampleSpec(f"{i}.{formats[i % len(formats)]}", str(i), tags=[("1girl", None)],
+                        json_size=len(metadata))],
             namespace="danbooru_native",
             size=4096,
         )
-        for i in range(4)
+        for i in range(count)
     ]
     build_p2_directory(p2, dataset="small", source="synthetic", objects=objects)
     contract = json.loads((p2 / "INPUT.json").read_bytes())
@@ -47,7 +51,9 @@ def lightweight(tmp_path, monkeypatch):
         info = commit["files"]["samples"]
         path = p2 / info["path"]
         table = pq.read_table(path)
+        image_format = table.column("sample_path")[0].as_py().rsplit(".", 1)[-1]
         for name, value in (
+            ("image_format", image_format),
             ("size", len(payload)),
             ("json_offset_data", 256),
             ("sha256", hashlib.sha256(payload).hexdigest()),
@@ -295,10 +301,9 @@ def test_unknown_output_no_overwrite(lightweight):
     with create_task(
         env.publication, env.directory, env.workspace, env.query, Selection("first", 1)
     ) as task:
-        record = task.db.execute("SELECT record_id FROM items").fetchone()[0]
-    target = env.directory / "output" / record
-    target.mkdir()
-    sentinel = target / "image.jpg"
+        assert task.db.execute("SELECT output_stem FROM items").fetchone()[0] == "1girl_1"
+    target = env.directory / "output"
+    sentinel = target / "1girl_1.jpg"
     sentinel.write_bytes(b"unknown user file")
     with pytest.raises(TaskError, match="OUTPUT_CONFLICT"):
         run_task(env.directory, env.transport(), control=object())

@@ -21,6 +21,8 @@ def add_parser(subparsers):
     create.add_argument("--records", help="bounded JSON record_id list")
     create.add_argument("--metadata", action="store_true")
     create.add_argument("--image-extensions", help="comma-separated registered suffixes")
+    create.add_argument("--filename-template", default="{tag}_{index}")
+    create.add_argument("--filename-prefix")
     update = commands.add_parser("update")
     update.add_argument("task_dir")
     update.add_argument("--workspace")
@@ -34,7 +36,7 @@ def add_parser(subparsers):
             command.add_argument("--failure-seq", type=int, help="read a bounded persisted failure")
         elif name in ("run", "resume"):
             command.add_argument("--profile", required=True)
-            command.add_argument("--workers", type=int, choices=(1, 2, 4), default=1)
+            command.add_argument("--workers", type=int, choices=(1, 2, 4, 6), default=1)
         elif name == "export":
             command.add_argument("--manifest", required=True)
 
@@ -64,7 +66,7 @@ def command(args):
                         result["failure_diagnostic"] = task.failure_diagnostic(args.failure_seq)
                     print(json.dumps(result, sort_keys=True))
                     return 0
-                if task.version != 3:
+                if task.version != 4 and not (task.version == 3 and action == "export"):
                     raise TaskError("LEGACY_TASK_MIGRATION_REQUIRED", "plan")
         if action == "update":
             from .settings import update_task
@@ -96,6 +98,8 @@ def command(args):
                 selection,
                 metadata=args.metadata,
                 image_extensions=args.image_extensions,
+                filename_template=args.filename_template,
+                filename_prefix=args.filename_prefix,
             ) as task:
                 result = task.inspect()
         elif action == "export":

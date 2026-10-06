@@ -28,7 +28,7 @@ def test_workspace_reopen_conflict_and_frozen_capacity(tmp_path, monkeypatch):
     with TaskDB.create(
         directory, ws, {"metadata": False}, rows, publication_path=tmp_path / "publication"
     ) as task:
-        assert task.version == 3
+        assert task.version == 4
         assert task.meta("header")["effective_capacity"] == capacity.to_dict()
         item = task.claim()
         task.event(item["operation_id"], "NETWORK_START", {})

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -11,14 +12,16 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from ..capacity import CapacityConfig
+from ..download_naming import FLAT_POLICY, FilenameConfig, safe_output_path, stem_key
 from ..fs_safety import plain_entry
 from .context import LEGACY_CAPACITY, WORKSPACE_FORMAT, bootstrap_workspace, resolve_workspace
 from .plan import FORMAT, canonical, plan_digest, selection_digest
 
-LIGHT_FORMAT = "sakurapool-task-v3"
+RECORDDIR_FORMAT = "sakurapool-task-v3"
+LIGHT_FORMAT = "sakurapool-task-v4"
 MAX_DB_BYTES = 32 << 20
 MAX_JOURNAL_BYTES = 33 << 20
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class TaskError(RuntimeError):
@@ -147,6 +150,8 @@ def safe_failure(details):
         "NETWORK_START",
         "STAGED",
         "PREPARED",
+        "PUBLISH_INTENT",
+        "PARTIAL",
         "PUBLISHED",
     }:
         result["operation_phase"] = details["operation_phase"]
@@ -163,16 +168,17 @@ class TaskDB:
         probe = _connect(self.path, readonly=True)
         try:
             self.version = probe.execute("PRAGMA user_version").fetchone()[0]
-            if self.version not in (1, 2, 3):
+            if self.version not in (1, 2, 3, 4):
                 raise TaskError("TASKDB_VERSION")
             # This precedes writable connection, SQLite journal recovery and credentials.
-            if self.version != 3 and not readonly:
+            if self.version != 4 and not readonly:
                 raise TaskError("LEGACY_TASK_MIGRATION_REQUIRED", "plan")
             header = _bounded_meta(probe, "header", self.capacity.task_header_bytes)
             if not isinstance(header, dict):
                 raise TaskError("TASK_HEADER_INVALID")
-            if self.version == 3:
-                if header.get("format") != LIGHT_FORMAT:
+            if self.version in (3, 4):
+                expected_format = LIGHT_FORMAT if self.version == 4 else RECORDDIR_FORMAT
+                if header.get("format") != expected_format:
                     raise TaskError("TASKDB_VERSION")
                 declared = CapacityConfig.from_dict(header["effective_capacity"])
                 if declared != self.capacity:
@@ -182,6 +188,8 @@ class TaskDB:
                 )
                 if header.get("workspace_binding") != expected:
                     raise TaskError("TASK_WORKSPACE_CONFLICT", "plan")
+                if self.version == 4:
+                    self._validate_filenames(probe, header)
             else:
                 if header.get("format") != (WORKSPACE_FORMAT if self.version == 2 else FORMAT):
                     raise TaskError("TASKDB_VERSION")
@@ -205,7 +213,8 @@ class TaskDB:
         self.readonly = readonly
 
     @classmethod
-    def create(cls, directory, workspace, header, rows, *, publication_path, image_extensions=None):
+    def create(cls, directory, workspace, header, rows, *, publication_path, image_extensions=None,
+               filename_template="{tag}_{index}", filename_prefix=None):
         from ..image_formats import image_extensions as validate_extensions
         from ..workspace import Workspace
 
@@ -214,6 +223,11 @@ class TaskDB:
         ):
             raise TaskError("LEGACY_TASK_MIGRATION_REQUIRED", "create")
         extensions = validate_extensions(image_extensions)
+        try:
+            naming = FilenameConfig.resolve(header.get("query", {}), template=filename_template,
+                                            prefix=filename_prefix)
+        except ValueError as error:
+            raise TaskError(str(error), "create") from None
         capacity = workspace.capacity if workspace is not None else LEGACY_CAPACITY
         directory = Path(directory).absolute()
         if workspace is not None:
@@ -234,20 +248,33 @@ class TaskDB:
                     source TEXT NOT NULL,dataset TEXT NOT NULL,post_id TEXT NOT NULL,
                     state TEXT NOT NULL DEFAULT 'READY',delivery TEXT NOT NULL DEFAULT 'NONE',
                     operation_id TEXT,phase TEXT,stage TEXT,receipt TEXT,code TEXT,diagnostic TEXT,
-                    recovery_retries INTEGER NOT NULL DEFAULT 0);
+                    recovery_retries INTEGER NOT NULL DEFAULT 0,
+                    output_stem TEXT NOT NULL,output_key TEXT UNIQUE NOT NULL,
+                    published_members TEXT NOT NULL DEFAULT '[]');
                 CREATE INDEX items_state_seq ON items(state,seq);
             """)
-            db.execute("PRAGMA user_version=3")
+            db.execute("PRAGMA user_version=4")
             db.execute("BEGIN IMMEDIATE")
             count = 0
+            names_digest = hashlib.sha256()
             for row in rows:
                 if count >= capacity.freeze_count:
                     raise TaskError("SELECTION_LIMIT", "selection")
-                db.execute(
-                    "INSERT INTO items(seq,rid,record_id,source,dataset,post_id) "
-                    "VALUES(?,?,?,?,?,?)",
-                    (count, row.rid, row.record_id, row.source, row.dataset, row.post_id),
-                )
+                try:
+                    stem = naming.stem(count)
+                    for suffix in (".jpeg", ".json"):
+                        safe_output_path(directory / "output", stem + suffix)
+                    key = stem_key(stem)
+                    db.execute(
+                        "INSERT INTO items(seq,rid,record_id,source,dataset,post_id,"
+                        "output_stem,output_key) "
+                        "VALUES(?,?,?,?,?,?,?,?)",
+                        (count, row.rid, row.record_id, row.source, row.dataset, row.post_id,
+                         stem, key),
+                    )
+                except (ValueError, sqlite3.IntegrityError):
+                    raise TaskError("FILENAME_COLLISION_OR_INVALID", "create") from None
+                names_digest.update(canonical([count, stem, key]) + b"\n")
                 count += 1
             actual_count, digest = selection_digest(
                 db.execute(
@@ -260,7 +287,9 @@ class TaskDB:
                 "selection_count": actual_count,
                 "selection_digest": digest,
                 "metadata": bool(header.get("metadata", False)),
-                "output_policy": "task-relative-no-overwrite-v1",
+                "output_policy": FLAT_POLICY,
+                "filename_config": naming.to_dict(),
+                "filename_digest": names_digest.hexdigest(),
                 "effective_capacity": capacity.to_dict(),
                 "workspace_binding": workspace.download_binding(directory) if workspace else None,
             }
@@ -292,7 +321,7 @@ class TaskDB:
 
     @contextmanager
     def transaction(self):
-        if self.readonly or self.version != 3:
+        if self.readonly or self.version != 4:
             raise TaskError("TASKDB_READONLY")
         _check_files(self.path, self.capacity)
         self.db.execute("BEGIN IMMEDIATE")
@@ -332,6 +361,32 @@ class TaskDB:
     def set_meta(self, db, key, value):
         db.execute("UPDATE meta SET value=? WHERE key=?", (canonical(value).decode(), key))
 
+    def _validate_filenames(self, db, header):
+        if header.get("output_policy") != FLAT_POLICY:
+            raise TaskError("OUTPUT_POLICY_INVALID", "plan")
+        try:
+            naming = FilenameConfig.from_dict(header["filename_config"])
+            expected = FilenameConfig.resolve(header.get("query", {}), template=naming.template,
+                                              prefix=naming.prefix)
+            if expected != naming:
+                raise ValueError()
+            digest = hashlib.sha256()
+            count = 0
+            for row in db.execute("SELECT seq,output_stem,output_key FROM items ORDER BY seq"):
+                if row["seq"] != count or row["output_stem"] != naming.stem(count):
+                    raise ValueError()
+                if row["output_key"] != stem_key(row["output_stem"]):
+                    raise ValueError()
+                for suffix in (".jpeg", ".json"):
+                    safe_output_path(self.directory / "output", row["output_stem"] + suffix)
+                digest.update(canonical(list(row)) + b"\n")
+                count += 1
+            if (count != header["selection_count"]
+                    or digest.hexdigest() != header["filename_digest"]):
+                raise ValueError()
+        except (ValueError, KeyError, TypeError):
+            raise TaskError("FILENAME_CONFIG_INVALID", "plan") from None
+
     def validate_plan(self):
         header = self.meta("header")
         count, digest = selection_digest(
@@ -345,6 +400,8 @@ class TaskDB:
             or plan_digest(header) != self.meta("plan_digest")
         ):
             raise TaskError("PLAN_IDENTITY_MISMATCH", "plan")
+        if self.version == 4:
+            self._validate_filenames(self.db, header)
         return header
 
     def request(self, value):
@@ -355,7 +412,7 @@ class TaskDB:
         return {"requested": value, "state": self.meta("state")}
 
     def candidates(self, *, limit):
-        if type(limit) is not int or not 1 <= limit <= 8:
+        if type(limit) is not int or not 1 <= limit <= 12:
             raise TaskError("TASK_IDENTITY_INVALID")
         rows = self.db.execute(
             "SELECT seq,rid,record_id FROM items WHERE state='READY' ORDER BY seq LIMIT ?", (limit,)
@@ -392,26 +449,40 @@ class TaskDB:
             operation = uuid.uuid4().hex
             db.execute(
                 "UPDATE items SET state='IN_PROGRESS',operation_id=?,phase='CLAIMED',"
-                "stage=NULL,receipt=NULL,diagnostic=NULL,code=NULL WHERE seq=? AND state='READY'",
+                "stage=NULL,receipt=NULL,diagnostic=NULL,code=NULL,published_members='[]' "
+                "WHERE seq=? AND state='READY'",
                 (operation, row["seq"]),
             )
             return dict(row) | {"operation_id": operation, "phase": "CLAIMED"}
 
-    def event(self, operation, event, payload):
+    def recovery_event(self, operation, event, payload):
+        self.event(operation, event, payload, recovery=True)
+
+    def event(self, operation, event, payload, *, recovery=False):
         transitions = {
             "NETWORK_START": "CLAIMED",
             "STAGED": "NETWORK_START",
             "CREATED": "STAGED",
             "PREPARED": "STAGED",
-            "PUBLISHED": "PREPARED",
+            "PUBLISH_INTENT": "PREPARED",
+            "MEMBER_PUBLISHED": ("PUBLISH_INTENT", "PARTIAL"),
+            "PUBLISHED": ("PUBLISH_INTENT", "PARTIAL"),
         }
         if event not in transitions:
             raise TaskError("ATTEMPT_EVENT_INVALID")
         with self.transaction() as db:
             row = db.execute(
-                "SELECT * FROM items WHERE operation_id=? AND state='IN_PROGRESS'", (operation,)
+                "SELECT * FROM items WHERE operation_id=? AND state IN "
+                "('IN_PROGRESS','FAILED','BLOCKED')", (operation,)
             ).fetchone()
-            if row is None or row["phase"] != transitions[event]:
+            if row is not None and not recovery and row["state"] != "IN_PROGRESS":
+                raise TaskError("ATTEMPT_EVENT_ORDER_INVALID")
+            if (recovery and row is not None and event == "PUBLISHED"
+                    and row["phase"] == "PUBLISHED"):
+                return
+            allowed = transitions[event]
+            allowed = (allowed,) if type(allowed) is str else allowed
+            if row is None or row["phase"] not in allowed:
                 raise TaskError("ATTEMPT_EVENT_ORDER_INVALID")
             if event == "STAGED":
                 stage = {**payload, "created": {}}
@@ -425,6 +496,29 @@ class TaskDB:
                     "UPDATE items SET stage=? WHERE seq=?", (canonical(stage).decode(), row["seq"])
                 )
             elif event == "PREPARED":
+                from ..storage.flat_delivery import DeliveryMapping, validate_receipt
+
+                try:
+                    config = FilenameConfig.from_dict(self.meta("header")["filename_config"])
+                    stem = config.stem(row["seq"])
+                    if stem != row["output_stem"]:
+                        raise ValueError()
+                    proofs = payload["receipt"]
+                    image_names = [n for n in proofs
+                                   if any(n == stem + ext for ext in self.image_extensions)]
+                    if len(image_names) != 1:
+                        raise ValueError()
+                    mapping = DeliveryMapping(stem, image_names[0][len(stem):],
+                                              stem + ".json" in proofs)
+                    validate_receipt(payload, mapping)
+                    stage = json.loads(row["stage"])
+                    if (payload["stage_name"] != stage["name"]
+                            or payload["stage_identity"] != stage["identity"]
+                            or stage["created"] != {
+                                p["staged_name"]: p["identity"] for p in proofs.values()}):
+                        raise ValueError()
+                except (KeyError, TypeError, ValueError):
+                    raise TaskError("OUTPUT_CONFLICT", "publication_fetch") from None
                 receipt = {
                     **payload,
                     "task_id": self.meta("task_id"),
@@ -435,9 +529,22 @@ class TaskDB:
                 if len(encoded) > 8192:
                     raise TaskError("RECEIPT_LIMIT")
                 db.execute("UPDATE items SET receipt=? WHERE seq=?", (encoded.decode(), row["seq"]))
+            elif event == "MEMBER_PUBLISHED":
+                receipt = json.loads(row["receipt"])
+                names = json.loads(row["published_members"])
+                if set(payload) != {"name"} or payload["name"] not in receipt["receipt"]:
+                    raise TaskError("ATTEMPT_EVENT_INVALID")
+                if payload["name"] in names:
+                    raise TaskError("ATTEMPT_EVENT_ORDER_INVALID")
+                names.append(payload["name"])
+                db.execute("UPDATE items SET published_members=?,phase='PARTIAL' WHERE seq=?",
+                           (canonical(names).decode(), row["seq"]))
             elif event == "PUBLISHED":
+                receipt = json.loads(row["receipt"])
+                if set(json.loads(row["published_members"])) != set(receipt["receipt"]):
+                    raise TaskError("ATTEMPT_EVENT_ORDER_INVALID")
                 db.execute("UPDATE items SET delivery='PUBLISHED' WHERE seq=?", (row["seq"],))
-            if event != "CREATED":
+            if event not in ("CREATED", "MEMBER_PUBLISHED"):
                 db.execute("UPDATE items SET phase=? WHERE seq=?", (event, row["seq"]))
 
     def finish_item(
@@ -461,7 +568,8 @@ class TaskDB:
                 phase = row["phase"]
                 details["operation_phase"] = (
                     phase
-                    if phase in {"CLAIMED", "NETWORK_START", "STAGED", "PREPARED", "PUBLISHED"}
+                    if phase in {"CLAIMED", "NETWORK_START", "STAGED", "PREPARED",
+                                 "PUBLISH_INTENT", "PARTIAL", "PUBLISHED"}
                     else "CLAIMED"
                 )
             db.execute(
@@ -480,7 +588,7 @@ class TaskDB:
     def failure_diagnostic(self, seq):
         if type(seq) is not int or not 0 <= seq < (1 << 63):
             raise TaskError("ATTEMPT_IDENTITY_INVALID")
-        if self.version != 3:
+        if self.version not in (3, 4):
             return None
         row = self.db.execute(
             "SELECT CASE WHEN typeof(diagnostic)='text' AND "
@@ -499,7 +607,7 @@ class TaskDB:
             raise TaskError("ATTEMPT_DIAGNOSTIC_INVALID") from None
 
     def inspect(self):
-        group = "state,delivery" + (",accounting" if self.version != 3 else "")
+        group = "state,delivery" + (",accounting" if self.version < 3 else "")
         stats = [
             dict(row)
             for row in self.db.execute(
@@ -521,7 +629,9 @@ class TaskDB:
                 "SELECT count(*) FROM items WHERE code IS NOT NULL"
             ).fetchone()[0],
         }
-        if self.version == 3:
+        if self.version in (3, 4):
+            result["read_only_archive"] = self.version == 3
+            result["migration_required"] = self.version == 3
             result["delivered_verified"] = self.db.execute(
                 "SELECT count(*) FROM items WHERE state='DONE' AND delivery='VERIFIED'"
             ).fetchone()[0]
@@ -538,7 +648,7 @@ class TaskDB:
 
     @contextmanager
     def runner_lock(self):
-        if self.version != 3 or self.readonly:
+        if self.version != 4 or self.readonly:
             raise TaskError("TASKDB_READONLY")
         lock = plain_entry(self.directory / "runner.lock").open("r+b")
         try:

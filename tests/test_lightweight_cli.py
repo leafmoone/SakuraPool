@@ -28,11 +28,11 @@ def test_default_direct_session_cli_task_create_run_export(lightweight, monkeypa
         record = pub.runtime.resolve_one("synthetic", "0", "small").record_id
         assert fetch_publication_sample(
             pub, record, env.transport(), direct, control=object()
-        ).is_dir()
+        ).is_file()
     session_root = env.workspace.root / "session"
     session_root.mkdir()
     with PublicationSession(env.publication, env.transport(), control=object()) as session:
-        assert session.fetch(record, session_root).is_dir()
+        assert session.fetch(record, session_root, filename_index=1).is_file()
     query = env.workspace.root / "query.json"
     query.write_text(
         json.dumps(
@@ -85,7 +85,7 @@ def test_default_direct_session_cli_task_create_run_export(lightweight, monkeypa
         )
         == 0
     )
-    assert json.loads(capsys.readouterr().out)["format"] == "sakurapool-task-v3"
+    assert json.loads(capsys.readouterr().out)["format"] == "sakurapool-task-v4"
     assert (
         main(["task", "run", str(env.directory), "--profile", str(profile), "--workers", "4"]) == 0
     )
@@ -116,7 +116,7 @@ def test_default_direct_session_cli_task_create_run_export(lightweight, monkeypa
         )
         == 0
     )
-    assert Path(json.loads(capsys.readouterr().out)["output"]).is_dir()
+    assert Path(json.loads(capsys.readouterr().out)["output"]).is_file()
     assert all(root == env.workspace.root for root, _ in calls)
     assert not list(env.workspace.state.iterdir())
 

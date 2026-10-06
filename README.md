@@ -2,7 +2,7 @@
 
 ## Lightweight downloads (current contract)
 
-New downloads use **TaskDB v3** and **workspace manifest v2**. The production
+New downloads use **TaskDB v4**, frozen flat-output naming, and **workspace manifest v2**. The production
 path does not instantiate `BudgetLedger`, read/write budget slots, recursively
 scan disk for quota admission, or persist request/body/metadata/saved-byte
 consumption. There is no cumulative request, bandwidth, saved-count, disk-output,
@@ -31,7 +31,9 @@ bounded concurrent working memory, chunk/header/RPC buffers, selection heap and
 SQLite/JSON parser bounds, exact indexed extents and image SHA, bounded metadata
 validation, trusted origin/redirect policy, conditional positive/negative proof,
 finite Origin retry (at most 3) plus CDN hop, owned temporary files and atomic
-no-overwrite delivery. Large images may stream over several configured chunks.
+no-overwrite **per-file** publication. An image plus JSON is not pair-atomic:
+only the verified receipt/DONE state and exported manifest mark a complete delivery.
+Large images may stream over several configured chunks.
 No change implies image decoding or conversion.
 
 Resume never reselects records. A published receipt must match task/operation,
@@ -43,6 +45,14 @@ blindly retried. Classified transient, unpublished failures require explicit
 resume; at most two recovery retries survive process restarts. This is not an
 end-to-end exactly-once or Windows directory power-loss guarantee.
 
+Existing TaskDB v3 record-directory archives retain **read-only DB inspection and
+receipt-verified export compatibility**. Export creates a new manifest in that task
+domain: it is not a zero-write operation on the entire domain. All v3 execution,
+resume, pause/cancel and settings updates now explicitly fail
+`LEGACY_TASK_MIGRATION_REQUIRED` before credentials or writable SQLite. This is an
+explicit format4 execution-contract switch, not automatic migration. Completed v3
+images/record directories and already generated manifests are not renamed or changed.
+
 Existing TaskDB v1/v2 archives allow **read-only inspection only**. Export writes
 an artifact, so legacy export is explicitly rejected as well: every action except
 inspect fails `LEGACY_TASK_MIGRATION_REQUIRED` before publication loading, output
@@ -51,6 +61,54 @@ export to an external path, copying or migration. Migration is not automatic:
 confirmed deliveries need revalidation, uncertain items need isolation, and old
 UNKNOWN/pending accounting must remain archived. No migration or production
 resume is authorized by these implementation changes.
+
+## Flat filenames and recoverable publication
+
+New task outputs are directly under `output`, without record-ID directories. Task
+creation accepts `--filename-template` (default `{tag}_{index}`) and optional
+`--filename-prefix` replacing the tag label. The only supported fields are `{tag}`
+and `{index}`; index must occur exactly once, without format specs, conversions or
+attribute lookup. `index` is frozen selection `seq + 1`, never completion order.
+For a `1girl` query the outputs are `output/1girl_1.jpg`, `output/1girl_2.png`, etc.;
+requested and available metadata uses the same stem, such as `1girl_1.json`.
+Suffixes come from the actual indexed format; templates cannot specify extensions.
+
+Positive all/any tags and any-of branches are deterministically sorted/deduplicated
+and joined with underscores (qualified tags include namespace). Negative tags do
+not affect naming; no positive tag means `image`. Generated labels are NFC-normalized
+and Windows-forbidden characters become underscores. Explicit prefixes/template
+literals reject unsafe characters, controls, separators/traversal, reserved Windows
+names and terminal spaces/dots. Length limits are 240 UTF-8 bytes /180 UTF-16 units
+per basename and 240 UTF-16 units for the absolute output path. Long labels fail
+rather than silently truncate; choose an explicit short prefix. NFC-casefold stem
+uniqueness is checked at task freeze, independent of extension. All targets use
+no-overwrite publication. Filename policy/config and per-item stems are part of the
+frozen header/plan; format settings updates cannot rename them.
+
+```text
+sakura task create --workspace WORKSPACE --publication PUB --query QUERY.json --selection first --limit 3 --metadata --filename-template "{tag}_{index}" --filename-prefix batch --task-dir WORKSPACE/tasks/TASK
+sakura task run WORKSPACE/tasks/TASK --profile PROFILE.json --workers 6
+```
+
+The same publisher is used by direct `publication fetch` (default `image_1`, explicit
+`--filename-index`, template/prefix options) and `PublicationSession.fetch`, whose
+caller must supply `filename_index`. Direct/session callers select stable indexes;
+there is no automatic completion-order counter.
+
+A private identity-owned stage holds verified/fsynced bytes. PREPARED commits the
+exact source-to-final member map, root/stage/file identities and hashes;
+PUBLISH_INTENT commits before any no-replace rename. Per-member SQL acknowledgements
+and final verification precede PUBLISHED/DONE. A task restart can finish an interrupted
+pair only from that durable intent plus exact original file identity. Matching
+names/content alone cannot authorize adoption, deletion or overwrite. Missing,
+replaced, ambiguous or moved-back acknowledged files remain BLOCKED and preserved.
+The shared output directory may contain other records/user files; recovery checks
+only the operation's mapping and private stage, not exclusive ownership of output.
+
+There may be a visible image before its JSON. Direct/session calls without TaskDB
+preserve partial data on failure and do not promise automatic restart/adoption.
+Unsupported no-replace platforms fail closed; there is no fallback to overwriting
+rename and no Windows power-loss/exactly-once promise. No consumption ledger is added.
 
 ## Raw image delivery settings
 
@@ -62,7 +120,7 @@ is performed. Unknown formats and unsafe filenames are rejected. Index adapter
 `image_extensions` controls scanning and does not automatically enable download
 formats.
 
-New v3 tasks can explicitly expand their format selection without reselecting records:
+New v4 tasks can explicitly expand their format selection without reselecting records:
 
 ```text
 sakura task inspect /workspace/tasks/task
@@ -96,10 +154,28 @@ fixed `20261004T143905Z-upload` scope and merged at
 `62f86cc487af41de7d84bfb5a14d2fb1e0e172ac`; independent semantic comparison
 remains subset-only, and global index completion is not claimed. See
 [the P5-D report](reports/P5D/REPORT.md). The current lightweight workflow is
-tracked in [plan.md](plan.md). Default task workers=1; 2/4 are explicit upper
+tracked in [plan.md](plan.md). Default task workers=1; 2/4/6 are explicit upper
 bounds, with actual concurrency limited by object distribution and technical
 working memory. Earlier P3/P4 CLI examples below are historical/admin interfaces,
 not the default task workflow.
+
+### Speed and concurrency limits
+
+Six lanes are configurable, not a promise of 50% more public-network throughput.
+At an 8 MiB chunk, shared technical admission is 72,884,352 bytes per lane: four
+lanes 291,537,408 bytes (~278 MiB), six 437,306,112 bytes (~417 MiB), below the fixed
+512 MiB simultaneous-working-memory bound. Eight would require 583,074,816 bytes and
+remain unsupported. Larger chunks can cause six lanes to fail admission; candidate
+lookahead is bounded at 2W (<=12) and simultaneous requests to the same TAR stay gated.
+
+The completed one-authorized-run 1000-image v3 retest delivered 1,438,207,693 verified
+bytes in ~1615.97 seconds (~0.84877 MiB/s including startup verification). Its 323
+samples found four in-progress items in 317 of 318 active samples. Rust already
+reuses origin/CDN clients; bounded 256-request generation rotation deliberately
+refreshes connection/proof caches. Low Python CPU is not proof of the remote bottleneck:
+individual request latency/attempts were not recorded. Six-lane tests are small local
+synthetic correctness/utilization evidence, not public or production speed evidence.
+No extra public comparison was run for this change, and current v3 outputs are untouched.
 
 ## Workspace and implementation boundaries
 
@@ -111,7 +187,7 @@ sakura task create --workspace WORKSPACE --publication PUB --query QUERY.json --
 ```
 
 New workspace manifest v2 freezes physical-domain identity and technical capacity;
-TaskDB v3 binds the workspace and exact frozen plan. `workspace init --config`
+TaskDB v4 binds the workspace, exact frozen plan and filename mapping. `workspace init --config`
 accepts only `capacity`, not a download resource policy. `workspace inspect` reads
 legacy workspace identity without opening its ledger. Legacy-task migration is
 explicitly separate and is not implemented automatically.

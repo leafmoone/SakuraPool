@@ -9,7 +9,9 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from ..capacity import CapacityConfig
+from ..download_naming import DEFAULT_TEMPLATE, FLAT_POLICY, FilenameConfig
 from .bounded_json import validate_file
+from .flat_delivery import DeliveryMapping, publish_flat
 from .modelscope import ModelScopeDataset, _io_error
 from .prepared_fetch import stream_plan
 from .production import (
@@ -19,7 +21,7 @@ from .production import (
     RustProductionTransport,
 )
 from .publication import PublicationCorrupt
-from .retrieval import _publish_directory, _real_output_root
+from .retrieval import _real_output_root
 from .transport import BoundObject, GuardedTransport, RemoteIOError
 
 
@@ -213,6 +215,10 @@ def fetch_publication_sample(
     attempt_hook=None,
     capacity=None,
     image_extensions=None,
+    filename_template=DEFAULT_TEMPLATE,
+    filename_prefix=None,
+    filename_index=1,
+    delivery_mapping=None,
 ):
     from .publication import Publication
 
@@ -229,6 +235,10 @@ def fetch_publication_sample(
         attempt_hook=attempt_hook,
         capacity=capacity,
         image_extensions=image_extensions,
+        filename_template=filename_template,
+        filename_prefix=filename_prefix,
+        filename_index=filename_index,
+        delivery_mapping=delivery_mapping,
     )
 
 
@@ -243,6 +253,10 @@ def _fetch_publication_sample(
     attempt_hook=None,
     capacity=None,
     image_extensions=None,
+    filename_template=DEFAULT_TEMPLATE,
+    filename_prefix=None,
+    filename_index=1,
+    delivery_mapping=None,
 ):
     if pub._closed or not pub.full_verified:
         raise PublicationCorrupt("fetch requires full verified publication")
@@ -285,6 +299,17 @@ def _fetch_publication_sample(
     except ValueError:
         raise PublicationCorrupt("image format") from None
     suffix = filename.removeprefix("image")
+    if delivery_mapping is None:
+        config = FilenameConfig.resolve(template=filename_template, prefix=filename_prefix)
+        if type(filename_index) is not int or filename_index < 1:
+            raise ValueError("FILENAME_INDEX_INVALID")
+        delivery_mapping = DeliveryMapping(config.stem(filename_index - 1), suffix,
+                                           bool(metadata and loc["flags"] & 1))
+    if not isinstance(delivery_mapping, DeliveryMapping) or (
+        delivery_mapping.image_suffix != suffix
+        or delivery_mapping.metadata != bool(metadata and loc["flags"] & 1)
+    ):
+        raise ValueError("OUTPUT_MAPPING_INVALID")
     if scope is not None and (
         scope.origin,
         scope.repo_id,
@@ -315,6 +340,11 @@ def _fetch_publication_sample(
         if control is not None:
             raise PublicationCorrupt("external production control rejected")
     output = _real_output_root(Path(output), physical_root=getattr(transport, "root", None))
+    output_info = output.stat()
+    output_identity = [output_info.st_dev, output_info.st_ino]
+    delivery_mapping.check_paths(output)
+    if any(os.path.lexists(output / name) for name in delivery_mapping.names):
+        raise FileExistsError("never overwrite output")
     key = (pub.content_digest, rt.snapshot_id, idx, transport, ledger)
     obj = pub._verified.get(key)
     if getattr(transport, "_closed", False):
@@ -368,13 +398,10 @@ def _fetch_publication_sample(
         repository=obj.repo_id,
     )
     image_size, meta_size = plan.image_bytes, plan.metadata_bytes
-    final = output / record_id
-    if final.exists() or final.is_symlink():
-        raise FileExistsError("never overwrite output")
     stage = output / (".publication-fetch-" + secrets.token_hex(16))
     created, receipts = {}, {}
     stage_identity = None
-    delivered = False
+    delivered = prepared = False
     state = {"code": "publication_write", "body_error_code": None}
     try:
         stage.mkdir()
@@ -443,19 +470,29 @@ def _fetch_publication_sample(
                 "verification": "BOUNDED_JSON_NO_PUBLICATION_SHA",
             }
         state["code"] = "publication_publish"
+        receipt = {
+            "layout": FLAT_POLICY,
+            "stem": delivery_mapping.stem,
+            "output_identity": output_identity,
+            "stage_name": stage.name,
+            "stage_identity": list(stage_identity),
+            "receipt": {final_name: {**receipts[staged_name], "staged_name": staged_name}
+                        for final_name, staged_name in zip(delivery_mapping.names,
+                                                          delivery_mapping.staged_names)},
+        }
+        # After this intent-bearing boundary never delete downloaded or partially published data.
+        prepared = True
         if attempt_hook is not None:
-            attempt_hook(
-                "PREPARED", {"receipt": receipts, "directory_identity": list(stage_identity)}
-            )
-        _publish_directory(stage, final)
+            attempt_hook("PREPARED", receipt)
+        final = publish_flat(output, receipt, delivery_mapping, hook=attempt_hook)
         delivered = True
-        if attempt_hook is not None:
-            attempt_hook("PUBLISHED", {})
         return final
     except BaseException as primary:
         finalization_errors = ["RANGE_FINALIZATION_FAILED"] if state.get("range_secondary") else []
         safe = False
-        if not delivered:
+        if prepared:
+            delivered = any(os.path.lexists(output / name) for name in delivery_mapping.names)
+        if not delivered and not prepared:
             try:
                 safe = _cleanup_owned_stage(stage, stage_identity, created)
             except BaseException:

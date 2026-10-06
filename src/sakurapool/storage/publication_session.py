@@ -9,10 +9,15 @@ from .publication_fetch import fetch_publication_sample
 
 class PublicationSession:
     def __init__(
-        self, root, transport, *, control=None, scope=None, capacity=None, image_extensions=None
+        self, root, transport, *, control=None, scope=None, capacity=None, image_extensions=None,
+        filename_template="{tag}_{index}", filename_prefix=None
     ):
+        from ..download_naming import FilenameConfig
         from ..image_formats import image_extensions as validate_extensions
 
+        self.filename_config = FilenameConfig.resolve(
+            template=filename_template, prefix=filename_prefix
+        )
         self.image_extensions = validate_extensions(image_extensions)
         self._owner = get_ident()
         self.transport = transport
@@ -46,7 +51,7 @@ class PublicationSession:
         ):
             raise PublicationCorrupt("serial session lifecycle/transport mismatch")
 
-    def fetch(self, record_id, output, *, metadata=False, attempt_hook=None):
+    def fetch(self, record_id, output, *, filename_index, metadata=False, attempt_hook=None):
         self._check()
         return fetch_publication_sample(
             self.publication,
@@ -59,6 +64,9 @@ class PublicationSession:
             attempt_hook=attempt_hook,
             capacity=self.capacity,
             image_extensions=self.image_extensions,
+            filename_template=self.filename_config.template,
+            filename_prefix=self.filename_config.prefix,
+            filename_index=filename_index,
         )
 
     def close(self):

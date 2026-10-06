@@ -23,6 +23,8 @@ def create_task(
     *,
     metadata=False,
     image_extensions=None,
+    filename_template="{tag}_{index}",
+    filename_prefix=None,
 ):
     if workspace is not None and not getattr(workspace, "lightweight", False):
         raise TaskError("LEGACY_TASK_MIGRATION_REQUIRED", "create")
@@ -47,6 +49,8 @@ def create_task(
             selected_records(pub.runtime, query, selection, capacity),
             publication_path=publication,
             image_extensions=image_extensions,
+            filename_template=filename_template,
+            filename_prefix=filename_prefix,
         )
 
 
@@ -58,6 +62,66 @@ def check_publication_identity(task, publication):
     ):
         raise TaskError("PUBLICATION_IDENTITY_MISMATCH", "plan")
     return header
+
+
+def delivery_mapping(task, item, publication):
+    from ..download_naming import FilenameConfig
+    from ..image_formats import image_filename
+    from ..storage.flat_delivery import DeliveryMapping
+
+    header = task.meta("header")
+    stem = FilenameConfig.from_dict(header["filename_config"]).stem(item["seq"])
+    if item["output_stem"] != stem:
+        raise TaskError("OUTPUT_CONFLICT", "recovery")
+    loc = publication.runtime.location(item["rid"])
+    suffix = image_filename(publication.runtime.image_format(loc["format_id"]),
+                            task.image_extensions).removeprefix("image")
+    return DeliveryMapping(stem, suffix, bool(header["metadata"] and loc["flags"] & 1))
+
+
+def _flat_receipt(task, item, publication):
+    from ..storage.flat_delivery import validate_receipt
+
+    if type(item["receipt"]) is not str or len(item["receipt"].encode("utf-8")) > 8192:
+        raise TaskError("OUTPUT_CONFLICT", "recovery")
+    try:
+        if publication.runtime.resolve_record(item["record_id"]).rid != item["rid"]:
+            raise ValueError()
+        mapping = delivery_mapping(task, item, publication)
+        receipt = validate_receipt(json.loads(item["receipt"]), mapping)
+        operation = item["operation_id"]
+        if type(operation) is not str or len(operation) != 32 or any(
+            c not in "0123456789abcdef" for c in operation
+        ):
+            raise ValueError()
+        if (receipt.get("task_id") != task.meta("task_id")
+                or receipt.get("plan_digest") != task.meta("plan_digest")
+                or receipt.get("operation_id") != operation):
+            raise ValueError()
+        if type(item["stage"]) is not str or len(item["stage"].encode("utf-8")) > 8192:
+            raise ValueError()
+        stage = json.loads(item["stage"])
+        if (type(stage) is not dict or stage.get("name") != receipt["stage_name"]
+                or stage.get("identity") != receipt["stage_identity"]):
+            raise ValueError()
+        if stage.get("created") != {
+            proof["staged_name"]: proof["identity"] for proof in receipt["receipt"].values()
+        }:
+            raise ValueError()
+        loc = publication.runtime.location(item["rid"])
+        expected = {mapping.names[0]: loc["image_size"]}
+        if mapping.metadata:
+            expected[mapping.names[1]] = loc["metadata_size"]
+        for name, size in expected.items():
+            if receipt["receipt"][name]["bytes"] != size:
+                raise ValueError()
+        if receipt["receipt"][mapping.names[0]]["sha256"] != (
+            publication.expected_image_sha(item["rid"]).hex()
+        ):
+            raise ValueError()
+        return receipt, mapping
+    except (ValueError, TypeError, KeyError, RecursionError):
+        raise TaskError("OUTPUT_CONFLICT", "recovery") from None
 
 
 def verify_delivery(task, item, publication=None):
@@ -79,6 +143,22 @@ def verify_delivery(task, item, publication=None):
     if record.rid != item["rid"]:
         raise TaskError("RECORD_IDENTITY_MISMATCH", "recovery")
     location = publication.runtime.location(record.rid)
+    if task.version == 4:
+        from ..storage.flat_delivery import verify_final
+
+        receipt, mapping = _flat_receipt(task, item, publication)
+        try:
+            if item["phase"] != "PUBLISHED":
+                raise ValueError()
+            published = json.loads(item["published_members"])
+            if (type(published) is not list or any(type(n) is not str for n in published)
+                    or len(published) != len(mapping.names)
+                    or set(published) != set(mapping.names)):
+                raise ValueError()
+            verify_final(task.directory / "output", receipt, mapping)
+        except (ValueError, OSError):
+            raise TaskError("OUTPUT_CONFLICT", "recovery") from None
+        return receipt
     try:
         image_name = image_filename(
             publication.runtime.image_format(location["format_id"]), task.image_extensions
@@ -95,7 +175,7 @@ def verify_delivery(task, item, publication=None):
             or not _identity(receipt.get("directory_identity"))
         ):
             raise TaskError("OUTPUT_CONFLICT", "recovery")
-        if task.version == 3:
+        if task.version >= 3:
             operation = item["operation_id"]
         else:
             attempt = task.db.execute(
@@ -171,7 +251,7 @@ def _recover_stage(task, row):
     """Only a durable exact owned-stage identity allows cleanup; never name-only adoption."""
     if (
         row["delivery"] != "NONE"
-        or row["phase"] in {"PREPARED", "PUBLISHED"}
+        or row["phase"] in {"PREPARED", "PUBLISH_INTENT", "PARTIAL", "PUBLISHED"}
         or row["receipt"] is not None
     ):
         return False
@@ -235,7 +315,7 @@ def _reconcile_items(task):
 
 
 def reconcile(task, publication=None):
-    if task.version != 3:
+    if task.version != 4:
         raise TaskError("LEGACY_TASK_MIGRATION_REQUIRED", "recovery")
     if publication is None:
         with load_publication(task.meta("publication_path"), full_verify=True) as verified:
@@ -243,8 +323,35 @@ def reconcile(task, publication=None):
             return reconcile(task, verified)
     blocker = None
     for row in _reconcile_items(task):
-        final = task.directory / "output" / row["record_id"]
-        if os.path.lexists(final):
+        if row["receipt"] is not None:
+            try:
+                if row["phase"] not in {"PREPARED", "PUBLISH_INTENT", "PARTIAL", "PUBLISHED"}:
+                    raise TaskError("OUTPUT_UNCERTAIN", "recovery")
+                receipt, mapping = _flat_receipt(task, row, publication)
+                if row["state"] != "DONE":
+                    from ..storage.flat_delivery import publish_flat
+
+                    published = json.loads(row["published_members"])
+                    publish_flat(task.directory / "output", receipt, mapping,
+                                 intent=row["phase"] != "PREPARED", published=published,
+                                 hook=lambda event, payload: task.recovery_event(
+                                     row["operation_id"], event, payload))
+                current = task.db.execute(
+                    "SELECT * FROM items WHERE seq=?", (row["seq"],)
+                ).fetchone()
+                verify_delivery(task, current, publication)
+                task.finish_item(row["seq"], state="DONE", operation=row["operation_id"])
+            except (TaskError, ValueError, OSError) as error:
+                classified = (error if isinstance(error, TaskError)
+                              else TaskError("OUTPUT_UNCERTAIN", "recovery"))
+                task.finish_item(row["seq"], state="BLOCKED", code=classified.code,
+                                 diagnostic={"phase": "publication_fetch", "delivery": "PUBLISHED",
+                                             "cleanup": "PRESERVED", "recoverable": False},
+                                 operation=row["operation_id"])
+                blocker = blocker or classified
+            continue
+        mapping = delivery_mapping(task, row, publication)
+        if any(os.path.lexists(task.directory / "output" / name) for name in mapping.names):
             try:
                 verify_delivery(task, row, publication)
                 task.finish_item(row["seq"], state="DONE", operation=row["operation_id"])
@@ -304,7 +411,7 @@ def reconcile(task, publication=None):
 
 
 def preflight(task, pub, item, transport, *, prepared=None, **_ignored):
-    if task.version != 3:
+    if task.version != 4:
         raise TaskError("LEGACY_TASK_MIGRATION_REQUIRED", "preflight")
     if getattr(transport, "ledger", None) is not None:
         raise TaskError("CONSUMPTION_LEDGER_UNSUPPORTED", "preflight")
@@ -326,7 +433,11 @@ def preflight(task, pub, item, transport, *, prepared=None, **_ignored):
     output = _real_output_root(
         task.directory / "output", physical_root=getattr(transport, "root", None)
     )
-    if os.path.lexists(output / item["record_id"]):
+    # Candidate projections have no stem: use the full immutable item after owner lookup.
+    full = task.db.execute("SELECT * FROM items WHERE seq=?", (item["seq"],)).fetchone()
+    mapping = delivery_mapping(task, full, pub)
+    mapping.check_paths(output)
+    if any(os.path.lexists(output / name) for name in mapping.names):
         raise TaskError("OUTPUT_CONFLICT", "preflight")
     return output
 
@@ -341,7 +452,7 @@ def run_task(
     connection_profile=None,
     workers=1,
 ):
-    if type(workers) is not int or workers not in (1, 2, 4):
+    if type(workers) is not int or workers not in (1, 2, 4, 6):
         raise TaskError("WORKERS_INVALID", "preflight")
     with TaskDB(directory) as task, task.runner_lock():
         if getattr(transport, "ledger", None) is not None:

@@ -13,7 +13,7 @@ from .store import TaskDB, TaskError
 def export_task(directory, manifest):
     manifest = Path(manifest).absolute()
     with TaskDB(directory, readonly=True) as task:
-        if task.version != 3:
+        if task.version not in (3, 4):
             raise TaskError("LEGACY_TASK_MIGRATION_REQUIRED", "export")
         return _export_lightweight(task, manifest)
 
@@ -48,7 +48,8 @@ def _export_lightweight(task, manifest):
                     "post_id": item["post_id"],
                     "files": [
                         {
-                            "path": f"output/{item['record_id']}/{name}",
+                            "path": (f"output/{name}" if task.version == 4
+                                     else f"output/{item['record_id']}/{name}"),
                             "bytes": proof["bytes"],
                             "sha256": proof["sha256"],
                         }
