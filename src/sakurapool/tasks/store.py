@@ -179,7 +179,11 @@ class TaskDB:
         self.version = version
 
     @classmethod
-    def create(cls, directory, ledger, header, rows, *, publication_path, max_bytes=512 << 20):
+    def create(cls, directory, ledger, header, rows, *, publication_path, max_bytes=512 << 20,
+               image_extensions=None):
+        from ..image_formats import image_extensions as validate_extensions
+
+        extensions = validate_extensions(image_extensions)
         directory = Path(directory).absolute()
         workspace = getattr(ledger, "workspace", None)
         capacity = workspace.capacity if workspace is not None else LEGACY_CAPACITY
@@ -270,6 +274,8 @@ class TaskDB:
                 "request": None,
                 "publication_path": str(Path(publication_path).absolute()),
                 "max_output_bytes": max_bytes,
+                "image_extensions": list(extensions),
+                "settings_version": 0,
                 "confirmed_output_bytes": 0,
             }
             if binding is not None:
@@ -348,6 +354,21 @@ class TaskDB:
         if row is None:
             raise TaskError("TASKDB_META_MISSING")
         return json.loads(row[0])
+
+    @property
+    def image_extensions(self):
+        from ..image_formats import image_extensions
+
+        row = self.db.execute("SELECT value FROM meta WHERE key='image_extensions'").fetchone()
+        return image_extensions(json.loads(row[0]) if row else None)
+
+    @property
+    def settings_version(self):
+        row = self.db.execute("SELECT value FROM meta WHERE key='settings_version'").fetchone()
+        version = json.loads(row[0]) if row else 0
+        if type(version) is not int or not 0 <= version < (1 << 63):
+            raise TaskError("SETTINGS_VERSION_INVALID", "update")
+        return version
 
     def set_meta(self, db, key, value):
         db.execute("UPDATE meta SET value=? WHERE key=?", (canonical(value).decode(), key))
@@ -543,6 +564,10 @@ class TaskDB:
             "SELECT count(*) FROM items WHERE accounting='UNKNOWN'"
         ).fetchone()[0]
         return {
+            "settings_version": self.settings_version,
+            "image_extensions": list(self.image_extensions),
+            "max_output_bytes": self.meta("max_output_bytes"),
+            "confirmed_output_bytes": self.meta("confirmed_output_bytes"),
             "requested_count": self.meta("header")["selection_count"],
             "delivered_confirmed": confirmed,
             "error_count": errors,

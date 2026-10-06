@@ -33,7 +33,11 @@ def create_task(
     *,
     metadata=False,
     max_output_bytes=512 << 20,
+    image_extensions=None,
 ):
+    from ..image_formats import image_extensions as validate_extensions
+
+    extensions = validate_extensions(image_extensions)
     workspace = getattr(ledger, "workspace", None)
     capacity = workspace.capacity if workspace is not None else LEGACY_CAPACITY
     if workspace is not None:
@@ -56,6 +60,7 @@ def create_task(
             selected_records(pub.runtime, query, selection, capacity),
             publication_path=publication,
             max_bytes=max_output_bytes,
+            image_extensions=extensions,
         )
 
 
@@ -69,7 +74,28 @@ def check_publication_identity(task, publication):
     return header
 
 
-def verify_delivery(task, item):
+def verify_delivery(task, item, publication=None):
+    if publication is None:
+        with load_publication(task.meta("publication_path"), full_verify=True) as verified:
+            check_publication_identity(task, verified)
+            return verify_delivery(task, item, verified)
+    if publication._closed or not publication.full_verified:
+        raise TaskError("PUBLICATION_IDENTITY_MISMATCH", "recovery")
+    header = task.meta("header")
+    if (publication.content_digest != header["publication_digest"] or
+            publication.runtime.snapshot_id != header["snapshot_id"]):
+        raise TaskError("PUBLICATION_IDENTITY_MISMATCH", "recovery")
+    from ..image_formats import image_filename
+
+    record = publication.runtime.resolve_record(item["record_id"])
+    if record.rid != item["rid"]:
+        raise TaskError("RECORD_IDENTITY_MISMATCH", "recovery")
+    location = publication.runtime.location(record.rid)
+    try:
+        image_name = image_filename(publication.runtime.image_format(location["format_id"]),
+                                    task.image_extensions)
+    except ValueError:
+        raise TaskError("OUTPUT_CONFLICT", "recovery") from None
     if item["receipt"] is None:
         raise TaskError("OUTPUT_CONFLICT", "recovery")
     receipt = json.loads(item["receipt"])
@@ -91,15 +117,13 @@ def verify_delivery(task, item):
         raise TaskError("OUTPUT_REPLACED", "recovery")
     if {path.name for path in final.iterdir()} != set(receipt["receipt"]):
         raise TaskError("OUTPUT_CONFLICT", "recovery")
+    expected = {image_name: location["image_size"]}
+    if task.meta("header")["metadata"] and location["flags"] & 1:
+        expected["metadata.json"] = location["metadata_size"]
+    if set(receipt["receipt"]) != set(expected):
+        raise TaskError("OUTPUT_CONFLICT", "recovery")
     for name, proof in receipt["receipt"].items():
-        if name not in (
-            "image.jpg",
-            "image.jpeg",
-            "image.png",
-            "image.webp",
-            "image.avif",
-            "metadata.json",
-        ):
+        if proof["bytes"] != expected[name]:
             raise TaskError("OUTPUT_CONFLICT", "recovery")
         path = plain_entry(final / name)
         info = path.stat()
@@ -112,8 +136,12 @@ def verify_delivery(task, item):
     return receipt
 
 
-def reconcile(task):
+def reconcile(task, publication=None):
     """UNKNOWN is never permission to retry or reset accounting."""
+    if publication is None:
+        with load_publication(task.meta("publication_path"), full_verify=True) as verified:
+            check_publication_identity(task, verified)
+            return reconcile(task, verified)
     blocker = None
     for row in task.db.execute("SELECT * FROM items WHERE state IN ('IN_PROGRESS','DONE')"):
         final = task.directory / "output" / row["record_id"]
@@ -122,7 +150,7 @@ def reconcile(task):
         ).fetchone()
         if os.path.lexists(final):
             try:
-                verify_delivery(task, row)
+                verify_delivery(task, row, publication)
             except TaskError as error:
                 blocker = blocker or error
                 continue
@@ -201,7 +229,8 @@ def preflight(task, pub, item, transport, *, prepared=None, proof_warm=None, led
             descriptor = (
                 prepared
                 if prepared is not None
-                else PreparedFetch._prepare(pub, item["record_id"], capacity=capacity)
+                else PreparedFetch._prepare(pub, item["record_id"], capacity=capacity,
+                                                image_extensions=task.image_extensions)
             )
             proof_cached = predict(
                 descriptor.transport_identity,
@@ -346,14 +375,15 @@ def run_task(
             task.set_meta(db, "state", "RUNNING")
         try:
             with PublicationSession(
-                task.meta("publication_path"), transport, control=control
+                task.meta("publication_path"), transport, control=control,
+                image_extensions=task.image_extensions
             ) as session:
                 header = check_publication_identity(task, session.publication)
                 if connection_profile is not None:
                     from .profile import validate_allowlist
 
                     validate_allowlist(connection_profile, session.publication)
-                reconcile(task)
+                reconcile(task, session.publication)
                 if task.db.execute("SELECT 1 FROM items WHERE state='BLOCKED' LIMIT 1").fetchone():
                     raise TaskError("BLOCKED_ACCOUNTING", "recovery")
                 if hasattr(transport, "clone"):

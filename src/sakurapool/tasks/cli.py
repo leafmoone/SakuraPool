@@ -21,6 +21,14 @@ def add_parser(subparsers):
     create.add_argument("--seed")
     create.add_argument("--records", help="bounded JSON record_id list")
     create.add_argument("--metadata", action="store_true")
+    create.add_argument("--image-extensions", help="comma-separated registered suffixes")
+    update = commands.add_parser("update")
+    update.add_argument("task_dir")
+    update.add_argument("--workspace")
+    update.add_argument("--expected-settings-version", type=int, required=True)
+    update.add_argument("--max-output-bytes", type=int)
+    update.add_argument("--image-extensions",
+                        help="comma-separated registered suffixes; raw bytes, no conversion")
     create.add_argument("--max-output-bytes", type=int, default=512 << 20)
     for name in ("inspect", "run", "pause", "cancel", "resume", "export"):
         command = commands.add_parser(name)
@@ -56,7 +64,14 @@ def command(args):
                     print(json.dumps(task.inspect(), sort_keys=True))
                     return 0
         ledger = workspace.ledger() if workspace is not None else BudgetLedger(DEFAULT_WORK_ROOT)
-        if action in ("pause", "cancel"):
+        if action == "update":
+            from .settings import update_task
+
+            result = update_task(args.task_dir, ledger,
+                                 expected_settings_version=args.expected_settings_version,
+                                 max_output_bytes=args.max_output_bytes,
+                                 extensions=args.image_extensions)
+        elif action in ("pause", "cancel"):
             from .runner import admit_task_growth
 
             with (
@@ -83,6 +98,7 @@ def command(args):
                 selection,
                 metadata=args.metadata,
                 max_output_bytes=args.max_output_bytes,
+                image_extensions=args.image_extensions,
             ) as task:
                 result = task.inspect()
         elif action == "export":

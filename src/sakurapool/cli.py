@@ -185,6 +185,7 @@ def main(argv: list[str] | None = None) -> int:
     for option in ("publication", "record-id", "profile", "output"):
         publication_fetch.add_argument("--" + option, required=True)
     publication_fetch.add_argument("--metadata", action="store_true")
+    publication_fetch.add_argument("--image-extensions", help="comma-separated registered suffixes")
     publication_fetch.add_argument("--workspace")
     validate = subparsers.add_parser("validate", help="validate a query JSON document")
     validate.add_argument("query", type=Path)
@@ -391,6 +392,7 @@ def main(argv: list[str] | None = None) -> int:
                                         transport,
                                         args.output,
                                         metadata=args.metadata,
+                                        image_extensions=args.image_extensions,
                                         scope=scope,
                                     )
                                 )

@@ -20,7 +20,7 @@ from .production import (
     RustProductionTransport,
 )
 from .publication import PublicationCorrupt
-from .retrieval import EXTENSIONS, _publish_directory, _real_output_root
+from .retrieval import _publish_directory, _real_output_root
 from .transport import BoundObject, GuardedTransport, RemoteIOError
 
 
@@ -169,6 +169,7 @@ def fetch_publication_sample(
     scope=None,
     attempt_hook=None,
     capacity=None,
+    image_extensions=None,
 ):
     from .publication import Publication
 
@@ -184,6 +185,7 @@ def fetch_publication_sample(
         scope=scope,
         attempt_hook=attempt_hook,
         capacity=capacity,
+        image_extensions=image_extensions,
     )
 
 
@@ -197,6 +199,7 @@ def _fetch_publication_sample(
     scope=None,
     attempt_hook=None,
     capacity=None,
+    image_extensions=None,
 ):
     if pub._closed or not pub.full_verified:
         raise PublicationCorrupt("fetch requires full verified publication")
@@ -232,9 +235,13 @@ def _fetch_publication_sample(
     plan = stream_plan(loc, size, metadata=metadata, capacity=capacity)
     if plan.chunk_bytes > getattr(transport, "max_range_bytes", 8 << 20):
         raise PublicationCorrupt("transport range capacity unavailable")
-    suffix = "." + rt.image_format(loc["format_id"])
-    if suffix not in EXTENSIONS:
-        raise PublicationCorrupt("image format")
+    from ..image_formats import image_filename
+
+    try:
+        filename = image_filename(rt.image_format(loc["format_id"]), image_extensions)
+    except ValueError:
+        raise PublicationCorrupt("image format") from None
+    suffix = filename.removeprefix("image")
     if scope is not None and (
         scope.origin,
         scope.repo_id,

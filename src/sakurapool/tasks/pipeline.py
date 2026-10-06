@@ -182,6 +182,7 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
     from collections import OrderedDict
     from concurrent.futures import ThreadPoolExecutor
 
+    enabled_extensions = task.image_extensions
     from ..storage.prepared_fetch import PreparedFetch
     from ..storage.publication_fetch import _fetch_publication_sample
     from ..storage.transport import RemoteIOError
@@ -234,6 +235,7 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
                 lane,
                 output,
                 metadata=metadata,
+                image_extensions=enabled_extensions,
                 control=control,
                 attempt_hook=lambda name, data: event(lane.ledger, item["attempt_id"], name, data),
             )
@@ -557,7 +559,8 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
                     selected = None
                     for candidate in candidates:
                         descriptor = PreparedFetch._prepare(
-                            publication, candidate["record_id"], capacity=task.capacity
+                            publication, candidate["record_id"], capacity=task.capacity,
+                            image_extensions=enabled_extensions
                         )
                         if object_key(descriptor) not in busy_keys:
                             selected = (candidate, descriptor)

@@ -748,6 +748,53 @@ class BudgetLedger:
         return totals
 
     @_workspace_operation
+    def _admit_quiescent_disk(self, disk_bytes):
+        index, (generation, used, leases, proofs) = self._read_pair()
+        if leases or self._totals(used, leases)["inflight"]:
+            raise BudgetExceeded("ACCOUNTING_BUSY")
+        if self._totals(used, leases)["disk"] + disk_bytes > self.limits["disk"]:
+            raise BudgetExceeded("disk limit reached")
+        lease = uuid.uuid4().hex
+        leases[lease] = {**{name: disk_bytes if name == "disk" else 0 for name in RESERVED},
+                         "consumed_body": 0, "consumed_metadata": 0}
+        self._commit(index, generation, used, leases, proofs)
+        return lease
+
+    @_workspace_operation
+    def _finish_quiescent_disk(self, lease, disk_bytes):
+        index, (generation, used, leases, proofs) = self._read_pair()
+        row = leases.get(lease)
+        if row is None or row["disk"] != disk_bytes or len(leases) != 1:
+            raise BudgetCorrupt("owned metadata reservation changed")
+        if self._totals(used, leases)["disk"] > self.limits["disk"]:
+            raise BudgetExceeded("metadata settlement disk limit reached")
+        del leases[lease]
+        self._commit(index, generation, used, leases, proofs)
+
+    @contextmanager
+    def quiescent_disk_operation(self, disk_bytes):
+        """Hold ledger exclusion and admit one owned disk-only metadata operation."""
+        if type(disk_bytes) is not int or disk_bytes <= 0:
+            raise ValueError("positive bounded disk admission required")
+        with self._locked():
+            lease = self._admit_quiescent_disk(disk_bytes)
+            try:
+                yield lease
+            finally:
+                import sys
+
+                primary = sys.exc_info()[1]
+                try:
+                    self._finish_quiescent_disk(lease, disk_bytes)
+                except BaseException:
+                    if primary is None:
+                        raise BudgetCorrupt("metadata reservation settlement unknown") from None
+                    primary.task_secondary = (
+                        *getattr(primary, "task_secondary", ()),
+                        "TASK_RESOURCE_SETTLEMENT_UNKNOWN",
+                    )
+
+    @_workspace_operation
     def reserve(self, limits: Reservation) -> str:
         lease_id = uuid.uuid4().hex
         with self._locked():

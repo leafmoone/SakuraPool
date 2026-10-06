@@ -1,5 +1,42 @@
 # SakuraPool
 
+## Raw image delivery settings
+
+Publication/task downloads support registered `.jpg`, `.jpeg`, `.png`, `.webp`,
+`.avif`, and `.gif` formats. The default remains the first five; GIF is opt-in.
+`publication fetch` and `task create` accept `--image-extensions` as comma-separated
+suffixes. Bytes are verified and delivered unchanged; no decoding or conversion
+is performed. Unknown formats and unsafe filenames are rejected. Index adapter
+`image_extensions` controls scanning and does not automatically enable download
+formats.
+
+Existing tasks can explicitly expand their format selection and adjust their
+cumulative output ceiling without reselecting records:
+
+```text
+sakura task inspect /workspace/tasks/task
+sakura task update /workspace/tasks/task --expected-settings-version 0 --image-extensions .jpg,.jpeg,.png,.webp,.avif,.gif --max-output-bytes 1610612736
+```
+
+Use the actual `settings_version` from inspect. Old tasks start at version zero
+with the original five defaults. Updates use compare-and-swap, reject format
+removal, active runners/items, UNKNOWN accounting, or any workspace pending
+reservation/inflight use. Both settings and their old/new audit event commit in
+one transaction. Validation/CAS/SQL failure rolls back both settings and audit.
+Selection/seed/plan, deliveries and charged network accounting are unchanged.
+If SQLite commits but reservation settlement fails, settings **are already
+committed**: `TASK_RESOURCE_SETTLEMENT_UNKNOWN` retains the unresolved lease and
+blocks further updates. Inspect the actual settings version; do not blindly
+retry or clear reservations. A primary error plus settlement failure preserves
+both diagnostics.
+
+`max_output_bytes` is a finite total ceiling including already confirmed images
+and requested metadata, not an additional allowance. It must be an integer at
+least the confirmed cumulative bytes and below 2^63; zero means zero, not
+unlimited. Workspace resource policy and per-image/chunk capacity still apply.
+Settings never automatically raise quotas.
+
+
 SakuraPool builds reusable P2 TAR indexes, compiles read-only P3 query snapshots,
 and distributes runtime-first publication v2 for verified selective Range retrieval.
 Local, download and remote builders and explicit budgeted Rust production profiles

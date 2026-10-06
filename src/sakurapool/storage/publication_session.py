@@ -8,7 +8,11 @@ from .publication_fetch import fetch_publication_sample
 
 
 class PublicationSession:
-    def __init__(self, root, transport, *, control=None, scope=None, capacity=None):
+    def __init__(self, root, transport, *, control=None, scope=None, capacity=None,
+                 image_extensions=None):
+        from ..image_formats import image_extensions as validate_extensions
+
+        self.image_extensions = validate_extensions(image_extensions)
         self._owner = get_ident()
         self.transport = transport
         self.ledger = transport.ledger
@@ -53,6 +57,7 @@ class PublicationSession:
             scope=self.scope,
             attempt_hook=attempt_hook,
             capacity=self.capacity,
+            image_extensions=self.image_extensions,
         )
 
     def close(self):
