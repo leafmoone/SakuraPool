@@ -130,6 +130,14 @@ def command(args):
     except TaskError as error:
         print(json.dumps(error.public_diagnostic(), sort_keys=True))
         return 2
-    except Exception:
-        print(json.dumps({"code": "TASK_FAILED", "phase": "task", "recoverable": False}))
+    except Exception as error:
+        diagnostics = {"exception_type": "untrusted_exception", "frames": []}
+        try:
+            from .diagnostic import safe_diagnostic
+
+            diagnostics = safe_diagnostic(error)
+        except BaseException:
+            pass
+        print(json.dumps({"code": "TASK_FAILED", "phase": "task", "recoverable": False,
+                          "diagnostics": diagnostics}))
         return 2
