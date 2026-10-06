@@ -152,7 +152,13 @@ class ProviderObject:
             entry.path,
             entry.size,
         )
-        result.validate(test=dataset.transport.ledger.offline_mode)
+        result.validate(
+            test=getattr(
+                dataset.transport,
+                "offline_mode",
+                getattr(dataset.transport.ledger, "offline_mode", False),
+            )
+        )
         return result
 
 
@@ -188,20 +194,38 @@ class RustProductionTransport:
 
     def __init__(
         self,
-        ledger: BudgetLedger,
-        worker: Path,
+        ledger: BudgetLedger | None = None,
+        worker: Path | None = None,
         *,
         origin: str,
         token: str | None = None,
         same_origin_cookie: str | None = None,
         capacity=None,
         _test=False,
+        root: Path | None = None,
+        offline_mode: bool = False,
     ):
-        if ledger.offline_mode != _test:
+        self.lightweight = ledger is None
+        if self.lightweight and root is None:
+            raise ValueError("owned temporary root required")
+        _test = _test or offline_mode
+        if ledger is not None and ledger.offline_mode != _test:
             raise ValueError("production/test ledger profile mismatch")
         if not _test and origin not in ("https://www.modelscope.cn", "https://modelscope.cn"):
             raise ValueError("explicit configured ModelScope origin required")
+        if worker is None:
+            raise ValueError("worker binary required")
         self.ledger, self.worker, self.origin = ledger, Path(worker), origin
+        self.root = Path(root if root is not None else ledger.root).absolute()
+        self.offline_mode = _test
+        if self.lightweight and (
+            not self.root.is_dir()
+            or ".." in self.root.parts
+            or any(p.is_symlink() or is_reparse(p) for p in (self.root, *self.root.parents))
+        ):
+            raise ValueError("owned temporary root rejected")
+        self._root_identity = (self.root.stat().st_dev, self.root.stat().st_ino)
+        self._condition_proofs = {}
         workspace = getattr(ledger, "workspace", None)
         self.capacity = (
             capacity
@@ -235,8 +259,282 @@ class RustProductionTransport:
         self._proof_group = False
         self._live_proofs = set()
         self._closed = False
+        if self.lightweight:
+            self._persistent = True
+            self._lane_worker = None
+            self._lane_failed = False
+            self._lane_requests = 0
+            try:
+                self._lane_worker = self._new_lightweight_worker()
+            except RustWorkerError:
+                raise RemoteIOError(
+                    "Lightweight worker capability unavailable",
+                    code="WORKER_CAPABILITY_UNAVAILABLE",
+                    phase="worker",
+                    lightweight=True,
+                ) from None
 
     max_range_bytes = MAX_RANGE
+
+    def _new_lightweight_worker(self):
+        return RustWorker(self.worker, capacity=self.capacity, lightweight=True, timeout_s=40)
+
+    def _condition_proof(self, key):
+        return (
+            self._condition_proofs.get(key)
+            if self.lightweight
+            else self.ledger.condition_proof(key)
+        )
+
+    def _record_condition_proof(self, key, digest):
+        if self.lightweight:
+            if len(self._condition_proofs) >= 64 and key not in self._condition_proofs:
+                self._condition_proofs.pop(next(iter(self._condition_proofs)))
+            self._condition_proofs[key] = digest
+        else:
+            self.ledger.record_condition_proof(key, digest)
+
+    def _admit_lightweight_generation(self, requests):
+        if self._closed or self._operation_active or self._lane_failed or self._rotating:
+            raise RemoteIOError("Execution generation unavailable", lightweight=True)
+        if type(requests) is not int or not 0 <= requests <= 253:
+            raise ValueError("operation exceeds execution generation")
+        # Leave three slots for fresh observe/positive/negative proof requests.
+        if self._lane_requests + requests + 3 > 256:
+            self._rotating = True
+            try:
+                self._lane_worker.close()
+                self._lane_worker = None
+                self._generation += 1
+                self._objects.clear()
+                self._live_proofs.clear()
+                self._condition_proofs.clear()
+                self._lane_requests = 0
+                self._lane_worker = self._new_lightweight_worker()
+            except RustWorkerError:
+                self._lane_failed = True
+                raise RemoteIOError(
+                    "Lightweight worker capability unavailable",
+                    code="WORKER_CAPABILITY_UNAVAILABLE",
+                    phase="worker",
+                    lightweight=True,
+                ) from None
+            finally:
+                self._rotating = False
+
+    def _call_lightweight(
+        self, obj, root, *, start=0, length=1, condition="match", mode="range", json_limit=1 << 20
+    ):
+        obj.validate(test=self._test)
+        if obj.origin != self.origin:
+            raise RemoteIOError("Origin binding mismatch", lightweight=True)
+        sensitive = [self._token] if self._token else []
+        if self._cookie:
+            sensitive.extend(p.split("=", 1)[1] for p in self._cookie.split(";") if "=" in p)
+        if any(v and v in json.dumps(asdict(obj)) for v in sensitive):
+            raise RemoteIOError("Credential echo rejected", lightweight=True)
+        ProductionFootprint.admit(
+            mode, length if mode == "range" else obj.object_size, capacity=self.capacity
+        )
+        if self._lane_failed or self._lane_worker is None or self._lane_requests >= 256:
+            raise RustWorkerError("execution channel unavailable")
+        payload = dict(
+            profile="twohop_test" if self._test else "modelscope_https_v1",
+            object=asdict(obj),
+            token=self._token,
+            cookie=self._cookie,
+            start=start,
+            length=length,
+            condition=condition,
+            output_root=str(root),
+            output_name="body",
+            report_name=None if mode == "range" else "scan.json",
+            mode=mode,
+            json_limit=json_limit,
+            payload_revision=2,
+            range_chunk_bytes=self.max_range_bytes,
+            http_header_bytes=self.capacity.http_header_bytes,
+        )
+        worker = self._request_worker = self._lane_worker
+        request_id = uuid.uuid4().hex
+        try:
+            worker.send_raw(
+                (
+                    json.dumps(
+                        dict(
+                            type="request",
+                            request_id=request_id,
+                            operation="fetch_range" if mode == "range" else "scan_http_tar",
+                            payload={"production": payload},
+                        )
+                    )
+                    + "\n"
+                ).encode()
+            )
+            msg = worker.read_raw()
+            result = msg.get("result")
+            if (
+                msg.get("type") != "response"
+                or msg.get("request_id") != request_id
+                or not isinstance(result, dict)
+            ):
+                raise RustWorkerError("worker response invalid")
+            diagnostic = result.get("diagnostic")
+            if (
+                not isinstance(diagnostic, dict)
+                or set(diagnostic)
+                != {"code", "phase", "recoverable", "delivery_safe", "http_status"}
+                or diagnostic["code"]
+                not in _PUBLIC_ERROR_CODES
+                | {"ok", "rejected", "network_ambiguous", "validator_missing"}
+                or diagnostic["phase"] not in {"worker", "origin", "cdn", "body", "scan"}
+                or any(type(diagnostic[k]) is not bool for k in ("recoverable", "delivery_safe"))
+                or not (
+                    diagnostic["http_status"] is None
+                    or type(diagnostic["http_status"]) is int
+                    and 100 <= diagnostic["http_status"] <= 599
+                )
+            ):
+                raise RustWorkerError("worker diagnostic invalid")
+            self._request_terminal = True
+            self._lane_requests += 1
+            self.last_result = {"diagnostic": dict(diagnostic)}
+            if msg.get("ok") is not True or "production_error" in result:
+                raise RemoteIOError(
+                    "Rust production request rejected",
+                    lightweight=True,
+                    code=diagnostic["code"] if diagnostic["code"] != "ok" else "rejected",
+                    phase=diagnostic["phase"],
+                    http_status=diagnostic["http_status"],
+                    recoverable=diagnostic["recoverable"],
+                    delivery_safe=False,
+                )
+            if (
+                diagnostic["code"] != "ok"
+                or not diagnostic["delivery_safe"]
+                or result.get("technical") != {"eof_observed": True}
+            ):
+                raise RustWorkerError("worker delivery unconfirmed")
+            return {k: v for k, v in result.items() if k != "technical"}
+        except RustWorkerError:
+            self._lane_failed = True
+            primary = sys.exc_info()[1]
+            try:
+                worker.cancel()
+            except BaseException:
+                primary.finalization_secondary = (
+                    *getattr(primary, "finalization_secondary", ()),
+                    "worker_cancel",
+                )
+            raise
+        except RemoteIOError as error:
+            if not self._request_terminal or error.code in {
+                "network_ambiguous",
+                "body_io",
+                "body_framing",
+                "body_length",
+            }:
+                self._lane_failed = True
+                try:
+                    worker.cancel()
+                except BaseException:
+                    error.finalization_secondary = (
+                        *getattr(error, "finalization_secondary", ()),
+                        "worker_cancel",
+                    )
+            raise
+
+    @contextmanager
+    def _transfer_lightweight(
+        self,
+        obj,
+        *,
+        start=0,
+        length=1,
+        condition="match",
+        mode="range",
+        json_limit=1 << 20,
+        retain=False,
+        _proof=False,
+    ):
+        footprint = ProductionFootprint.admit(
+            mode, length if mode == "range" else obj.object_size, capacity=self.capacity
+        )
+        if (
+            condition == "match"
+            and not _proof
+            and self._condition_proof(proof_key(obj, test=self._test)) is None
+        ):
+            raise RemoteIOError("Verified production binding required", lightweight=True)
+        if retain:
+            raise ValueError("retained admin downloads require legacy transport")
+        root = self._owned_dir()
+        created = root.lstat()
+        root_identity = (created.st_dev, created.st_ino)
+        snapshot = None
+        try:
+            result = self._call(
+                obj,
+                root,
+                start=start,
+                length=length,
+                condition=condition,
+                mode=mode,
+                json_limit=json_limit,
+            )
+            snapshot = self._owned_snapshot(root)
+            if (
+                snapshot is None
+                or snapshot[0] != root_identity
+                or sum(v[2] for v in snapshot[1].values()) > footprint.artifacts
+            ):
+                raise RemoteIOError("Production artifact ownership unconfirmed", lightweight=True)
+            raw = b""
+            if mode == "range":
+                raw = (root / "body").read_bytes()
+                if condition == "wrong":
+                    if raw or result.get("status") != 412:
+                        raise RemoteIOError(
+                            "Negative condition verification failed", lightweight=True
+                        )
+                elif (
+                    len(raw) != length
+                    or hashlib.sha256(raw).hexdigest() != result.get("sha256")
+                    or result.get("status") != 206
+                    or condition == "match"
+                    and (
+                        result.get("etag") != obj.validator
+                        or result.get("cdn_host") != obj.cdn_host
+                    )
+                ):
+                    raise RemoteIOError("Range artifact verification failed", lightweight=True)
+            elif mode == "remote-stream-scan" and "body" in snapshot[1]:
+                raise RemoteIOError("Unexpected stream artifact", lightweight=True)
+            elif (
+                mode == "download-then-scan"
+                and snapshot[1].get("body", (0, 0, -1))[2] != obj.object_size
+            ):
+                raise RemoteIOError("Stream artifact length invalid", lightweight=True)
+            yield root, result, raw
+        finally:
+            primary = sys.exc_info()[1]
+            try:
+                current = self._owned_snapshot(root)
+                if (
+                    current is None
+                    or current[0] != root_identity
+                    or snapshot is not None
+                    and current != snapshot
+                ):
+                    raise RemoteIOError("Owned artifacts changed; retained", lightweight=True)
+                self._delete_owned(root, current)
+            except BaseException:
+                if primary is None:
+                    raise
+                primary.finalization_secondary = (
+                    *getattr(primary, "finalization_secondary", ()),
+                    "production_finalization",
+                )
 
     def _worker_capacity(self):
         return {"capacity": self.capacity} if self._capacity_v2 else {}
@@ -349,6 +647,9 @@ class RustProductionTransport:
                 self._lane_attempts += budget["attempts"]
 
     def _admit_generation(self, body, attempts, requests):
+        if self.lightweight:
+            self._admit_lightweight_generation(requests)
+            return
         # Session credit only: every request still reserves its real ledger quota.
         if not getattr(self, "_persistent", False):
             return
@@ -399,6 +700,8 @@ class RustProductionTransport:
             return self._enable_persistent()
 
     def _enable_persistent(self):
+        if self.lightweight and self._persistent and not self._closed:
+            return self
         if self._closed or self._operation_active or getattr(self, "_persistent", False):
             raise RemoteIOError("execution channel lifecycle invalid")
         self._lane_lease = self.ledger.reserve(
@@ -424,9 +727,11 @@ class RustProductionTransport:
         if getattr(self, "_control", None) is None:
             self._control = GuardedTransport(
                 self.ledger,
+                offline_mode=self.offline_mode,
+                allow_loopback_http=self.offline_mode,
                 trusted_hosts=frozenset({urlsplit(self.origin).hostname}),
                 token=self._token,
-                credential_origin=self.origin,
+                credential_origin=None if self.offline_mode else self.origin,
                 same_origin_cookie=self._cookie,
                 capacity=self.capacity,
             )
@@ -473,6 +778,11 @@ class RustProductionTransport:
                     )
             if worker is None or worker._proc is None:
                 try:
+                    if self.lightweight:
+                        self._persistent = False
+                        if primary is not None:
+                            raise primary
+                        return
                     resident_settle = getattr(self.ledger, "settle_resident", self.ledger.settle)
                     resident_settle(self._lane_lease)
                     self._persistent = False
@@ -504,7 +814,7 @@ class RustProductionTransport:
             )
         return False
 
-    def clone(self):
+    def clone(self, *, root=None):
         if self._closed:
             raise RemoteIOError("closed production transport")
         copy = RustProductionTransport(
@@ -514,6 +824,9 @@ class RustProductionTransport:
             token=self._token,
             same_origin_cookie=self._cookie,
             _test=self._test,
+            root=self.root if root is None else root,
+            capacity=self.capacity,
+            offline_mode=self.offline_mode,
         )
         return copy
 
@@ -560,7 +873,7 @@ class RustProductionTransport:
             or obj.revision != bound.immutable_revision
             or obj.object_size != bound.size
             or obj.validator != bound.strong_etag
-            or self.ledger.condition_proof(proof_key(obj, test=self._test)) != expected_probe_sha256
+            or self._condition_proof(proof_key(obj, test=self._test)) != expected_probe_sha256
         ):
             raise RemoteIOError("package requires independently verified Rust conditional binding")
 
@@ -590,6 +903,8 @@ class RustProductionTransport:
                 attempts = SESSION_ATTEMPTS_PER_TRANSFER * requests
             # Coordinator prediction cannot invoke the lane's owner-ledger RPC.
             # Actual admission refreshes policy and reserves; this is credit only.
+            if self.lightweight:
+                return self._lane_requests + requests + 3 <= 256
             credit = self._generation_budget(refresh=False)
             return (
                 self._lane_requests + requests <= 256
@@ -622,7 +937,12 @@ class RustProductionTransport:
                         SESSION_ATTEMPTS_PER_TRANSFER * len(lengths),
                         len(lengths),
                     )
-        return self._verified_object_body(candidate)
+        try:
+            return self._verified_object_body(candidate)
+        except RemoteIOError:
+            if not self.lightweight:
+                raise
+            return self.verify_conditions(candidate)
 
     def _verified_object_body(self, candidate: ProviderObject):
         """Resolve only this transport's live proof, matching full candidate identity."""
@@ -646,7 +966,7 @@ class RustProductionTransport:
         if len(matches) != 1:
             raise RemoteIOError("fresh transport verified object absent or ambiguous")
         key, obj = matches[0]
-        if self.ledger.condition_proof(proof_key(obj, test=self._test)) is None:
+        if self._condition_proof(proof_key(obj, test=self._test)) is None:
             raise RemoteIOError("verified object proof unavailable")
         if (
             getattr(self, "_persistent", False)
@@ -666,7 +986,7 @@ class RustProductionTransport:
         obj.validate(test=self._test)
         if (
             obj.origin != self.origin
-            or self.ledger.condition_proof(proof_key(obj, test=self._test)) is None
+            or self._condition_proof(proof_key(obj, test=self._test)) is None
         ):
             raise RemoteIOError("production object lacks verified conditional binding")
         key = (
@@ -684,7 +1004,12 @@ class RustProductionTransport:
             self._objects.popitem(last=False)
 
     def _owned_dir(self):
-        root = self.ledger.root / ("rust-transfer-" + secrets.token_hex(16))
+        if (
+            any(p.is_symlink() or is_reparse(p) for p in (self.root, *self.root.parents))
+            or (self.root.stat().st_dev, self.root.stat().st_ino) != self._root_identity
+        ):
+            raise RemoteIOError("Owned temporary root changed", lightweight=self.lightweight)
+        root = self.root / ("rust-transfer-" + secrets.token_hex(16))
         root.mkdir(exist_ok=False)
         return root
 
@@ -696,6 +1021,16 @@ class RustProductionTransport:
         secondary = ()
         worker_code = "worker_protocol"
         try:
+            if self.lightweight:
+                return self._call_lightweight(
+                    obj,
+                    root,
+                    start=start,
+                    length=length,
+                    condition=condition,
+                    mode=mode,
+                    json_limit=json_limit,
+                )
             return self._call_accounted(
                 obj,
                 root,
@@ -715,7 +1050,10 @@ class RustProductionTransport:
                 and value in {"worker_close", "worker_cancel", "worker_constructor_shutdown"}
             )[:16]
         converted = RemoteIOError(
-            "Rust production request rejected; accounting uncertain",
+            "Rust production request rejected"
+            if self.lightweight
+            else "Rust production request rejected; accounting uncertain",
+            lightweight=self.lightweight,
             code=worker_code,
             phase="worker",
             accounting="UNKNOWN",
@@ -742,8 +1080,12 @@ class RustProductionTransport:
         footprint = ProductionFootprint.admit(mode, size, capacity=self.capacity)
         memory, disk = footprint.memory, footprint.artifacts
         body_budget = network_body_budget(size, condition=condition)
-        budget = {"body": body_budget, "attempts": SESSION_ATTEMPTS_PER_TRANSFER,
-                  "disk": disk, "inflight": memory}
+        budget = {
+            "body": body_budget,
+            "attempts": SESSION_ATTEMPTS_PER_TRANSFER,
+            "disk": disk,
+            "inflight": memory,
+        }
         payload = dict(
             profile="twohop_test" if self._test else "modelscope_https_v1",
             object=asdict(obj),
@@ -795,16 +1137,19 @@ class RustProductionTransport:
             leases = []
             try:
                 for index in range(LEDGER_ATTEMPTS_PER_TRANSFER):
-                    leases.append(self.ledger.reserve(Reservation(
-                        body=body_budget if index == 0 else 0, attempt=True
-                    )))
+                    leases.append(
+                        self.ledger.reserve(
+                            Reservation(body=body_budget if index == 0 else 0, attempt=True)
+                        )
+                    )
             except BaseException as primary:
                 for lease in leases:
                     try:
                         self.ledger.settle(lease)  # No network; admitted attempts stay charged.
                     except BaseException:
                         primary.finalization_secondary = (
-                            *getattr(primary, "finalization_secondary", ()), "reservation_rollback"
+                            *getattr(primary, "finalization_secondary", ()),
+                            "reservation_rollback",
                         )
                 raise
             lease1 = leases[0]
@@ -851,8 +1196,10 @@ class RustProductionTransport:
             except BaseException as error:
                 self._unresolved_network = True
                 raise RemoteIOError(
-                    "production network settlement uncertain", code="network_ambiguous",
-                    phase="worker", accounting="UNKNOWN",
+                    "production network settlement uncertain",
+                    code="network_ambiguous",
+                    phase="worker",
+                    accounting="UNKNOWN",
                 ) from error
             self.last_result = {
                 "accounting": dict(accounting),
@@ -956,6 +1303,10 @@ class RustProductionTransport:
             self._request_terminal = False
         try:
             yield
+        except RemoteIOError as error:
+            if self.lightweight:
+                error.lightweight = True
+            raise
         finally:
             primary = sys.exc_info()[1]
             with self._lane_lock:
@@ -982,14 +1333,19 @@ class RustProductionTransport:
                 )
                 self._admit_generation(
                     network_body_budget(size, condition=kwargs.get("condition", "match")),
-                    SESSION_ATTEMPTS_PER_TRANSFER, 1
+                    SESSION_ATTEMPTS_PER_TRANSFER,
+                    1,
                 )
                 if (
                     getattr(self, "_persistent", False)
                     and kwargs.get("condition", "match") == "match"
                     and proof_key(obj, test=self._test) not in self._live_proofs
                 ):
-                    raise RemoteIOError("fresh generation conditional proof required")
+                    if not self.lightweight:
+                        raise RemoteIOError("fresh generation conditional proof required")
+                    refreshed = self.verify_conditions(obj)
+                    if refreshed != obj:
+                        raise RemoteIOError("Generation validator changed", lightweight=True)
         with self._operation():
             with self._transfer_owned_body(obj, **kwargs) as result:
                 yield result
@@ -1007,6 +1363,18 @@ class RustProductionTransport:
         retain=False,
     ):
         """Keep disk/inflight reserved through consumer audit; never publish partial files."""
+        if self.lightweight:
+            with self._transfer_lightweight(
+                obj,
+                start=start,
+                length=length,
+                condition=condition,
+                mode=mode,
+                json_limit=json_limit,
+                retain=retain,
+            ) as result:
+                yield result
+            return
         size = length if mode == "range" else obj.object_size
         footprint = ProductionFootprint.admit(mode, size, capacity=self.capacity)
         memory, disk = footprint.memory, footprint.transfer_disk
@@ -1267,7 +1635,13 @@ class RustProductionTransport:
 
     def _owned_snapshot(self, root):
         try:
-            if not root.is_relative_to(self.ledger.root) or any(
+            if self.lightweight and (
+                self.root.is_symlink()
+                or is_reparse(self.root)
+                or (self.root.stat().st_dev, self.root.stat().st_ino) != self._root_identity
+            ):
+                return None
+            if not root.is_relative_to(self.root) or any(
                 p.is_symlink() or is_reparse(p) for p in (root, *root.parents)
             ):
                 return None
@@ -1381,6 +1755,8 @@ class RustProductionTransport:
             self._live_proofs.add(proof_key(result, test=self._test))
             return result
         except BaseException as error:
+            if self.lightweight and isinstance(error, RemoteIOError):
+                error.lightweight = True
             self._live_proofs.clear()
             self._objects.clear()
             confirmed = (
@@ -1393,7 +1769,7 @@ class RustProductionTransport:
                 and not getattr(error, "finalization_secondary", ())
                 and not getattr(self, "_unresolved_network", False)
             )
-            if getattr(self, "_persistent", False) and not confirmed:
+            if getattr(self, "_persistent", False) and not confirmed and not self.lightweight:
                 self._lane_failed = True
             raise
         finally:
@@ -1412,7 +1788,7 @@ class RustProductionTransport:
             if negative.get("status") != 412 or negative.get("cdn_host") != bound.cdn_host:
                 raise RemoteIOError("conditional negative unsupported")
         key = proof_key(bound, test=self._test)
-        self.ledger.record_condition_proof(key, digest)
+        self._record_condition_proof(key, digest)
         self.register(bound)
         return bound
 
@@ -1425,6 +1801,10 @@ class RustProductionTransport:
     @contextmanager
     def _capability_match_body(self, obj):
         # Same bytes/header/size path; only the proof prerequisite differs.
+        if self.lightweight:
+            with self._transfer_lightweight(obj, _proof=True) as (_, result, _):
+                yield result
+            return
         footprint = ProductionFootprint.admit("range", 1, capacity=self.capacity)
         lease = self.ledger.reserve(Reservation(disk=footprint.transfer_disk))
         try:

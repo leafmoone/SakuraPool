@@ -1,41 +1,38 @@
-"""Export confirmed deliveries under the frozen task capacity."""
+"""Verified v3 delivery export; legacy export is rejected before any output write."""
 
 import os
 from pathlib import Path
 
-from ..storage.budget import Reservation
 from ..storage.publication import load_publication
 from ..storage.retrieval import _real_output_root
-from .context import validate_ledger
 from .plan import canonical
 from .runner import check_publication_identity, verify_delivery
 from .store import TaskDB, TaskError
 
 
-def export_task(directory, manifest, ledger):
+def export_task(directory, manifest):
     manifest = Path(manifest).absolute()
-    with TaskDB(directory, readonly=True) as task, load_publication(
-        task.meta("publication_path"), full_verify=True
-    ) as publication:
+    with TaskDB(directory, readonly=True) as task:
+        if task.version != 3:
+            raise TaskError("LEGACY_TASK_MIGRATION_REQUIRED", "export")
+        return _export_lightweight(task, manifest)
+
+
+def _export_lightweight(task, manifest):
+    with load_publication(task.meta("publication_path"), full_verify=True) as publication:
         check_publication_identity(task, publication)
-        validate_ledger(task, ledger)
-        _real_output_root(manifest.parent, ledger)
+        _real_output_root(manifest.parent)
         if os.path.lexists(manifest):
             raise TaskError("EXPORT_CONFLICT", "export")
-        _real_output_root(task.directory, ledger)
         if manifest.parent != task.directory:
             raise TaskError("EXPORT_BASE_MISMATCH", "export")
         task.validate_plan()
-        count = task.db.execute(
-            "SELECT count(*) FROM items WHERE state='DONE' AND accounting='CONFIRMED'"
-        ).fetchone()[0]
+        where = "state='DONE' AND delivery='VERIFIED'"
+        count = task.db.execute("SELECT count(*) FROM items WHERE " + where).fetchone()[0]
         cap = min(task.capacity.export_manifest_bytes, count * 8192 + 4096)
-        lease = ledger.reserve(Reservation(disk=cap))
         written = 0
         with manifest.open("xb") as stream:
-            for item in task.db.execute(
-                "SELECT * FROM items WHERE state='DONE' AND accounting='CONFIRMED' ORDER BY seq"
-            ):
+            for item in task.db.execute("SELECT * FROM items WHERE " + where + " ORDER BY seq"):
                 receipt = verify_delivery(task, item, publication)
                 row = {
                     "format": "sakurapool-task-export-v1",
@@ -61,9 +58,8 @@ def export_task(directory, manifest, ledger):
                 payload = canonical(row) + b"\n"
                 written += len(payload)
                 if written > cap:
-                    raise TaskError("RESOURCE_BLOCKED", "export")
+                    raise TaskError("EXPORT_LIMIT", "export")
                 stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
-        ledger.settle(lease)
         return {"exported": count, "bytes": written}

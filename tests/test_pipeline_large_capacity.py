@@ -1,4 +1,5 @@
 """Offline verified-publication clone-route regression, no provider requests."""
+
 import hashlib
 import json
 from contextlib import contextmanager
@@ -9,7 +10,7 @@ import pyarrow.parquet as pq
 import pytest
 from synthetic_p2 import ObjectSpec, SampleSpec, build_p2_directory
 
-from sakurapool.capacity import CapacityConfig, ResourcePolicy
+from sakurapool.capacity import CapacityConfig
 from sakurapool.indexer import _json
 from sakurapool.runtime import RuntimeQuerySpec, compile_runtime, load_p2_inventory
 from sakurapool.storage import publication_fetch
@@ -24,9 +25,16 @@ def test_large_image_clone_route(tmp_path, monkeypatch, workers, image_format):
     payload = b"x" * ((9 << 20) + 7)
     size = 12 << 20
     p2 = tmp_path / "p2"
-    build_p2_directory(p2, dataset="large", source="synthetic", objects=[
-        ObjectSpec("large.tar", [SampleSpec("one." + image_format, "1", has_json=False)],
-                   size=size)])
+    build_p2_directory(
+        p2,
+        dataset="large",
+        source="synthetic",
+        objects=[
+            ObjectSpec(
+                "large.tar", [SampleSpec("one." + image_format, "1", has_json=False)], size=size
+            )
+        ],
+    )
     contract = json.loads((p2 / "INPUT.json").read_bytes())
     contract["hash_images"] = True
     (p2 / "INPUT.json").write_bytes(_json(contract))
@@ -35,12 +43,19 @@ def test_large_image_clone_route(tmp_path, monkeypatch, workers, image_format):
         info = commit["files"]["samples"]
         path = p2 / info["path"]
         table = pq.read_table(path)
-        for name, value in (("image_format", image_format), ("size", len(payload)),
-                            ("sha256", hashlib.sha256(payload).hexdigest()),
-                            ("hash_source", "computed:sha256"), ("hash_kind", "sha256")):
+        for name, value in (
+            ("image_format", image_format),
+            ("size", len(payload)),
+            ("sha256", hashlib.sha256(payload).hexdigest()),
+            ("hash_source", "computed:sha256"),
+            ("hash_kind", "sha256"),
+        ):
             index = table.schema.get_field_index(name)
-            table = table.set_column(index, table.schema.field(index),
-                                     pa.array([value], type=table.schema.field(index).type))
+            table = table.set_column(
+                index,
+                table.schema.field(index),
+                pa.array([value], type=table.schema.field(index).type),
+            )
         pq.write_table(table, path)
         info.update(bytes=path.stat().st_size, sha256=sha(path))
         commit["contract_sha256"] = hashlib.sha256(_json(contract)).hexdigest()
@@ -50,29 +65,51 @@ def test_large_image_clone_route(tmp_path, monkeypatch, workers, image_format):
     roots = tmp_path / "roots.json"
     roots.write_text(json.dumps({"format": "sakurapool-p2-root-list-v1", "roots": [str(p2)]}))
     mapping = tmp_path / "mapping.jsonl"
-    mapping.write_text(json.dumps({"dataset_id": "large", "endpoint": "https://modelscope.cn",
-        "repo_id": "synthetic/large", "repo_type": "modelscope_dataset_legacy",
-        "revision_candidate": "b" * 40, "object_path": "large.tar", "object_size": size,
-        "provider_sha256": contract["inputs"]["large.tar"]["sha256"]}))
+    mapping.write_text(
+        json.dumps(
+            {
+                "dataset_id": "large",
+                "endpoint": "https://modelscope.cn",
+                "repo_id": "synthetic/large",
+                "repo_type": "modelscope_dataset_legacy",
+                "revision_candidate": "b" * 40,
+                "object_path": "large.tar",
+                "object_size": size,
+                "provider_sha256": contract["inputs"]["large.tar"]["sha256"],
+            }
+        )
+    )
     pub = tmp_path / "publication"
     build_publication(runtime, roots, mapping, pub)
     capacity = CapacityConfig(image_max_bytes=32 << 20)
-    workspace = Workspace.init(tmp_path / "workspace", capacity=capacity,
-                               policy=ResourcePolicy(inflight=512 << 20, disk=4 << 30))
-    ledger = workspace.ledger()
+    workspace = Workspace.init(tmp_path / "workspace", capacity=capacity)
     from sakurapool.storage.budget import BudgetLedger
 
-    monkeypatch.setattr(BudgetLedger, "offline_mode", property(lambda self: True))
+    def forbidden(*args, **kwargs):
+        raise AssertionError("download touched consumption ledger")
+
+    monkeypatch.setattr(BudgetLedger, "__init__", forbidden)
+    monkeypatch.setattr(Workspace, "ledger", forbidden)
     chunks = []
-    monkeypatch.setattr(publication_fetch, "exact_provider_lookup",
-        lambda *args: SimpleNamespace(repo_type="modelscope_dataset_legacy",
-            object_path="large.tar", origin="https://modelscope.cn", repo_id="synthetic/large",
-            revision="b" * 40, validator='"fresh"'))
+    monkeypatch.setattr(
+        publication_fetch,
+        "exact_provider_lookup",
+        lambda *args: SimpleNamespace(
+            repo_type="modelscope_dataset_legacy",
+            object_path="large.tar",
+            origin="https://modelscope.cn",
+            repo_id="synthetic/large",
+            revision="b" * 40,
+            validator='"fresh"',
+        ),
+    )
 
     class Transport:
         def __init__(self):
             self.capacity = capacity
-            self.ledger = ledger
+            self.ledger = None
+            self.offline_mode = True
+            self.root = workspace.root
             self.max_range_bytes = 8 << 20
 
         def clone(self):
@@ -95,16 +132,17 @@ def test_large_image_clone_route(tmp_path, monkeypatch, workers, image_format):
     directory = workspace.root / "tasks" / "large"
     from sakurapool.image_formats import SUPPORTED_IMAGE_EXTENSIONS
 
-    with create_task(pub, directory, ledger, RuntimeQuerySpec(),
-                     image_extensions=SUPPORTED_IMAGE_EXTENSIONS):
+    with create_task(
+        pub, directory, workspace, RuntimeQuerySpec(), image_extensions=SUPPORTED_IMAGE_EXTENSIONS
+    ):
         pass
     result = run_task(directory, Transport(), workers=workers, control=object())
-    assert result["delivered_confirmed"] == 1
-    assert result["unknown_accounting_count"] == 0
+    assert result["delivered_verified"] == 1
+    assert "unknown_accounting_count" not in result
     assert chunks == [8 << 20, (1 << 20) + 7]
     image = next((directory / "output").glob("*/image." + image_format))
     assert image.read_bytes() == payload
-    assert ledger.status()["saved_samples"] == 1
+    assert not list(workspace.state.iterdir())
     from sakurapool.storage.publication import PublicationCorrupt, load_publication
     from sakurapool.storage.publication_fetch import fetch_publication_sample
     from sakurapool.storage.publication_session import PublicationSession
@@ -113,35 +151,42 @@ def test_large_image_clone_route(tmp_path, monkeypatch, workers, image_format):
     from sakurapool.tasks.store import TaskDB
 
     with TaskDB(directory) as task:
-        record_id = task.db.execute('select record_id from items').fetchone()[0]
+        record_id = task.db.execute("select record_id from items").fetchone()[0]
         reconcile(task)
-    assert export_task(directory, directory / 'manifest.jsonl', ledger)['exported'] == 1
+    assert export_task(directory, directory / "manifest.jsonl")["exported"] == 1
     from sakurapool.tasks.runner import verify_delivery
     from sakurapool.tasks.store import TaskError
 
     with TaskDB(directory) as task:
-        item = dict(task.db.execute('select * from items').fetchone())
-        receipt = json.loads(item['receipt'])
-        proof = receipt['receipt'].pop('image.' + image_format)
-        wrong = 'image.png'
-        receipt['receipt'][wrong] = proof
+        item = dict(task.db.execute("select * from items").fetchone())
+        receipt = json.loads(item["receipt"])
+        proof = receipt["receipt"].pop("image." + image_format)
+        wrong = "image.png"
+        receipt["receipt"][wrong] = proof
         image.rename(image.with_name(wrong))
-        item['receipt'] = json.dumps(receipt)
-        task.db.execute('update attempts set receipt=?', (item['receipt'],))
-        with pytest.raises(TaskError, match='OUTPUT_CONFLICT'):
+        item["receipt"] = json.dumps(receipt)
+        task.db.execute("update items set receipt=?", (item["receipt"],))
+        with pytest.raises(TaskError, match="OUTPUT_CONFLICT"):
             verify_delivery(task, item)
-    if image_format == 'gif':
-        (workspace.root / 'direct').mkdir()
-        (workspace.root / 'session').mkdir()
+    if image_format == "gif":
+        (workspace.root / "direct").mkdir()
+        (workspace.root / "session").mkdir()
         with load_publication(pub, full_verify=True) as publication:
-            with pytest.raises(PublicationCorrupt, match='image format'):
-                fetch_publication_sample(publication, record_id, Transport(),
-                                         workspace.root / 'rejected')
-            fetch_publication_sample(publication, record_id, Transport(),
-                                     workspace.root / 'direct',
-                                     image_extensions=SUPPORTED_IMAGE_EXTENSIONS, control=object())
-        with PublicationSession(pub, Transport(), image_extensions=SUPPORTED_IMAGE_EXTENSIONS,
-                                control=object()) as session:
-            session.fetch(record_id, workspace.root / 'session')
-        assert (workspace.root / 'direct' / record_id / 'image.gif').read_bytes() == payload
-        assert (workspace.root / 'session' / record_id / 'image.gif').read_bytes() == payload
+            with pytest.raises(PublicationCorrupt, match="image format"):
+                fetch_publication_sample(
+                    publication, record_id, Transport(), workspace.root / "rejected"
+                )
+            fetch_publication_sample(
+                publication,
+                record_id,
+                Transport(),
+                workspace.root / "direct",
+                image_extensions=SUPPORTED_IMAGE_EXTENSIONS,
+                control=object(),
+            )
+        with PublicationSession(
+            pub, Transport(), image_extensions=SUPPORTED_IMAGE_EXTENSIONS, control=object()
+        ) as session:
+            session.fetch(record_id, workspace.root / "session")
+        assert (workspace.root / "direct" / record_id / "image.gif").read_bytes() == payload
+        assert (workspace.root / "session" / record_id / "image.gif").read_bytes() == payload

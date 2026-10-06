@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from sakurapool.capacity import UINT64_MAX, CapacityConfig, ResourcePolicy
+from sakurapool.capacity import UINT64_MAX, CapacityConfig
 from sakurapool.storage.prepared_fetch import stream_plan
 from sakurapool.storage.production_resources import ProductionFootprint, protocolmemory
 from sakurapool.storage.publication import PublicationCorrupt
@@ -33,8 +33,9 @@ def test_nine_mib_three_mib_chunks_and_tail():
 
 
 def test_32_mib_image_capacity_with_8_mib_chunks():
-    location = dict(image_offset=512, image_size=27591302,
-                    metadata_offset=0, metadata_size=0, flags=0)
+    location = dict(
+        image_offset=512, image_size=27591302, metadata_offset=0, metadata_size=0, flags=0
+    )
     with pytest.raises(PublicationCorrupt):
         stream_plan(location, 33554432)
     capacity = CapacityConfig(image_max_bytes=32 << 20)
@@ -64,19 +65,15 @@ def test_checked_extent_before_io():
 def test_guarded_workspace_capacity_and_clone(tmp_path):
     capacity = CapacityConfig(range_chunk_bytes=12 << 20)
     workspace = Workspace.init(tmp_path / "domain", capacity=capacity)
-    ledger = workspace.ledger()
-    with GuardedTransport(ledger, trusted_hosts=frozenset({"modelscope.cn"})) as control:
+    with GuardedTransport(
+        None, trusted_hosts=frozenset({"modelscope.cn"}), capacity=capacity
+    ) as control:
         assert control.capacity == capacity
         assert control.max_range_bytes == 12 << 20
         with control.clone() as clone:
             assert clone.capacity == capacity
-    with pytest.raises(ValueError, match="capacity mismatch"):
-        GuardedTransport(
-            ledger, trusted_hosts=frozenset({"modelscope.cn"}), capacity=CapacityConfig()
-        )
-    assert ledger.policy.body is None
-    ledger.update_policy(ResourcePolicy(body=100))
-    assert ledger.inspect_policy()["policy"]["body"] == 100
+    assert workspace.lightweight
+    assert not list(workspace.state.iterdir())
 
 
 @pytest.mark.parametrize("header_limit", [65536, 32])

@@ -1,26 +1,19 @@
-"""Local workspace administration and credential-free diagnostics."""
+"""Local download workspace identity and credential-free diagnostics."""
 
 import json
 
-from .capacity import CapacityConfig, ResourcePolicy
+from .capacity import CapacityConfig
 from .workspace import Workspace
 
 
 def add_parser(subparsers):
     workspace = subparsers.add_parser("workspace")
     commands = workspace.add_subparsers(dest="workspace_command", required=True)
-    for name in ("init", "inspect", "update"):
+    for name in ("init", "inspect"):
         command = commands.add_parser(name)
         command.add_argument("root")
-        if name in ("init", "update"):
-            command.add_argument("--config", required=name == "update")
-        if name == "update":
-            command.add_argument(
-                "--expected-version",
-                "--expected-epoch",
-                type=int,
-                help="compare-and-swap policy epoch; omitted means last-writer-wins replacement",
-            )
+        if name == "init":
+            command.add_argument("--config")
     doctor = subparsers.add_parser("doctor")
     doctor.add_argument("--workspace", required=True)
     doctor.add_argument("--profile")
@@ -54,35 +47,16 @@ def command(args):
                 result["profile"] = "VALID"
         elif args.workspace_command == "init":
             config = _config(args.config)
-            if set(config) - {"capacity", "policy"}:
-                raise ValueError("unknown workspace configuration")
+            if set(config) - {"capacity"}:
+                raise ValueError(
+                    "download resource policy removed; only technical capacity allowed"
+                )
             workspace = Workspace.init(
-                args.root,
-                capacity=CapacityConfig.from_configuration(config.get("capacity")),
-                policy=ResourcePolicy.from_configuration(config.get("policy")),
+                args.root, capacity=CapacityConfig.from_configuration(config.get("capacity"))
             )
             result = workspace.inspect()
         else:
-            workspace = Workspace.open(args.root)
-            if args.workspace_command == "update":
-                config = _config(args.config)
-                if set(config) == {"policy"}:
-                    config = config["policy"]
-                if not isinstance(config, dict) or set(config) - set(
-                    ResourcePolicy.__dataclass_fields__
-                ):
-                    raise ValueError("only resource policy can be updated")
-                policy = ResourcePolicy.from_dict({**workspace.policy.to_dict(), **config})
-                epoch = workspace.update_policy(policy, expected_version=args.expected_version)
-                semantics = (
-                    "EXPLICIT_EPOCH_CAS"
-                    if args.expected_version is not None
-                    else "LAST_WRITER_WINS"
-                )
-                update = {"update_semantics": semantics, "updated_policy_version": epoch}
-            result = workspace.inspect()
-            if args.workspace_command == "update":
-                result.update(update)
+            result = Workspace.open(args.root).inspect()
         print(json.dumps(result, sort_keys=True))
         return 0
     except Exception:

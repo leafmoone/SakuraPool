@@ -1,3 +1,36 @@
+# Lightweight download execution (current authorization)
+
+Only `fix/workspace-pipeline-capacity` in this worktree; no main merge, public network, old-task writes or migration. Root/reviewer design PASS supersedes the historical execution sheets below.
+
+- [x] Actual ledger/transport/worker profile identified the repeated slot/physical-scan cost; synthetic measurements are not public-network throughput.
+- [x] New contract approved: v3 lightweight task state, no download quota/consumption ledger; explicit worker protocol2 capability/technical limits; legacy tasks read-only.
+- [x] Task v3 store, frozen selection/query, delivery recovery and same-transaction sanitized failures implemented; final reviewer acceptance pending.
+- [x] Shared publication streaming, owner-only task pipeline, default task/direct CLI and v3 verified export without a BudgetLedger; legacy remains inspect-only, including export rejection.
+- [x] Shared Rust HTTP implementation, protocol2 handshake/generation rotation and actual-worker negative ready-response gates (scoped transport writer).
+- [x] Scoped offline end-to-end, crash/fault, GIF/metadata, selection and legacy-write rejection tests; bounded local Rust tests/build.
+- [ ] Frozen-candidate independent review, normal explicit-path commits/push and remote SHA verification; WAITING_REVIEW.
+
+## Current candidate validation (not final reviewer approval)
+
+- Explicit local worker rebuilt from this source with `env -u CARGO_TARGET_DIR cargo build --locked --offline --target-dir D:/SakuraTool/SakuraPool-pipeline-capacity/rust/target --bin sakurapool-worker`: exit 0, 3.34s. Same target `cargo test --locked --offline --quiet`: exit 0; 69 Rust tests (15/8/10/7/13/4/12), zero failures.
+- Selected Python command, with `PYTHONPATH=src` and `SAKURAPOOL_RUST_WORKER=D:/SakuraTool/SakuraPool-pipeline-capacity/rust/target/debug/sakurapool-worker.exe`:
+  `python -m pytest tests/test_lightweight_cli.py tests/test_lightweight_tasks.py tests/test_lightweight_failures.py tests/test_task_settings.py tests/test_pipeline_large_capacity.py tests/test_task_diagnostic.py tests/test_stream_capacity.py tests/test_lightweight_protocol.py tests/test_lightweight_transport.py tests/test_task_workspace_context.py tests/test_task_workspace_workflow.py -q`
+  Initial freeze exit 0, **75 passed in 35.16s**, candidate tree `7996ef87328632097955fe697053d156f33ebc30`. After final reviewer-directed minimal delta, the same command returned exit 0, **79 passed in 38.38s**; these runs overlap and are not added together. This delta does not change Rust source/Cargo configuration, so the already source-matched explicit worker build and 69 Rust test results remain applicable, not a new Rust run.
+- Four critic findings map to `test_request_read_failure_rejects_waiting_rpc_not_deadlock`, `test_published_directory_moved_to_stage_never_deleted[PREPARED/PUBLISHED]`, `test_worker_replacement_temp_identity_preserved`, and `test_malformed_receipt_classified_blocked[malformed0/1/2]` in `tests/test_lightweight_failures.py`.
+- Coordinator failure drain rejects queued owner RPCs and drains completion envelopes without SQLite; no assertion that an already-running item could not have published. Such unfinished state remains for conservative reconciliation.
+- Replacement-directory regression uses a real rebuilt-worker handshake and Python `_call` boundary fault injection, not a claim that the Rust child performed the directory replacement.
+- Actual-worker capability/limit negative tests mutate the ready response before accepting it; no HTTP operation is dispatched. They are worker-startup tests, not a public-provider CLI/network benchmark.
+- Durable FAILED/readability/secret rejection is covered by `test_failure_transaction_survives_hard_exit` (child `os._exit(9)`, parent verifies state+diagnostic). Final delta adds `test_failed_state_and_diagnostic_sql_failure_roll_back_together`: a trigger fails the task FAILED-meta update after the item state/diagnostic update; both updates roll back and a fresh read-only reopen observes the unchanged original row/state and no diagnostic.
+- Final reviewer delta: pipeline attempts every owned lane close before raising one fixed `LANE_CLOSE_FAILED` or attaching it to the original primary; `test_all_lanes_closed_after_first_close_failure[False/True]` covers two lanes and primary+two-close double faults. Reconcile now uses 64-row seq keyset pages with closed SELECT cursors before mutation; `test_reconcile_keyset_pages_close_before_updates` verifies 133 mixed-state rows over 64/64/5 pages, no unbounded fetchall, no skip/duplicate, and bounded retry increments. Receipt verification is stubbed only in this paging test; integrity is covered by the other lifecycle tests.
+- Legacy v1/v2 export is explicitly rejected through CLI and API before publication loading or output creation; only inspect is allowed. `test_legacy_read_all_writes_no_sidecars_ledger_or_profile[1/2]` now includes both export gates and checks unchanged SQLite/policy/directory entries, empty ledger-state directory and no sidecars.
+- Deferred startup-cost limitation: CLI run validates/full-verifies the publication, and the runner full-verifies it again. This final delta does not optimize or claim a single full verify for the entire CLI path.
+- Synthetic absolute measurement: fresh synthetic transport, one 9,437,191-byte JPG in two chunks (8,388,608 + 1,048,583), 16 logical CPUs, Python 3.14.5. `run_task` includes full verify, preparation, stubbed provider/proof, file SHA/write and SQLite receipt; publication build/task create are excluded. workers upper bounds 1/4 both have one actual stream: 0.102740900s / 87.599064 MiB/s and 0.102013700s / 88.223510 MiB/s. Ledger construction is forbidden by a hard sentinel; recursive quota scan calls are zero. One sample per setting, warm filesystem caches uncontrolled, no fair baseline or speedup ratio, no Rust HTTP/network throughput claim.
+- Final scoped Ruff and `git diff --check`: exit 0. `rustfmt --edition 2021 --check rust/src/bin/worker.rs`: exit 0. Repository-wide `cargo fmt -- --check`: exit 1 due to pre-existing formatting in unchanged `rust/src/http.rs` and `rust/src/production.rs`; neither file has a diff and neither was changed for cosmetic cleanup.
+- No full historical Python suite claim. Collect-only initially exposed two removed-quota import errors; their workspace tests were converted to the new contract and included in the selected 79-pass command. Earlier quota/accounting test expectations elsewhere are not certified by this selected run.
+- No public network, protected old-task writes/resume/migration or main merge. No lightweight implementation commit yet; root will arrange the sole frozen-candidate review.
+
+Historical sheets below are background, not active authorization.
+
 # P6-A FINAL PRODUCT CLOSURE
 
 Current authority: BASE ea37eae07031322646ecb44da7ad37eb3aa11e46, feature-only worktree. Sole exact design PASS. Protect all four historical tasks and eight original-workspace pending plus old diagnostics; never resume/refund/reset/settle/delete them. Original profile remains authoritative and unchanged.

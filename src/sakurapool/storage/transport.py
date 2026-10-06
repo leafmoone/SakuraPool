@@ -142,6 +142,9 @@ class RemoteIOError(RuntimeError):
         phase: str = "transport",
         http_status: int | None = None,
         accounting: str = "UNKNOWN",
+        lightweight: bool = False,
+        recoverable: bool = False,
+        delivery_safe: bool = False,
     ):
         if code not in _SAFE_CODES or phase not in _SAFE_PHASES:
             raise ValueError("unrecognized safe remote diagnostic")
@@ -153,11 +156,24 @@ class RemoteIOError(RuntimeError):
             raise ValueError("invalid operation accounting")
         super().__init__(message)
         self.accounting_state = accounting
+        self.lightweight = lightweight
+        self.recoverable = bool(recoverable)
+        self.delivery_safe = bool(delivery_safe)
         self.code = code
         self.phase = phase
         self.http_status = http_status
 
     def public_diagnostic(self) -> dict[str, str | int]:
+        if self.lightweight:
+            result = {
+                "code": self.code,
+                "phase": self.phase,
+                "recoverable": self.recoverable,
+                "delivery_safe": self.delivery_safe,
+            }
+            if self.http_status is not None:
+                result["http_status"] = self.http_status
+            return result
         result: dict[str, str | int] = {
             "code": self.code,
             "phase": self.phase,
@@ -179,6 +195,12 @@ class RemoteIOError(RuntimeError):
         if getattr(self, "finalization_secondary", ()):
             result["secondary"] = list(self.finalization_secondary)
         return result
+
+
+class VerifiedMetadataBytes(bytes):
+    """Per-response complete bounded EOF evidence, never consumption/accounting."""
+
+    eof_verified = True
 
 
 class MetadataBytes(bytes):
@@ -335,7 +357,8 @@ class RawObjectStream:
             chunk = None
         if chunk is None:
             raise _AmbiguousRead("raw stream read failed; reservation retained")
-        self.ledger.consume_body(self.lease, len(chunk))
+        if self.ledger is not None:
+            self.ledger.consume_body(self.lease, len(chunk))
         self.count += len(chunk)
         self._hash.update(chunk)
         if self.count > self.expected_size:
@@ -385,7 +408,7 @@ def condition_binding_key(
 class GuardedTransport:
     def __init__(
         self,
-        ledger: BudgetLedger,
+        ledger: BudgetLedger | None = None,
         *,
         trusted_hosts: frozenset[str],
         allow_loopback_http: bool = False,
@@ -394,12 +417,15 @@ class GuardedTransport:
         same_origin_cookie: str | None = None,
         max_retry_wait_s: float = 5.0,
         capacity=None,
+        offline_mode: bool = False,
     ):
         if not trusted_hosts or any(
             not h or h != h.lower() or ":" in h or "/" in h for h in trusted_hosts
         ):
             raise ValueError("trusted hosts must be explicit canonical hostnames")
-        if ledger.offline_mode:
+        self.offline_mode = ledger.offline_mode if ledger is not None else offline_mode
+        self._condition_proofs = {}
+        if self.offline_mode:
             if token is not None or credential_origin is not None or same_origin_cookie is not None:
                 raise ValueError("offline HTTP cannot receive credentials")
             if not trusted_hosts.issubset({"127.0.0.1"}):
@@ -469,6 +495,7 @@ class GuardedTransport:
             same_origin_cookie=self.same_origin_cookie,
             max_retry_wait_s=self.max_retry_wait_s,
             capacity=self.capacity,
+            offline_mode=self.offline_mode,
         )
 
     def close(self) -> None:
@@ -497,7 +524,7 @@ class GuardedTransport:
             or hostname.lower() not in self.trusted_hosts
         ):
             raise RemoteIOError("untrusted target or redirect")
-        if self.ledger.offline_mode:
+        if self.offline_mode:
             # No localhost DNS rebinding, alternate numeric notation, external
             # HTTPS host, proxy or credential-bearing offline request.
             try:
@@ -525,7 +552,7 @@ class GuardedTransport:
         self, url: str, *, max_body: int, metadata: bool, inflight: int, headers: dict[str, str]
     ):
         self._host(url)
-        if self.ledger.offline_mode and (
+        if self.offline_mode and (
             self.token is not None
             or self.credential_origin
             or self.session.trust_env
@@ -538,9 +565,18 @@ class GuardedTransport:
             )
         ):
             raise RemoteIOError("offline transport configuration cannot use credentials/proxy")
-        lease = self.ledger.reserve(
-            Reservation(
-                body=max_body, metadata=max_body if metadata else 0, inflight=inflight, attempt=True
+        if type(max_body) is not int or not 0 <= max_body < 2**64:
+            raise ValueError("request extent invalid")
+        lease = (
+            None
+            if self.ledger is None
+            else self.ledger.reserve(
+                Reservation(
+                    body=max_body,
+                    metadata=max_body if metadata else 0,
+                    inflight=inflight,
+                    attempt=True,
+                )
             )
         )
         self.session.cookies.clear()  # do not preserve server-set cookies across requests
@@ -552,7 +588,7 @@ class GuardedTransport:
             and urlsplit(url).scheme + "://" + urlsplit(url).netloc == self.credential_origin
         ):
             request_headers["Authorization"] = f"Bearer {self.token}"
-            self._attach_origin_cookie(url, request_headers)
+        self._attach_origin_cookie(url, request_headers)
         try:
             response = self.session.get(
                 url, headers=request_headers, stream=True, allow_redirects=False, timeout=(10, 60)
@@ -574,9 +610,32 @@ class GuardedTransport:
             > self.capacity.http_header_bytes
         ):
             response.close()
-            self.ledger.settle(lease)
+            self._settle(lease)
             raise RemoteIOError("response headers exceed capacity", phase="response_headers")
         return response, lease
+
+    def _settle(self, lease):
+        if self.ledger is not None:
+            self.ledger.settle(lease)
+
+    def _consume_body(self, lease, size, *, metadata=False):
+        if self.ledger is not None:
+            self.ledger.consume_body(lease, size, metadata=metadata)
+
+    def _condition_proof(self, key):
+        return (
+            self._condition_proofs.get(key)
+            if self.ledger is None
+            else self.ledger.condition_proof(key)
+        )
+
+    def _record_condition_proof(self, key, digest):
+        if self.ledger is None:
+            if len(self._condition_proofs) >= 64:
+                self._condition_proofs.clear()
+            self._condition_proofs[key] = digest
+        else:
+            self.ledger.record_condition_proof(key, digest)
 
     def _attach_origin_cookie(self, url: str, headers: dict[str, str]) -> None:
         """Exact-origin same-domain session cookie; never sent to any CDN."""
@@ -632,7 +691,7 @@ class GuardedTransport:
         try:
             if hop1.status_code != 302:
                 hop1.close()
-                self.ledger.settle(lease1)  # non-302 body not read: 0 known
+                self._settle(lease1)  # non-302 body not read: 0 known
                 raise RemoteIOError(
                     "two-hop expects 302 at origin",
                     code="redirect_policy",
@@ -657,14 +716,14 @@ class GuardedTransport:
             raw_location = locations[0]
         except RemoteIOError:
             hop1.close()
-            self.ledger.settle(lease1)
+            self._settle(lease1)
             raise
         except Exception:
             hop1.close()
             raise _AmbiguousRead(
                 "two-hop hop1 handling failed; reservation retained", phase="two_hop_redirect"
             ) from None
-        self.ledger.settle(lease1)  # 302 body 0, known
+        self._settle(lease1)  # 302 body 0, known
         try:
             # The one-shot approval is generated FROM this hop-1 observation:
             # the gate validates structure/credential safety on the raw
@@ -673,7 +732,7 @@ class GuardedTransport:
             # hop2 below; it is never cached, persisted, or reused across
             # requests/objects, and no external/static allowlist is consulted.
             approved_host = check_location(
-                raw_location, self.credential_origin, self.token, offline=self.ledger.offline_mode
+                raw_location, self.credential_origin, self.token, offline=self.offline_mode
             )
             # Preserve the signed Location exactly for hop2; validation above
             # authorizes only its host/components and never reconstructs its query.
@@ -690,8 +749,12 @@ class GuardedTransport:
         session2 = requests.Session()
         session2.trust_env = False
         session2.mount("https://", HTTPAdapter(max_retries=Retry(total=0, redirect=0)))
-        lease2 = self.ledger.reserve(
-            Reservation(body=length + 1, metadata=0, inflight=READ_CHUNK, attempt=True)
+        lease2 = (
+            None
+            if self.ledger is None
+            else self.ledger.reserve(
+                Reservation(body=length + 1, metadata=0, inflight=READ_CHUNK, attempt=True)
+            )
         )
         try:
             try:
@@ -719,7 +782,7 @@ class GuardedTransport:
                     or int(m.group(3)) != expected_size
                 ):
                     hop2.close()
-                    self.ledger.settle(lease2)
+                    self._settle(lease2)
                     raise RemoteIOError(
                         "two-hop content-range mismatch",
                         code="http_status",
@@ -728,7 +791,7 @@ class GuardedTransport:
                     )
                 if hop2.headers.get("Content-Length") != str(length):
                     hop2.close()
-                    self.ledger.settle(lease2)
+                    self._settle(lease2)
                     raise RemoteIOError(
                         "two-hop content-length mismatch",
                         code="http_status",
@@ -740,7 +803,7 @@ class GuardedTransport:
                     or "multipart" in (hop2.headers.get("Content-Type") or "").lower()
                 ):
                     hop2.close()
-                    self.ledger.settle(lease2)
+                    self._settle(lease2)
                     raise RemoteIOError(
                         "two-hop body framing rejected",
                         code="http_status",
@@ -752,7 +815,7 @@ class GuardedTransport:
                     check_token_not_in_etag(etag, self.token)
                 except LocationRejected:
                     hop2.close()
-                    self.ledger.settle(lease2)
+                    self._settle(lease2)
                     raise RemoteIOError(
                         "two-hop validator rejected",
                         code="http_status",
@@ -769,7 +832,7 @@ class GuardedTransport:
                         if not chunk:
                             break
                         got += len(chunk)
-                        self.ledger.consume_body(lease2, len(chunk))
+                        self._consume_body(lease2, len(chunk))
                         data.extend(chunk)
                 except Exception:
                     raise _AmbiguousRead(
@@ -777,7 +840,7 @@ class GuardedTransport:
                     ) from None
                 if got != length:
                     # Overlong or short: every arrived byte is known and charged.
-                    self.ledger.settle(lease2)
+                    self._settle(lease2)
                     raise RemoteIOError(
                         "two-hop entity length rejected",
                         code="http_status",
@@ -785,7 +848,7 @@ class GuardedTransport:
                         http_status=206,
                     )
                 hop2.close()
-                self.ledger.settle(lease2)
+                self._settle(lease2)
                 return TwoHopResult(
                     hop1_status=302,
                     hop2_status=206,
@@ -797,7 +860,7 @@ class GuardedTransport:
                     batch=batch,
                 )
             hop2.close()
-            self.ledger.settle(lease2)  # header-level reject: body 0, known
+            self._settle(lease2)  # header-level reject: body 0, known
             raise RemoteIOError(
                 "two-hop hop2 status rejected",
                 code="http_status",
@@ -890,7 +953,7 @@ class GuardedTransport:
                 phase="two_hop_redirect",
             )
         self._twohop_cdn_by_identity[identity] = cdn_norm
-        self.ledger.record_condition_proof(key, payload_sha)
+        self._record_condition_proof(key, payload_sha)
         return key
 
     def _retry_delay(self, retry_after: str | None, attempt: int) -> float:
@@ -1005,7 +1068,7 @@ class GuardedTransport:
                 except (ValueError, RemoteIOError):
                     target = None
                 response.close()
-                self.ledger.settle(lease)
+                self._settle(lease)
                 if target is None:
                     raise RemoteIOError(
                         "unsafe redirect target",
@@ -1026,12 +1089,12 @@ class GuardedTransport:
                 and attempt + 1 < MAX_ATTEMPTS
             ):
                 response.close()
-                self.ledger.settle(lease)
+                self._settle(lease)
                 continue
             if status in (429, 500, 502, 503, 504):
                 retry_after = response.headers.get("Retry-After")
                 response.close()
-                self.ledger.settle(lease)
+                self._settle(lease)
                 if attempt + 1 < MAX_ATTEMPTS:
                     try:
                         delay = self._retry_delay(retry_after, attempt)
@@ -1072,7 +1135,7 @@ class GuardedTransport:
                 if not chunk:
                     break
                 got += len(chunk)
-                self.ledger.consume_body(lease, len(chunk), metadata=metadata)
+                self._consume_body(lease, len(chunk), metadata=metadata)
                 chunks.append(chunk)
         except Exception:
             failed = True
@@ -1128,7 +1191,7 @@ class GuardedTransport:
             # no proof that no response bytes arrived; keep pending quota.
             raise
         response.close()
-        self.ledger.settle(lease)
+        self._settle(lease)
 
     @contextmanager
     def read_range_owned(self, bound: BoundObject, offset: int, length: int) -> Iterator[bytes]:
@@ -1187,7 +1250,7 @@ class GuardedTransport:
             raise
         except RemoteIOError:
             response.close()
-            self.ledger.settle(lease)  # validated reject, known short/overlong
+            self._settle(lease)  # validated reject, known short/overlong
             raise
         except BaseException:
             response.close()  # unknown failure: NEVER refund pending
@@ -1200,7 +1263,7 @@ class GuardedTransport:
             # Preserve pending inflight until verified cleanup/recovery.
             raise
         else:
-            self.ledger.settle(lease)
+            self._settle(lease)
 
     def read_range(self, bound: BoundObject, offset: int, length: int) -> bytes:
         """One-off synchronous reader; no future/queue may own returned bytes.
@@ -1238,10 +1301,10 @@ class GuardedTransport:
                 raise RemoteIOError("server did not enforce If-Match; do not scan")
         except BaseException:
             response.close()
-            self.ledger.settle(lease)
+            self._settle(lease)
             raise
         response.close()  # 412 entity is not read; socket/TLS prefetch may occur
-        self.ledger.settle(lease)
+        self._settle(lease)
         return hashlib.sha256(first).hexdigest()
 
     def ensure_verified_condition(
@@ -1309,7 +1372,7 @@ class GuardedTransport:
             size=bound.size,
             strong_etag=bound.strong_etag,
         )
-        stored = self.ledger.condition_proof(key)
+        stored = self._condition_proof(key)
         if stored is not None:
             if expected_probe_sha256 is not None and stored != expected_probe_sha256:
                 raise RemoteIOError("manifest/ledger conditional proof mismatch")
@@ -1317,10 +1380,21 @@ class GuardedTransport:
         observed = self.verify_if_match(bound)
         if expected_probe_sha256 is not None and observed != expected_probe_sha256:
             raise RemoteIOError("manifest conditional probe bytes mismatch")
-        self.ledger.record_condition_proof(key, observed)
+        self._record_condition_proof(key, observed)
         return observed
 
-    def read_metadata(
+    def read_metadata(self, url: str, **kwargs) -> bytes:
+        try:
+            return self._read_metadata(url, **kwargs)
+        except RemoteIOError as error:
+            if self.ledger is None:
+                error.lightweight = True
+                error.args = ("Metadata request rejected",)
+                error.recoverable = error.code in {"network_ambiguous", "http_status"}
+                error.delivery_safe = False
+            raise
+
+    def _read_metadata(
         self, url: str, *, max_bytes: int = MIB, _validated_tree_retry: bool = False
     ) -> bytes:
         """Guarded, bounded provider-listing response; no SDK bypass."""
@@ -1362,7 +1436,7 @@ class GuardedTransport:
         except RemoteIOError as primary:
             try:
                 response.close()
-                self.ledger.settle(lease)  # only this IO path proves its settlement
+                self._settle(lease)  # only this IO path proves its settlement
             except BaseException:
                 primary.accounting_state = "UNKNOWN"
                 primary.finalization_secondary = ("METADATA_FINALIZATION_FAILED",)
@@ -1376,5 +1450,7 @@ class GuardedTransport:
                 primary.finalization_secondary = ("METADATA_FINALIZATION_FAILED",)
             raise
         response.close()
-        self.ledger.settle(lease)
+        self._settle(lease)
+        if self.ledger is None:
+            return VerifiedMetadataBytes(body)
         return MetadataBytes(body, "UNKNOWN" if operation["unknown"] else "CONFIRMED")

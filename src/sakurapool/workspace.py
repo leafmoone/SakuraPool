@@ -13,6 +13,7 @@ from .capacity import CAPACITY_VERSION, CapacityConfig, ResourcePolicy
 from .fs_safety import plain_entry, sync_directory
 
 FORMAT = "sakurapool-workspace-v1"
+DOWNLOAD_FORMAT = "sakurapool-workspace-v2"
 MANIFEST_BYTES = 16384  # Fixed identity format implementation boundary.
 
 
@@ -50,6 +51,7 @@ class Workspace:
     ledger_lineage: str
     capacity_version: int = CAPACITY_VERSION
     _initializing: bool = field(default=False, compare=False, repr=False)
+    lightweight: bool = False
 
     @property
     def state(self):
@@ -65,6 +67,31 @@ class Workspace:
 
     @classmethod
     def init(cls, root, *, capacity=None, policy=None):
+        """New workspaces contain identity and technical capacity, not a consumption ledger."""
+        if policy is None:
+            root = _root(root)
+            capacity = CapacityConfig() if capacity is None else capacity
+            if not isinstance(capacity, CapacityConfig):
+                raise ValueError("typed workspace capacity required")
+            plain_entry(root.parent, directory=True)
+            _no_parent_domain(root)
+            root.mkdir()
+            for name in ("state", "tasks", "tmp"):
+                (root / name).mkdir()
+            data = {
+                "format": DOWNLOAD_FORMAT,
+                "identity": uuid.uuid4().hex,
+                "capacity_version": CAPACITY_VERSION,
+                "physical_domain": _domain(root),
+                "capacity": capacity.to_dict(),
+            }
+            with (root / "workspace.json").open("xb") as stream:
+                stream.write(canonical(data))
+                stream.flush()
+                os.fsync(stream.fileno())
+            sync_directory(root)
+            return cls.open(root)
+        # Explicit historical administrative policy creation, not a download mode.
         from .storage.budget import DEFAULT_WORK_ROOT
 
         root = _root(root)
@@ -118,6 +145,27 @@ class Workspace:
         if len(raw) > MANIFEST_BYTES:
             raise ValueError("workspace identity implementation boundary exceeded")
         data = json.loads(raw)
+        if isinstance(data, dict) and data.get("format") == DOWNLOAD_FORMAT:
+            if (
+                set(data)
+                != {"format", "identity", "capacity_version", "physical_domain", "capacity"}
+                or data["capacity_version"] != CAPACITY_VERSION
+                or type(data["capacity_version"]) is not int
+                or not isinstance(data["identity"], str)
+                or len(data["identity"]) != 32
+                or any(c not in "0123456789abcdef" for c in data["identity"])
+                or data["physical_domain"] != _domain(root)
+            ):
+                raise ValueError("workspace identity/version invalid")
+            return cls(
+                root,
+                data["identity"],
+                data["physical_domain"],
+                CapacityConfig.from_dict(data["capacity"]),
+                None,
+                "",
+                lightweight=True,
+            )
         if (
             not isinstance(data, dict)
             or set(data)
@@ -160,11 +208,17 @@ class Workspace:
 
         if self != type(self).open(self.root):
             raise ValueError("workspace identity/configuration changed")
-        if not self._initializing and not os.path.lexists(self.state / "workspace-budget.lock"):
+        if (
+            not self.lightweight
+            and not self._initializing
+            and not os.path.lexists(self.state / "workspace-budget.lock")
+        ):
             raise BudgetCorrupt("workspace accounting lock missing; never reinitialize")
         return self
 
     def ledger(self):
+        if self.lightweight:
+            raise ValueError("lightweight workspace has no consumption ledger")
         from .storage.budget import BudgetLedger
 
         return BudgetLedger(workspace=self)
@@ -181,7 +235,18 @@ class Workspace:
         return self.ledger().update_policy(policy, expected_version=expected_version)
 
     def inspect(self):
-        ledger = self.ledger()
+        if self.lightweight:
+            self.check()
+            return {
+                "format": DOWNLOAD_FORMAT,
+                "identity": self.identity,
+                "root": str(self.root),
+                "physical_domain": self.physical_domain,
+                "capacity": self.capacity.to_dict(),
+                "paths": {name: str(getattr(self, name)) for name in ("state", "tasks", "tmp")},
+            }
+        # Historical manifests are archives. Inspection must not initialize,
+        # recover or mutate their ledger/policy, even when a lock is missing.
         return {
             "format": FORMAT,
             "identity": self.identity,
@@ -191,11 +256,16 @@ class Workspace:
             "paths": {name: str(getattr(self, name)) for name in ("state", "tasks", "tmp")},
             "physical_domain": self.physical_domain,
             "capacity": self.capacity.to_dict(),
-            **ledger.inspect_policy(),
+            "read_only_legacy": True,
+            "download_consumption": "NOT_USED",
         }
 
-    def task_path(self, directory, *, must_exist=False):
-        self.check()
+    def task_path(self, directory, *, must_exist=False, readonly=False):
+        if readonly:
+            if self != type(self).open(self.root):
+                raise ValueError("workspace identity/configuration changed")
+        else:
+            self.check()
         directory = _root(directory)
         if not directory.is_relative_to(self.tasks) or directory == self.tasks:
             raise ValueError("task must be contained in workspace tasks")
@@ -208,8 +278,19 @@ class Workspace:
             plain_entry(directory, directory=True)
         return directory
 
-    def task_binding(self, directory):
+    def download_binding(self, directory):
+        if not self.lightweight:
+            raise ValueError("legacy workspace migration required")
         directory = self.task_path(directory)
+        return {
+            "format": DOWNLOAD_FORMAT,
+            "workspace_id": self.identity,
+            "physical_domain": self.physical_domain,
+            "task_relative": directory.relative_to(self.root).as_posix(),
+        }
+
+    def task_binding(self, directory):
+        directory = self.task_path(directory, readonly=True)
         return {
             "format": FORMAT,
             "workspace_id": self.identity,

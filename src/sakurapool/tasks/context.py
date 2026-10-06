@@ -31,7 +31,7 @@ def bootstrap_workspace(directory, workspace=None):
         for ancestor in Path(directory).parents:
             if os.path.lexists(ancestor / "workspace.json"):
                 selected = Workspace.open(ancestor)
-                selected.task_path(directory, must_exist=True)
+                selected.task_path(directory, must_exist=True, readonly=True)
                 break
         if workspace is not None:
             supplied = (
@@ -63,34 +63,6 @@ def resolve_workspace(binding, directory, workspace=None):
         return selected
     except (ValueError, OSError, KeyError, TypeError):
         raise TaskError("TASK_WORKSPACE_CONFLICT", "plan") from None
-
-
-def validate_ledger(task, ledger):
-    from .store import TaskError
-
-    workspace = getattr(ledger, "workspace", None)
-    if task.workspace is None:
-        if workspace is not None:
-            raise TaskError("TASK_WORKSPACE_CONFLICT", "plan")
-    elif workspace is None or workspace != task.workspace:
-        raise TaskError("TASK_WORKSPACE_CONFLICT", "plan")
-
-
-def remaining_limits(ledger, required):
-    from ..capacity import UINT64_MAX
-
-    status = ledger.status()  # Refreshes durable policy before reading limits.
-    remaining = {
-        key: max(
-            0, (UINT64_MAX if ledger.limits[key] is None else ledger.limits[key]) - status[key]
-        )
-        for key in required
-    }
-    if "inflight" in remaining:
-        remaining["inflight"] = max(
-            0, remaining["inflight"] - getattr(ledger, "effective_headroom", 0)
-        )
-    return remaining
 
 
 def chunk_plan(image_bytes, metadata_bytes, capacity):

@@ -5,15 +5,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from sakurapool.capacity import CapacityConfig, ResourcePolicy
+from sakurapool.capacity import CapacityConfig
 from sakurapool.cli import main
-from sakurapool.tasks.context import chunk_plan, remaining_limits
+from sakurapool.tasks.context import chunk_plan
 from sakurapool.tasks.plan import SelectedRecord, Selection, selected_records
 from sakurapool.tasks.store import TaskDB, TaskError
 from sakurapool.workspace import Workspace
 
 
-def test_workspace_reopen_conflict_and_lower_policy(tmp_path, monkeypatch):
+def test_workspace_reopen_conflict_and_frozen_capacity(tmp_path, monkeypatch):
     capacity = replace(
         CapacityConfig(),
         freeze_count=12,
@@ -26,18 +26,18 @@ def test_workspace_reopen_conflict_and_lower_policy(tmp_path, monkeypatch):
     rows = [SelectedRecord(i, f"{i:032x}", "source", "dataset", str(i)) for i in range(3)]
     directory = ws.tasks / "task"
     with TaskDB.create(
-        directory, ws.ledger(), {"metadata": False}, rows, publication_path=tmp_path / "publication"
+        directory, ws, {"metadata": False}, rows, publication_path=tmp_path / "publication"
     ) as task:
-        assert task.version == 2
+        assert task.version == 3
         assert task.meta("header")["effective_capacity"] == capacity.to_dict()
         item = task.claim()
-        task.event(item["attempt_id"], "NETWORK_START", {})
+        task.event(item["operation_id"], "NETWORK_START", {})
     monkeypatch.chdir(tmp_path)
-    ws.update_policy(replace(ResourcePolicy(), disk=4 << 20, body=0))
     with TaskDB(directory, readonly=True) as task:
         assert task.workspace.identity == ws.identity
         assert task.capacity == capacity
-        assert task.db.execute("SELECT network_state FROM attempts").fetchone()[0] == "UNKNOWN"
+        assert task.db.execute("SELECT phase FROM items").fetchone()[0] == "NETWORK_START"
+        assert not list(ws.state.iterdir())
     other = Workspace.init(tmp_path / "other")
     before = (directory / "task.sqlite").read_bytes()
     with pytest.raises(TaskError, match="TASK_WORKSPACE_CONFLICT"):
@@ -51,11 +51,6 @@ def test_selection_and_chunk_arithmetic():
     with pytest.raises(ValueError):
         Selection("sample", 13, "seed").validate(capacity)
     assert chunk_plan(10, 4, capacity) == (6, 3)
-    ledger = SimpleNamespace(
-        limits={"body": None, "attempts": 1}, status=lambda: {"body": 5, "attempts": 1}
-    )
-    assert remaining_limits(ledger, {"body": 10, "attempts": 2})["attempts"] == 0
-    assert remaining_limits(ledger, {"body": 10})["body"] > 10
 
 
 def test_heap_memory_is_an_actual_admission_bound():

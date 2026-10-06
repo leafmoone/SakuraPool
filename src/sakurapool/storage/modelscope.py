@@ -83,16 +83,24 @@ class TwoHopProbe:
     result: TwoHopResult
 
     def as_dict(self) -> dict:
-        return {"repository": self.repository,
-                "revision_candidate": self.revision_candidate,
-                "path": self.path, "size": self.size,
-                **self.result.as_dict()}
+        return {
+            "repository": self.repository,
+            "revision_candidate": self.revision_candidate,
+            "path": self.path,
+            "size": self.size,
+            **self.result.as_dict(),
+        }
 
 
 def _io_error(provider, message, **kwargs):
+    if getattr(provider.transport, "ledger", None) is None:
+        return RemoteIOError(message, lightweight=True, **kwargs)
     # Only the reader's explicit evidence is composed; plain fixtures are unknown.
-    kwargs["accounting"] = ("CONFIRMED" if getattr(provider, "_metadata_reads", 0)
-                            and provider._metadata_confirmed else "UNKNOWN")
+    kwargs["accounting"] = (
+        "CONFIRMED"
+        if getattr(provider, "_metadata_reads", 0) and provider._metadata_confirmed
+        else "UNKNOWN"
+    )
     return RemoteIOError(message, **kwargs)
 
 
@@ -106,21 +114,24 @@ class ModelScopeDataset:
     probes are never reusable against a different instance configuration.
     """
 
-    def __init__(self, transport: GuardedTransport, endpoint: str,
-                 repo_id: str):
+    def __init__(self, transport: GuardedTransport, endpoint: str, repo_id: str):
         try:
             self.repository_id = parse_repository(repo_id)
         except RepositoryConfigError:
-            raise ValueError(
-                "repository configuration is not a valid owner/name") from None
+            raise ValueError("repository configuration is not a valid owner/name") from None
         try:
             parsed = urlsplit(endpoint)
         except ValueError:
             parsed = None
         if parsed is None:
             raise ValueError("invalid provider endpoint")
-        if (parsed.path not in ("", "/") or parsed.query or parsed.fragment
-                or parsed.username or parsed.password):
+        if (
+            parsed.path not in ("", "/")
+            or parsed.query
+            or parsed.fragment
+            or parsed.username
+            or parsed.password
+        ):
             raise ValueError("provider endpoint must be origin only")
         transport._host(endpoint)
         self.endpoint = endpoint.rstrip("/")
@@ -128,8 +139,9 @@ class ModelScopeDataset:
         self._metadata_reads = 0
         self._metadata_confirmed = True
         self.repo_id = self.repository_id.id
-        self.base = (f"{self.endpoint}/api/v1/datasets"
-                     f"/{self.repository_id.owner}/{self.repository_id.name}")
+        self.base = (
+            f"{self.endpoint}/api/v1/datasets/{self.repository_id.owner}/{self.repository_id.name}"
+        )
 
     def _data(
         self, url: str, *, phase: str = "provider_revision_shape", tree_retry: bool = False
@@ -145,8 +157,12 @@ class ModelScopeDataset:
                 payload = self.transport.read_metadata(url)
         except RemoteIOError as error:
             self._metadata_reads += 1
-            self._metadata_confirmed &= error.accounting_state == "CONFIRMED"
-            error.accounting_state = "CONFIRMED" if self._metadata_confirmed else "UNKNOWN"
+            if getattr(self.transport, "ledger", None) is None:
+                error.lightweight = True
+                self._metadata_confirmed = False
+            else:
+                self._metadata_confirmed &= error.accounting_state == "CONFIRMED"
+                error.accounting_state = "CONFIRMED" if self._metadata_confirmed else "UNKNOWN"
             if request_phase is not None:
                 error.phase = request_phase
             raise
@@ -156,15 +172,24 @@ class ModelScopeDataset:
                 "metadata operation failed",
                 phase=request_phase or "metadata_send",
                 accounting="UNKNOWN",
+                lightweight=getattr(self.transport, "ledger", None) is None,
             ) from None
         self._metadata_reads += 1
-        self._metadata_confirmed &= getattr(payload, "accounting_state", "UNKNOWN") == "CONFIRMED"
+        # Lightweight readers return only after bounded, framed EOF. This is
+        # per-response completeness, not durable consumption confirmation.
+        complete = (
+            getattr(payload, "eof_verified", False)
+            if getattr(self.transport, "ledger", None) is None
+            else getattr(payload, "accounting_state", "UNKNOWN") == "CONFIRMED"
+        )
+        self._metadata_confirmed &= complete
         if not self._metadata_confirmed:
             raise RemoteIOError(
                 "metadata operation contains an uncertain request",
                 code="network_ambiguous",
                 phase=request_phase or "metadata_body",
                 accounting="UNKNOWN",
+                lightweight=getattr(self.transport, "ledger", None) is None,
             )
         try:
             decoded = json.loads(payload)
@@ -190,14 +215,21 @@ class ModelScopeDataset:
     def legacy_hub_id(self) -> int:
         """Resolve SDK legacy numeric ID only after exact owner/name validation."""
         info = self._data(self.base, phase="provider_repository_shape")
-        if (not isinstance(info, dict)
-                or info.get("Namespace") != self.repository_id.owner
-                or info.get("Name") != self.repository_id.name
-                or type(info.get("Id")) is not int or not 0 < info["Id"] < 1 << 63
-                or type(info.get("Type")) is not int or info["Type"] != 4):
-            raise _io_error(self, "provider legacy repository identity differs",
-                            code="provider_shape",
-                              phase="provider_repository_shape")
+        if (
+            not isinstance(info, dict)
+            or info.get("Namespace") != self.repository_id.owner
+            or info.get("Name") != self.repository_id.name
+            or type(info.get("Id")) is not int
+            or not 0 < info["Id"] < 1 << 63
+            or type(info.get("Type")) is not int
+            or info["Type"] != 4
+        ):
+            raise _io_error(
+                self,
+                "provider legacy repository identity differs",
+                code="provider_shape",
+                phase="provider_repository_shape",
+            )
         self._legacy_verified_id = info["Id"]
         return info["Id"]
 
@@ -486,8 +518,9 @@ class ModelScopeDataset:
                     result.add(value)
         return sorted(result)
 
-    def list_files(self, revision: str, *, max_pages: int = MAX_PAGES
-                   ) -> tuple[list[ListedFile], bool]:
+    def list_files(
+        self, revision: str, *, max_pages: int = MAX_PAGES
+    ) -> tuple[list[ListedFile], bool]:
         """Bounded repo/tree pagination; completeness needs consistent Total."""
         if not isinstance(revision, str) or not _SHA.fullmatch(revision):
             raise ValueError("directory listing requires a commit-ID-shaped revision")
@@ -499,30 +532,44 @@ class ModelScopeDataset:
         declared_total: int | None = None
         total_profile: bool | None = None
         for page in range(1, max_pages + 1):
-            params = urlencode({"Revision": revision, "Recursive": "True",
-                                "PageNumber": page, "PageSize": PAGE_SIZE})
-            data = self._data(self.base + "/repo/tree?" + params,
-                              phase="provider_listing_shape")
+            params = urlencode(
+                {
+                    "Revision": revision,
+                    "Recursive": "True",
+                    "PageNumber": page,
+                    "PageSize": PAGE_SIZE,
+                }
+            )
+            data = self._data(self.base + "/repo/tree?" + params, phase="provider_listing_shape")
             # Design r5 section 5.5: the legacy tree payload reports the entry total
             # under the field name TotalCount; the provider contract name is Total.
             # Same wire value, single mapping rule; never mix the two names.
             if isinstance(data, dict) and "Total" not in data and "TotalCount" in data:
                 data = {**data, "Total": data["TotalCount"]}
-            if (isinstance(data, dict) and "Total" in data
-                    and "TotalCount" in data
-                    and data["Total"] != data["TotalCount"]):
-                raise _io_error(self, "provider listing total fields disagree",
-                                    code="provider_total_conflict", phase="provider_listing_shape")
-            entries = (data.get("Files", data.get("files"))
-                       if isinstance(data, dict) else data)
+            if (
+                isinstance(data, dict)
+                and "Total" in data
+                and "TotalCount" in data
+                and data["Total"] != data["TotalCount"]
+            ):
+                raise _io_error(
+                    self,
+                    "provider listing total fields disagree",
+                    code="provider_total_conflict",
+                    phase="provider_listing_shape",
+                )
+            entries = data.get("Files", data.get("files")) if isinstance(data, dict) else data
             has_total = isinstance(data, dict) and "Total" in data
             if total_profile is not None and has_total != total_profile:
                 raise _io_error(self, "inconsistent provider listing total presence")
             total_profile = has_total
             if has_total:
                 total = data["Total"]
-                if type(total) is not int or total < 0 or (
-                        declared_total is not None and declared_total != total):
+                if (
+                    type(total) is not int
+                    or total < 0
+                    or (declared_total is not None and declared_total != total)
+                ):
                     raise _io_error(self, "inconsistent provider listing total")
                 declared_total = total
             if not isinstance(entries, list) or len(entries) > PAGE_SIZE:
@@ -550,11 +597,13 @@ class ModelScopeDataset:
                 if type(size) is not int or not 0 <= size < 2**64:
                     raise _io_error(self, "provider file size absent or invalid")
                 digest = item.get("Sha256", item.get("sha256"))
-                if digest is not None and (not isinstance(digest, str)
-                                           or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+                if digest is not None and (
+                    not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                ):
                     raise _io_error(self, "provider file SHA256 is malformed")
-                record = ListedFile(path, size, digest, bool(item.get("Lfs", False)),
-                                    revision_candidate=revision)
+                record = ListedFile(
+                    path, size, digest, bool(item.get("Lfs", False)), revision_candidate=revision
+                )
                 found[path] = record
             if declared_total is not None:
                 if seen_entries > declared_total:

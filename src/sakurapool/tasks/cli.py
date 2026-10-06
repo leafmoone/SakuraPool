@@ -1,9 +1,8 @@
-"""Task CLI resolves persisted context before writable DB or credentials."""
+"""Task CLI: lightweight state; archived quota tasks never gain a writable connection."""
 
 import json
 from pathlib import Path
 
-from ..storage.budget import DEFAULT_WORK_ROOT, BudgetLedger
 from ..workspace import Workspace
 from .context import LEGACY_CAPACITY
 from .store import TaskDB, TaskError
@@ -26,15 +25,14 @@ def add_parser(subparsers):
     update.add_argument("task_dir")
     update.add_argument("--workspace")
     update.add_argument("--expected-settings-version", type=int, required=True)
-    update.add_argument("--max-output-bytes", type=int)
-    update.add_argument("--image-extensions",
-                        help="comma-separated registered suffixes; raw bytes, no conversion")
-    create.add_argument("--max-output-bytes", type=int, default=512 << 20)
+    update.add_argument("--image-extensions", required=True, help="safe raw-byte format superset")
     for name in ("inspect", "run", "pause", "cancel", "resume", "export"):
         command = commands.add_parser(name)
         command.add_argument("task_dir")
         command.add_argument("--workspace")
-        if name in ("run", "resume"):
+        if name == "inspect":
+            command.add_argument("--failure-seq", type=int, help="read a bounded persisted failure")
+        elif name in ("run", "resume"):
             command.add_argument("--profile", required=True)
             command.add_argument("--workers", type=int, choices=(1, 2, 4), default=1)
         elif name == "export":
@@ -61,23 +59,23 @@ def command(args):
                 workspace, capacity = task.workspace, task.capacity
                 task.validate_plan()
                 if action == "inspect":
-                    print(json.dumps(task.inspect(), sort_keys=True))
+                    result = task.inspect()
+                    if getattr(args, "failure_seq", None) is not None:
+                        result["failure_diagnostic"] = task.failure_diagnostic(args.failure_seq)
+                    print(json.dumps(result, sort_keys=True))
                     return 0
-        ledger = workspace.ledger() if workspace is not None else BudgetLedger(DEFAULT_WORK_ROOT)
+                if task.version != 3:
+                    raise TaskError("LEGACY_TASK_MIGRATION_REQUIRED", "plan")
         if action == "update":
             from .settings import update_task
 
-            result = update_task(args.task_dir, ledger,
-                                 expected_settings_version=args.expected_settings_version,
-                                 max_output_bytes=args.max_output_bytes,
-                                 extensions=args.image_extensions)
+            result = update_task(
+                args.task_dir,
+                expected_settings_version=args.expected_settings_version,
+                extensions=args.image_extensions,
+            )
         elif action in ("pause", "cancel"):
-            from .runner import admit_task_growth
-
-            with (
-                admit_task_growth(args.task_dir, ledger),
-                TaskDB(args.task_dir, workspace=workspace) as task,
-            ):
+            with TaskDB(args.task_dir, workspace=workspace) as task:
                 result = task.request("PAUSE" if action == "pause" else "CANCEL")
         elif action == "create":
             from ..cli import _spec_from_dict
@@ -93,18 +91,17 @@ def command(args):
             with create_task(
                 args.publication,
                 args.task_dir,
-                ledger,
+                workspace,
                 _spec_from_dict(bounded_json(args.query, capacity.task_header_bytes)),
                 selection,
                 metadata=args.metadata,
-                max_output_bytes=args.max_output_bytes,
                 image_extensions=args.image_extensions,
             ) as task:
                 result = task.inspect()
         elif action == "export":
             from .export import export_task
 
-            result = export_task(args.task_dir, args.manifest, ledger)
+            result = export_task(args.task_dir, args.manifest)
         else:
             from ..storage.publication import load_publication
             from .profile import connect_profile, read_profile, validate_allowlist
@@ -115,9 +112,8 @@ def command(args):
                 with load_publication(task.meta("publication_path"), full_verify=True) as pub:
                     check_publication_identity(task, pub)
                     validate_allowlist(profile, pub)
-            with connect_profile(
-                profile, ledger, capacity=workspace if workspace is not None else capacity
-            ) as transport:
+            root = workspace.root if workspace is not None else Path(args.task_dir).absolute()
+            with connect_profile(profile, root=root, capacity=capacity) as transport:
                 result = run_task(
                     args.task_dir,
                     transport,
@@ -138,6 +134,14 @@ def command(args):
             diagnostics = safe_diagnostic(error)
         except BaseException:
             pass
-        print(json.dumps({"code": "TASK_FAILED", "phase": "task", "recoverable": False,
-                          "diagnostics": diagnostics}))
+        print(
+            json.dumps(
+                {
+                    "code": "TASK_FAILED",
+                    "phase": "task",
+                    "recoverable": False,
+                    "diagnostics": diagnostics,
+                }
+            )
+        )
         return 2

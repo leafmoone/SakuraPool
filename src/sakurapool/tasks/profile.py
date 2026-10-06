@@ -55,15 +55,12 @@ def validate_allowlist(profile, publication):
             raise TaskError("PROFILE_SCOPE_MISMATCH", "profile")
 
 
-def connect_profile(profile, ledger, *, capacity=None):
+def connect_profile(profile, *, root, capacity=None):
     _validate_profile(profile)
-    workspace = getattr(ledger, "workspace", None)
-    capacity = workspace if capacity is None else capacity
+    from ..capacity import CapacityConfig
+
     effective = getattr(capacity, "capacity", capacity)
-    if workspace is not None:
-        if effective != workspace.capacity:
-            raise TaskError("TASK_CAPACITY_CONFLICT", "profile")
-        workspace.check()
+    effective = CapacityConfig() if effective is None else effective
     ref = profile.get("credential_ref")
     token = None
     if ref is not None:
@@ -81,8 +78,9 @@ def connect_profile(profile, ledger, *, capacity=None):
             raise TaskError("PROFILE_CREDENTIAL_INVALID", "profile")
     options = {} if effective is None else {"capacity": effective}
     transport = RustProductionTransport(
-        ledger,
+        None,
         Path(profile["worker"]),
+        root=Path(root),
         origin=profile["origin"],
         token=token,
         same_origin_cookie=("m_session_id=" + token) if token else None,

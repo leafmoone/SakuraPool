@@ -311,7 +311,7 @@ def main(argv: list[str] | None = None) -> int:
                     workspace.check()
                     from .storage.retrieval import _real_output_root
 
-                    _real_output_root(Path(args.output).absolute(), workspace.ledger())
+                    _real_output_root(Path(args.output).absolute(), physical_root=workspace.root)
                 with load_publication(
                     args.root if args.publication_command != "fetch" else args.publication,
                     full_verify=args.publication_command == "fetch" or getattr(args, "full", False),
@@ -319,7 +319,7 @@ def main(argv: list[str] | None = None) -> int:
                     if args.publication_command == "fetch":
                         from .storage.publication_fetch import fetch_publication_sample
 
-                        if workspace is not None:
+                        if args.publication_command == "fetch":
                             from .tasks.cli import bounded_json
                             from .tasks.profile import (
                                 connect_profile,
@@ -332,8 +332,7 @@ def main(argv: list[str] | None = None) -> int:
                                 profile = read_profile(args.profile)
                             else:
                                 # Legacy production profile remains a connection description;
-                                # workspace accounting/capacity are explicit,
-                                # never a fresh P4 ledger.
+                                # Only connection scope is retained; no download ledger.
                                 from .storage.production import ProviderObject
 
                                 if (
@@ -375,14 +374,21 @@ def main(argv: list[str] | None = None) -> int:
                                 ):
                                     profile.pop("credential_ref")
                             validate_allowlist(profile, pub)
-                            transport = connect_profile(
-                                profile, workspace.ledger(), capacity=workspace
+                            root = (
+                                workspace.root
+                                if workspace is not None
+                                else Path(args.output).absolute()
                             )
-                            scope = None
-                        else:
-                            from .storage.production_cli import load_profile
-
-                            _config, scope, transport = load_profile(Path(args.profile))
+                            transport = connect_profile(
+                                profile,
+                                root=root,
+                                capacity=workspace.capacity if workspace else None,
+                            )
+                            scope = (
+                                obj
+                                if profile_data.get("format") != "sakurapool-task-connection-v1"
+                                else None
+                            )
                         with transport:
                             result = {
                                 "output": str(

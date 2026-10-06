@@ -9,8 +9,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from ..capacity import CapacityConfig
-from .bounded_json import VALIDATION_INFLIGHT_BYTES, validate_file
-from .budget import BudgetExceeded, BudgetLedger, Reservation
+from .bounded_json import validate_file
 from .modelscope import ModelScopeDataset, _io_error
 from .prepared_fetch import stream_plan
 from .production import (
@@ -22,6 +21,50 @@ from .production import (
 from .publication import PublicationCorrupt
 from .retrieval import _publish_directory, _real_output_root
 from .transport import BoundObject, GuardedTransport, RemoteIOError
+
+
+class LightweightFetchError(RemoteIOError):
+    """Delivery uncertainty only; no persistent consumption or quota evidence."""
+
+    def __init__(
+        self,
+        code,
+        *,
+        delivered,
+        cleanup_safe,
+        secondary=(),
+        underlying=None,
+        member_kind=None,
+        chunk_index=None,
+    ):
+        super().__init__("publication download failed", code=code, phase="publication_fetch")
+        from ..tasks.store import safe_failure
+
+        cause = {}
+        if isinstance(underlying, RemoteIOError):
+            cause = {
+                "cause_code": underlying.code,
+                "cause_phase": underlying.phase,
+                "cause_http_status": underlying.http_status,
+            }
+        self.details = safe_failure(
+            {
+                **cause,
+                "code": code,
+                "phase": "publication_fetch",
+                "delivery": "PUBLISHED" if delivered else "NOT_PUBLISHED",
+                "cleanup": "SAFE" if cleanup_safe else "PRESERVED",
+                "member_kind": member_kind,
+                "chunk_index": chunk_index,
+                "recoverable": False,
+            }
+        )
+        self.finalization_errors = tuple(secondary)
+        self.delivery_published = delivered
+        self.cleanup_safe = cleanup_safe
+
+    def public_diagnostic(self):
+        return dict(self.details)
 
 
 class PublicationFetchError(RemoteIOError):
@@ -258,23 +301,20 @@ def _fetch_publication_sample(
         or ro["object_version"] != content.hex()
     ):
         raise PublicationCorrupt("runtime locator mismatch")
-    ledger = transport.ledger
-    from ..tasks.pipeline import LedgerRPC
-
-    if not isinstance(ledger, (BudgetLedger, LedgerRPC)) or (
-        not ledger.offline_mode
-        and (not isinstance(transport, RustProductionTransport) or not transport.production_profile)
+    ledger = getattr(transport, "ledger", None)
+    if ledger is not None:
+        raise ValueError("download consumption ledgers are no longer supported")
+    offline = getattr(transport, "offline_mode", False)
+    if not offline and (
+        not isinstance(transport, RustProductionTransport) or not transport.production_profile
     ):
-        raise BudgetExceeded("explicit Rust production profile required")
-    workspace = getattr(ledger, "workspace", None)
-    if workspace is not None and workspace.capacity != capacity:
-        raise ValueError("workspace/fetch capacity mismatch")
-    if not ledger.offline_mode:
+        raise ValueError("explicit Rust production profile required")
+    if not offline:
         if not isinstance(transport, RustProductionTransport) or transport.origin != endpoint:
             raise PublicationCorrupt("credential origin mismatch")
         if control is not None:
             raise PublicationCorrupt("external production control rejected")
-    output = _real_output_root(Path(output), ledger)
+    output = _real_output_root(Path(output), physical_root=getattr(transport, "root", None))
     key = (pub.content_digest, rt.snapshot_id, idx, transport, ledger)
     obj = pub._verified.get(key)
     if getattr(transport, "_closed", False):
@@ -297,7 +337,8 @@ def _fetch_publication_sample(
             control = transport.metadata_control()
         elif owned:
             control = GuardedTransport(
-                ledger,
+                None,
+                offline_mode=offline,
                 trusted_hosts=frozenset({urlsplit(endpoint).hostname}),
                 token=transport._token,
                 credential_origin=endpoint,
@@ -330,24 +371,26 @@ def _fetch_publication_sample(
     final = output / record_id
     if final.exists() or final.is_symlink():
         raise FileExistsError("never overwrite output")
-    lease = ledger.reserve(
-        Reservation(disk=plan.saved_bytes + 8192, saved_samples=1, saved_bytes=plan.saved_bytes)
-    )
     stage = output / (".publication-fetch-" + secrets.token_hex(16))
     created, receipts = {}, {}
     stage_identity = None
     delivered = False
     state = {"code": "publication_write", "body_error_code": None}
     try:
-        if attempt_hook is not None:
-            attempt_hook("OUTPUT_RESERVED", {"lease": lease})
         stage.mkdir()
         stage_stat = stage.lstat()
         stage_identity = (stage_stat.st_dev, stage_stat.st_ino)
+        if attempt_hook is not None:
+            attempt_hook("STAGED", {"name": stage.name, "identity": list(stage_identity)})
         image_digest = hashlib.sha256()
         # A single exclusive writer; hash is accumulated inside each payload lease.
         with (stage / ("image" + suffix)).open("xb") as f:
             created["image" + suffix] = _file_identity(f)
+            if attempt_hook is not None:
+                attempt_hook(
+                    "CREATED",
+                    {"name": "image" + suffix, "identity": list(created["image" + suffix])},
+                )
             for chunk_index, (offset, length) in enumerate(plan.chunks()):
                 state.update(member_kind="image", chunk_index=chunk_index)
                 with _owned_range(transport, bound, offset, length, state) as payload:
@@ -374,6 +417,11 @@ def _fetch_publication_sample(
             state["code"] = "publication_write"
             with (stage / "metadata.json").open("xb") as f:
                 created["metadata.json"] = _file_identity(f)
+                if attempt_hook is not None:
+                    attempt_hook(
+                        "CREATED",
+                        {"name": "metadata.json", "identity": list(created["metadata.json"])},
+                    )
                 for chunk_index, (offset, length) in enumerate(plan.chunks(metadata=True)):
                     state.update(member_kind="metadata", chunk_index=chunk_index)
                     with _owned_range(transport, bound, offset, length, state) as payload:
@@ -387,19 +435,7 @@ def _fetch_publication_sample(
                 f.flush()
                 os.fsync(f.fileno())
             state["code"] = "publication_metadata"
-            parse_lease = ledger.reserve(Reservation(inflight=VALIDATION_INFLIGHT_BYTES))
-            try:
-                validate_file(
-                    stage / "metadata.json", meta_size, max_bytes=capacity.metadata_max_bytes
-                )
-            except BaseException as error:
-                # Preserve UNKNOWN admission on any escaping validator failure.
-                # In particular, allocation/IO failures can retain scratch in traceback.
-                error.production_payload_lease = parse_lease
-                error.production_payload_resources = "PRESERVED"
-                raise
-            else:
-                ledger.settle(parse_lease)
+            validate_file(stage / "metadata.json", meta_size, max_bytes=capacity.metadata_max_bytes)
             receipts["metadata.json"] = {
                 "sha256": meta_digest.hexdigest(),
                 "bytes": meta_size,
@@ -415,10 +451,6 @@ def _fetch_publication_sample(
         delivered = True
         if attempt_hook is not None:
             attempt_hook("PUBLISHED", {})
-        state["code"] = "publication_accounting"
-        ledger.settle(lease, saved_samples=1, saved_bytes=plan.saved_bytes)
-        if attempt_hook is not None:
-            attempt_hook("SETTLED", {"output_lease": "CONFIRMED"})
         return final
     except BaseException as primary:
         finalization_errors = ["RANGE_FINALIZATION_FAILED"] if state.get("range_secondary") else []
@@ -428,32 +460,20 @@ def _fetch_publication_sample(
                 safe = _cleanup_owned_stage(stage, stage_identity, created)
             except BaseException:
                 finalization_errors.append("CLEANUP_FAILED")
-            if safe:
-                try:
-                    ledger.settle(lease)
-                except BaseException:
-                    finalization_errors.append("ACCOUNTING_UNKNOWN")
-        output_lease = (
-            "UNKNOWN"
-            if delivered or not safe or "ACCOUNTING_UNKNOWN" in finalization_errors
-            else "CONFIRMED"
-        )
         if isinstance(primary, Exception):
-            raise PublicationFetchError(
+            raise LightweightFetchError(
                 state["body_error_code"] or state["code"],
                 delivered=delivered,
                 cleanup_safe=safe,
-                output_lease=output_lease,
                 secondary=finalization_errors,
                 underlying=primary,
                 member_kind=state.get("member_kind"),
                 chunk_index=state.get("chunk_index"),
             ) from None
-        primary.publication_state = PublicationFetchError(
+        primary.publication_state = LightweightFetchError(
             state["body_error_code"] or state["code"],
             delivered=delivered,
             cleanup_safe=safe,
-            output_lease=output_lease,
             secondary=finalization_errors,
             underlying=primary,
             member_kind=state.get("member_kind"),

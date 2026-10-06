@@ -71,8 +71,21 @@ def _checked(payload: bytes, expected: Extent) -> bytes:
     return payload
 
 
-def _real_output_root(root: Path, ledger: BudgetLedger) -> Path:
+def _real_output_root(root: Path, ledger=None, *, physical_root=None) -> Path:
     root = Path(root).absolute()
+    if ledger is None:
+        from ..fs_safety import plain_entry
+
+        if ".." in root.parts:
+            raise ValueError("noncanonical output path")
+        plain_entry(root, directory=True)
+        if physical_root is not None:
+            physical_root = plain_entry(Path(physical_root).absolute(), directory=True)
+            if root != physical_root and not root.is_relative_to(physical_root):
+                raise ValueError("output escapes execution root")
+        for component in root.parents:
+            plain_entry(component, directory=True)
+        return root
     workspace = getattr(ledger, "workspace", None)
     if workspace is not None:
         workspace.check()

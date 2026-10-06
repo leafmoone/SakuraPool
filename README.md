@@ -1,5 +1,57 @@
 # SakuraPool
 
+## Lightweight downloads (current contract)
+
+New downloads use **TaskDB v3** and **workspace manifest v2**. The production
+path does not instantiate `BudgetLedger`, read/write budget slots, recursively
+scan disk for quota admission, or persist request/body/metadata/saved-byte
+consumption. There is no cumulative request, bandwidth, saved-count, disk-output,
+or task-output quota. `--max-output-bytes` and workspace policy updates have been
+removed from the download CLI. Historical ledger files are never reset or settled.
+
+Only light task state is durable: frozen query/selection/seed, publication and
+plan identity, current operation/phase, owned temporary-file identity, verified
+file receipt, bounded retry lifecycle, and a sanitized failure diagnostic. An
+item failure and its diagnostic commit together with task `FAILED`. Use
+`task inspect TASK --failure-seq SEQ` to read it without changing the task.
+Diagnostics contain fixed codes/phases, HTTP status and member/chunk location;
+never exception messages, URLs, paths, tokens, headers or cumulative consumption.
+
+New workers negotiate protocol **2** with same-instance capability
+`production_download_lightweight_v1` and exact technical execution-limit echo.
+An old worker or mismatched capability/limits fails before provider requests.
+Build a matching worker with an explicit project target directory and update a
+connection description deliberately; old profiles/binaries are not auto-rewritten.
+Protocol 1 remains for historical indexing/administration operations, not a
+hidden legacy download switch. Request-ID deduplication remains bounded at 256;
+rotation clears conditional proofs and revalidates them before further Range IO.
+
+The following remain technical safety/format boundaries, not consumption quotas:
+bounded concurrent working memory, chunk/header/RPC buffers, selection heap and
+SQLite/JSON parser bounds, exact indexed extents and image SHA, bounded metadata
+validation, trusted origin/redirect policy, conditional positive/negative proof,
+finite Origin retry (at most 3) plus CDN hop, owned temporary files and atomic
+no-overwrite delivery. Large images may stream over several configured chunks.
+No change implies image decoding or conversion.
+
+Resume never reselects records. A published receipt must match task/operation,
+file/directory identities and indexed image SHA before `DONE/VERIFIED`; valid
+published output is reused, not redownloaded. Crashed `IN_PROGRESS` can become
+`READY` only after claimed-before-network or exact owned-temp cleanup evidence.
+Unknown/replaced output and ambiguous protocol failures remain `BLOCKED`, not
+blindly retried. Classified transient, unpublished failures require explicit
+resume; at most two recovery retries survive process restarts. This is not an
+end-to-end exactly-once or Windows directory power-loss guarantee.
+
+Existing TaskDB v1/v2 archives allow **read-only inspection only**. Export writes
+an artifact, so legacy export is explicitly rejected as well: every action except
+inspect fails `LEGACY_TASK_MIGRATION_REQUIRED` before publication loading, output
+creation, writable SQLite/journal or credential handling. This does not authorize
+export to an external path, copying or migration. Migration is not automatic:
+confirmed deliveries need revalidation, uncertain items need isolation, and old
+UNKNOWN/pending accounting must remain archived. No migration or production
+resume is authorized by these implementation changes.
+
 ## Raw image delivery settings
 
 Publication/task downloads support registered `.jpg`, `.jpeg`, `.png`, `.webp`,
@@ -10,31 +62,18 @@ is performed. Unknown formats and unsafe filenames are rejected. Index adapter
 `image_extensions` controls scanning and does not automatically enable download
 formats.
 
-Existing tasks can explicitly expand their format selection and adjust their
-cumulative output ceiling without reselecting records:
+New v3 tasks can explicitly expand their format selection without reselecting records:
 
 ```text
 sakura task inspect /workspace/tasks/task
-sakura task update /workspace/tasks/task --expected-settings-version 0 --image-extensions .jpg,.jpeg,.png,.webp,.avif,.gif --max-output-bytes 1610612736
+sakura task update /workspace/tasks/task --expected-settings-version 0 --image-extensions .jpg,.jpeg,.png,.webp,.avif,.gif
 ```
 
-Use the actual `settings_version` from inspect. Old tasks start at version zero
+Use the actual `settings_version` from inspect. New tasks start at version zero
 with the original five defaults. Updates use compare-and-swap, reject format
-removal, active runners/items, UNKNOWN accounting, or any workspace pending
-reservation/inflight use. Both settings and their old/new audit event commit in
-one transaction. Validation/CAS/SQL failure rolls back both settings and audit.
-Selection/seed/plan, deliveries and charged network accounting are unchanged.
-If SQLite commits but reservation settlement fails, settings **are already
-committed**: `TASK_RESOURCE_SETTLEMENT_UNKNOWN` retains the unresolved lease and
-blocks further updates. Inspect the actual settings version; do not blindly
-retry or clear reservations. A primary error plus settlement failure preserves
-both diagnostics.
-
-`max_output_bytes` is a finite total ceiling including already confirmed images
-and requested metadata, not an additional allowance. It must be an integer at
-least the confirmed cumulative bytes and below 2^63; zero means zero, not
-unlimited. Workspace resource policy and per-image/chunk capacity still apply.
-Settings never automatically raise quotas.
+removal and active runners/items, and commit the latest format/version in one
+transaction. Frozen selection/seed/plan and verified deliveries are unchanged.
+There is no output ceiling, ledger lease or consumption audit to update.
 
 
 SakuraPool builds reusable P2 TAR indexes, compiles read-only P3 query snapshots,
@@ -56,13 +95,13 @@ P5-C bounded pipeline is approved and merged. P5-D validation is complete for th
 fixed `20261004T143905Z-upload` scope and merged at
 `62f86cc487af41de7d84bfb5a14d2fb1e0e172ac`; independent semantic comparison
 remains subset-only, and global index completion is not claimed. See
-[the P5-D report](reports/P5D/REPORT.md). P6-A now implements explicit user
-workspaces and resource/capacity policy; its current route is [plan.md](plan.md). Default task workers=1;
-2/4 are explicit upper bounds, with actual concurrency limited by object distribution
-and resource admission. Budget/ledger v2 migration is not implemented. Earlier P3/P4 CLI examples below are historical/admin
-interfaces, not the default task workflow.
+[the P5-D report](reports/P5D/REPORT.md). The current lightweight workflow is
+tracked in [plan.md](plan.md). Default task workers=1; 2/4 are explicit upper
+bounds, with actual concurrency limited by object distribution and technical
+working memory. Earlier P3/P4 CLI examples below are historical/admin interfaces,
+not the default task workflow.
 
-## P6-A workspace and implementation boundaries
+## Workspace and implementation boundaries
 
 ```text
 sakura workspace init WORKSPACE
@@ -71,19 +110,19 @@ sakura doctor --workspace WORKSPACE --profile PROFILE.json
 sakura task create --workspace WORKSPACE --publication PUB --query QUERY.json --selection first --limit 3 --metadata --task-dir WORKSPACE/tasks/TASK
 ```
 
-The immutable capacity/layout belongs to workspace manifest v1; workspace ledger
-v3 and TaskDB v2 retain physical-domain, identity and lineage binding. ResourcePolicy
-is mutable with a durable epoch (`--expected-epoch` is explicit CAS; omission is
-last-writer-wins). New cumulative quotas default to JSON null, not legacy P4 limits;
-disk/inflight remain bounded. No legacy ledger or UNKNOWN task migration is provided.
+New workspace manifest v2 freezes physical-domain identity and technical capacity;
+TaskDB v3 binds the workspace and exact frozen plan. `workspace init --config`
+accepts only `capacity`, not a download resource policy. `workspace inspect` reads
+legacy workspace identity without opening its ledger. Legacy-task migration is
+explicitly separate and is not implemented automatically.
 
 Metadata is validated as a JSON object without materializing its object graph: strict
 UTF-8, no BOM, NaN or Infinity, depth at most 128 and at most 1,000,000 nodes.
 These are validator implementation boundaries, not adjustable metadata byte capacity.
 Duplicate keys and escaped unpaired surrogates remain accepted. Flagged empty metadata
 is invalid. This is intentionally narrower than every input accepted by `json.loads`.
-The fixed validator working reservation is 8,320 bytes; parse failure does not erase
-operation UNKNOWN or release a lease whose ownership has escaped.
+The fixed validator working-set allowance is 8,320 bytes; validation failure
+prevents publication and preserves unrecognized temporary files.
 
 RPC capacity is negotiated, with a separate 64 KiB bootstrap and bounded queue/parser.
 The pinned reqwest/hyper HTTP/1 implementation has a 417,792-byte incomplete-head
@@ -92,13 +131,10 @@ threshold and an independent 100-field limit. Configured decoded header bytes ab
 canonical HTTP/1.1 206 status line; extra wire whitespace or a longer reason phrase
 can hit the underlying parser boundary earlier. It is not a universal response guarantee.
 
-Ledger and protocol admission model live working allocations and deduct ledger
-headroom once from available inflight. Python object sizes vary by interpreter;
-headroom is not a universal fixed number. The protocol header factor covers conservative
-pinned hyper 1.11.1 / bytes 1.12.1 growth/copy scenarios, not a formal allocator or RSS
-upper bound. Native/unrelated process memory and allocator caches are outside this model.
-Public ledger calls return small values and clear operation frames while locked;
-arbitrary external retention of private `_read_pair` results is outside the model.
+Download lane admission checks a fixed 512 MiB conservative live-working-set
+model; it is not a cumulative quota or formal process RSS ceiling. Protocol
+header factors cover conservative pinned hyper/bytes growth/copy scenarios.
+Native/unrelated process memory and allocator caches are outside this model.
 
 P6-A real-workspace metadata validation is **PARTIAL**: two of three items were
 published and exported after formal pause; fresh-process resume failed, and a subsequent
@@ -126,8 +162,8 @@ sakura task export TASK --manifest OUTPUT.jsonl
 
 Creation/inspection are local: no HTTP or token reading. Task/output/export paths
 must be contained in their validated workspace physical domain; publication can be read
-outside it. Omit `--workspace` only for an existing workspace-bound task (automatic
-identity discovery) or the unchanged legacy P4 workflow. TaskDB uses DELETE journal and FULL synchronization with short explicit
+outside it. Workspace-bound tasks support automatic identity discovery; standalone
+new tasks are also lightweight. TaskDB uses DELETE journal and FULL synchronization with short explicit
 transactions, plus a real single-runner OS file lock. One serial session fully
 verifies the publication once per runner process. Pause/cancel CLI returns a
 **requested** state: the bounded current item finishes before another is claimed.
@@ -143,30 +179,27 @@ Optional `credential_ref` is `{"env":"MODELSCOPE_API_TOKEN"}` or a bounded
 `{"file":"ABSOLUTE_TOKEN_FILE"}` reference, not an embedded credential.
 Object paths/revisions/digests come from the pinned publication, not this profile.
 
-Successful durable per-attempt delivery/settlement receipts recover without
-re-downloading or incrementing saved counts. An output with unknown settlement
-is preserved and blocked, not retried or refunded. Lease absence and global
-counter differences are not proof. There is no end-to-end exactly-once claim.
-Exports stream only verified confirmed deliveries with source/plan identity,
+Successful durable delivery receipts recover without redownloading. Unknown
+output is preserved and blocked; neither filename existence nor absence of a
+historic lease proves success. There is no end-to-end exactly-once claim.
+Only new v3 tasks can export; legacy v1/v2 export requires separately authorized
+migration and is currently rejected without writing. Exports stream only
+receipt-verified deliveries with source/plan identity,
 relative task paths and delivery hashes, without image copies or archives.
 The manifest must be directly inside TASK (for example TASK/subset.jsonl), so
 its `output/<record_id>/...` paths resolve relative to the manifest's directory;
 a different export base is explicitly rejected.
-Legacy root, saved/body/attempt caps and binary ledger format remain unchanged;
-RESOURCE_BLOCKED does not mean a user's authorized real request was exhausted.
-Local resource diagnostics state effective limits, actual remaining and required
-admission. Network body/attempt estimates before listing are **lower bounds**;
-each later request still needs the legacy ledger's own reservation. No exact
-per-task network consumption is inferred from global counters.
+Legacy binary ledger formats remain archives/admin compatibility and are not
+used by new downloads. No exact per-task network consumption is recorded or
+inferred from historical global counters.
 
 Explicit current task bounds: 100,000 frozen entries, 10,000 in-memory sample
 heap entries, 512-record identity batches, 32 MiB TaskDB, 33 MiB journal allowance,
 64 KiB plan header and 32 MiB exported manifest. SQLite temp work uses memory;
-the maximum DB page count is derived from its actual page size. Task admission
-also reserves growth/journal overhead under the legacy physical-root budget.
-Windows file/SQLite fsync is used; portable Windows directory power-loss durability
-is not claimed. Larger than 8 MiB members remain unsupported. Bounded task
-concurrency is available; general workspace/ledger v2 migration is not implemented.
+the maximum DB page count is derived from its actual page size. Windows file/
+SQLite fsync is used; portable Windows directory power-loss durability is not
+claimed. Configure image capacity for larger images while keeping bounded chunks.
+Bounded task concurrency is available; automatic legacy migration is not implemented.
 Production-scale validation is tracked separately.
 
 ## Publication v2 (runtime-first distribution)
@@ -197,11 +230,11 @@ all hashes and cross-checks catalog identities. Fetch requires a full-verified
 publication, fresh exact provider lookup, then its own positive/negative
 conditional binding before Rust Range reads. Neither live ETag/proof nor signed
 URL is persisted. Publication storage may be outside the network work root;
-fetch outputs and accounting remain governed by the existing production ledger.
+fetch outputs use the same ledger-free streaming and integrity path as tasks.
 
-Image mismatch prevents delivery. A ledger settlement failure *after* atomic
-rename may leave verified output visible with conservative pending accounting;
-this is an error, not successful settlement, and the output is never overwritten.
+Image mismatch prevents delivery. A crash after atomic rename may leave visible
+output with an unfinished task operation; recovery verifies its durable receipt
+before reuse, and no output is overwritten.
 Synthetic million-record measurements are not a production capacity guarantee.
 
 ## Project workflow and boundaries
