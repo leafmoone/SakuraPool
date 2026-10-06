@@ -1,9 +1,12 @@
-# P4-R2 explicit Rust transport and administrator interfaces
+# Rust transport and administrator interfaces
 
-R2 adds interfaces, not blanket network/index-build authorization. The single
-minimal real batch stopped at `cdn_status`; its final CDN status was not retained.
-Production version binding and strict Range acceptance for `leafmoone/game_cg_5M`
-remain BLOCKED. No real complete TAR download or index build was performed.
+These interfaces do not grant blanket network/index-build authorization.
+The actual production worker must advertise `production_transfer_v2` and
+`production_http_status_v1` before network attempt reservation. `profile.worker`
+is authoritative and is not overridden by an environment variable.
+Only trusted, fully drained Origin 400/403 responses may be retried, at most three
+Origin requests followed by one CDN request. Other statuses and ambiguous failures
+are not retried; UNKNOWN accounting stays pending.
 
 ## Boundaries
 

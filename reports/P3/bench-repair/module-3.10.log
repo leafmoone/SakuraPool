@@ -1,3 +1,0 @@
-{"commit": "c8a286892039acca283a0762df23ac56346f64f4", "command": ["D:\\SakuraTool\\SakuraPool\\.venv310s\\Scripts\\python.exe", "-c", "import sakurapool; assert 'site-packages' in sakurapool.__file__; print(sakurapool.__file__)"], "cwd": "D:\\SakuraTool\\SakuraPool", "PYTHONPATH": null}
-D:\SakuraTool\SakuraPool\.venv310s\lib\site-packages\sakurapool\__init__.py
-exit=0

@@ -1,8 +1,0 @@
-Traceback (most recent call last):
-  File "<string>", line 1, in <module>
-AttributeError: module 'ruff' has no attribute '__version__'
-D:\tmp\sakurapool-p2-final-venv\Scripts\python.exe
-3.12.13 (main, May 10 2026, 19:35:37) [MSC v.1944 64 bit (AMD64)]
-Windows-11-10.0.26100-SP0
-pyarrow=18.1.0
-pytest=8.3.4

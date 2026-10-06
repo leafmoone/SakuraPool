@@ -6,26 +6,19 @@ Local, download and remote builders and explicit budgeted Rust production profil
 are available; credentials and live binding proofs are never distributed.
 No image decoding, model execution or production throughput claim.
 
-P5-A adds bounded publication construction and a serial Python reader:
+Bounded publication construction includes a serial Python reader:
 `from sakurapool.storage.publication_session import PublicationSession`.
 A session fully verifies once, serves multiple record fetches and closes its bounded
 binding cache. It owns the publication handle, not the caller's transport/ledger.
 PublicationSession itself is serial and same-thread: no cross-thread SQLite use.
 The task coordinator separately supports bounded concurrent lanes; this is not a
 concurrent scheduler inside a shared PublicationSession.
-See [P5 roadmap and task design](docs/P5_ROADMAP.md). P5-B serial task and real
-closure certification is complete; see the [closure report](reports/P5B/REAL_CLOSURE_REPORT.md).
-P5-C bounded pipeline is approved and merged. P5-D validation is complete for the
-fixed `20261004T143905Z-upload` scope and merged at
-`62f86cc487af41de7d84bfb5a14d2fb1e0e172ac`; independent semantic comparison
-remains subset-only, and global index completion is not claimed. See
-[the P5-D report](reports/P5D/REPORT.md). P6-A now implements explicit user
-workspaces and resource/capacity policy; its current route is [plan.md](plan.md). Default task workers=1;
+Explicit user workspaces provide resource/capacity policy. Default task workers=1;
 2/4 are explicit upper bounds, with actual concurrency limited by object distribution
 and resource admission. Budget/ledger v2 migration is not implemented. Earlier P3/P4 CLI examples below are historical/admin
 interfaces, not the default task workflow.
 
-## P6-A workspace and implementation boundaries
+## Workspace and implementation boundaries
 
 ```text
 sakura workspace init WORKSPACE
@@ -62,11 +55,6 @@ pinned hyper 1.11.1 / bytes 1.12.1 growth/copy scenarios, not a formal allocator
 upper bound. Native/unrelated process memory and allocator caches are outside this model.
 Public ledger calls return small values and clear operation frames while locked;
 arbitrary external retention of private `_read_pair` results is outside the model.
-
-P6-A real-workspace metadata validation is **PARTIAL**: two of three items were
-published and exported after formal pause; fresh-process resume failed, and a subsequent
-resume retained one operation UNKNOWN and two pending leases. No final three-item
-closure is claimed. See the final P6-A report for the execution deviation and evidence.
 
 ## Task API (recoverable task workflow)
 
@@ -169,8 +157,7 @@ Synthetic million-record measurements are not a production capacity guarantee.
 
 ## Project workflow and boundaries
 
-[Project rules](docs/PROJECT_RULES.md) are the canonical current workflow and
-boundary reference. The intended administrator flow is remote TAR indexing →
+The administrator flow is remote TAR indexing →
 durable index → runtime compile/verify → versioned index publication. The user
 flow is install/verify a published index → query → locate image/JSON → Range
 retrieval → a small local dataset. Earlier P3 descriptions of remote scanning,
@@ -180,36 +167,25 @@ are described above and do not imply a complete production index is available.
 Ordinary users do not need complete local TARs; LocalTarScanner is for local
 inputs, testing and validation. No ready-to-import index currently exists; do not
 search for old hfutils/CheeseChaser indexes as a prerequisite. Large-repository
-index construction requires separate authorization after development and acceptance.
-The later P4 integration target is `leafmoone/game_cg_5M`; naming it grants no
-access, full scan or write permission. See the rules for bounded canary planning,
-object-version binding, component boundaries and dev/main review requirements.
+index construction is an explicit administrator operation, not an implicit fetch step.
 
-P4-R2 adds an explicit Rust production transport and two administrator pipeline
-interfaces; see [R2 transport](docs/R2_TRANSPORT.md) for configuration, gates and
-whole-TAR spool/memory limits. The early minimal live capability batch stopped
-BLOCKED (historical R2 evidence); subsequent approved small real closure evidence is
-linked above. Neither those small closures nor these interfaces certify a complete
-production-scale index. Ordinary fetch still requires a verified local package
-and must not implicitly scan. No real full-TAR download or large-repo build was run.
+The explicit Rust production transport and administrator pipeline interfaces are
+documented in [R2 transport](docs/R2_TRANSPORT.md), including configuration, gates and
+whole-TAR spool/memory limits. Ordinary fetch requires a verified local package
+and must not implicitly scan.
 
 ## Installation and CLI
 
 Python 3.10 or newer is required by the code and dependency minimums; there is no
-project-imposed upper version bound or mandatory Python 3.12 certification policy.
+project-imposed upper version bound.
 Use the newest stable interpreter that actually installs and passes verification
 with the pinned dependencies, not simply the highest version number. On Windows
 x86-64, the current PyArrow 18.1.0 / NumPy 2.2.6 pins provide CPython 3.13 wheels
-but not 3.14 wheels. Removing the metadata upper bound does not certify 3.14 or
-permit silently upgrading those pins, transplanting Arrow, or using `--no-deps`.
-
-The current single-project-environment selection and independent certification
-are recorded in `reports/Python-venv-20260930/`; historical Fix3 Python 3.12 logs
-remain unchanged and do not certify this later contract. Verification subprocesses
-use the invoking interpreter (`sys.executable`) rather than a retired venv path.
+but not 3.14 wheels. Use a compatible interpreter rather than silently upgrading
+those pins, transplanting Arrow, or using `--no-deps`.
 
 ```console
-python -m pip install -e '.[dev]'
+python -m pip install .
 sakura --version
 sakura config validate --config examples/index-config.json
 sakura index scan --config examples/index-config.json --dataset synthetic --input /local/tars --output /local/index
@@ -263,8 +239,7 @@ uint64 extent without opening or decoding images. P2 local objects use
 **Migration impact:** version 1 outputs must not be reused. Build a new output directory;
 there is no in-place migration. Object IDs, record IDs, table columns, error codes,
 summary counts, and crash hooks changed. Existing P1 query APIs remain unchanged but
-are not automatically a query engine for the four domain tables. Historical P2 reports
-and `tools/verify_p2.py` describe the obsolete v1 protocol, not current certification.
+are not automatically a query engine for the four domain tables.
 
 ## Four Arrow tables
 
@@ -330,16 +305,7 @@ objects_skipped. created_at and timings are nondeterministic; logical rows/IDs/c
 are deterministic. Memory still scales with the largest shard (headers and rows are
 materialized); batched Parquet writing is not a bounded-memory streaming claim.
 
-## Verification
-
-```console
-PYTHONPATH=src python -m pytest -q
-python -m ruff check .
-git diff --check
-git diff 52358d6fca728d2bba12814490e0974a6907b218..HEAD --check
-python -m build --wheel --outdir /tmp/sakurapool-p2-wheel
-PYTHONPATH=src python tools/benchmark_indexer.py
-```
+## Storage format
 
 The current on-disk contract is `FORMAT_VERSION=4`, builder `sakurapool-p2-v4`.
 `storage_id` is a stable configured profile identifier (default `local`), independent of
@@ -348,13 +314,6 @@ object_size, object_version, and validator. `archive_format=tar` is separate fro
 `repo_type=local`. Version 3 outputs are incompatible and must not be reused; build a
 new output directory. Future ModelScope validation MUST NOT use remote full-object SHA
 rereads as the normal validation path; use fixed revisions and object validators.
-P4 MUST NOT use remote full-object SHA rereads as the normal ModelScope validation path.
-
-The benchmark generates 10,000 synthetic samples in **one** TAR. It reports
-header/json/parquet/total seconds and process peak RSS including fixture generation
-and imports; total excludes fixture generation but includes whole-TAR validation.
-No production performance inference is valid. See the revision report for actual
-command logs, compatible installation failures/successes, and remaining gates.
 
 ## P3 runtime
 
@@ -436,23 +395,3 @@ a lazy bitmap result: `count()` / `len()`, `iter_rids()`, `limit(n)`,
 cached in a byte-budget LRU (`cache_bytes` on `RuntimeSnapshot.open`, 256 MiB
 default) with hits/misses/evictions counters; a single blob larger than the
 budget is never cached.
-
-Benchmark (`tools/bench_runtime.py`, synthetic corpus, deterministic seed):
-
-```console
-PYTHONPATH=src python tools/bench_runtime.py --workdir build/bench --scale 100k
-# scales: 100k (correctness + 300-spec reference differential), 1M, 5M
-# phases: gen, compile, query, diff — each phase is a child process, so peak RSS
-# is attributed per phase; results merge into build/bench/report.json
-```
-
-The current P3 performance evidence is
-[`reports/P3/bench-repair/benchmark.json`](reports/P3/bench-repair/benchmark.json),
-with methodology and validation in [`reports/P3/report.md`](reports/P3/report.md)
-and separate [installed-package evidence](reports/P3/bench-repair/benchmark-installed.json).
-Earlier benchmark artifacts are retained as history, not current acceptance evidence.
-These results cover synthetic workloads only, not network performance, full-repository
-coverage or a guarantee for 21M records. Generator/options/code/environment fingerprints
-must match; use a fresh benchmark workdir after workload changes rather than assuming
-old phase files automatically invalidate. Do not rerun large benchmarks without the
-applicable stage authorization.

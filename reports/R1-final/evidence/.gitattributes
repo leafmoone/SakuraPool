@@ -1,3 +1,0 @@
-# Preserve exact raw verification bytes in Git (no autocrlf conversion).
-# Includes audit plugin/script sources: hashes are Git blob byte hashes.
-* -text

@@ -1,6 +1,0 @@
-{"commit": "92dc235048634f6e6404133645bbfa9a7172a5cc", "command": ["D:\\SakuraTool\\SakuraPool\\.venv312finalr4\\Scripts\\python.exe", "-m", "pytest", "tests", "-q", "-p", "no:cacheprovider"], "cwd": "D:\\SakuraTool\\SakuraPool", "PYTHONPATH": null}
-........................................................................ [ 38%]
-........................................................................ [ 77%]
-...............................s..........                               [100%]
-185 passed, 1 skipped in 615.13s (0:10:15)
-exit=0

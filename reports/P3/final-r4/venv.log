@@ -1,5 +1,0 @@
-{"commit": "92dc235048634f6e6404133645bbfa9a7172a5cc", "command": ["uv", "venv", "D:\\SakuraTool\\SakuraPool\\.venv312finalr4", "--python", "3.12"], "cwd": "D:\\SakuraTool\\SakuraPool", "PYTHONPATH": null}
-Using CPython 3.12.13
-Creating virtual environment at: .venv312finalr4
-Activate with: .venv312finalr4\Scripts\activate
-exit=0

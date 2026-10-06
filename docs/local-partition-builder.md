@@ -1,4 +1,4 @@
-# Local partition builder (candidate; review required)
+# Local partition builder
 
 This workflow is separate from P4 remote retrieval. It consumes already-downloaded
 local TARs; it neither downloads a repository nor deletes local inputs.

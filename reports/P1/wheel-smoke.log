@@ -1,9 +1,0 @@
-Processing C:\Users\PC\AppData\Local\Temp\sakurapool-wheel\sakurapool-0.1.0-py3-none-any.whl
-Installing collected packages: sakurapool
-Successfully installed sakurapool-0.1.0
-
-[notice] A new release of pip is available: 26.1.1 -> 26.2.1
-[notice] To update, run: C:\Users\PC\AppData\Local\Temp\sakurapool-venv\Scripts\python.exe -m pip install --upgrade pip
-{"query": {"dataset": "items", "filters": [{"column": "value", "operator": "gte", "value": 3}], "limit": 2, "operation": "select", "select": ["id", "label"]}, "valid": true}
-[{"id": "b", "label": "high"}, {"id": "c", "label": "high"}]
-wheel-smoke exit=0

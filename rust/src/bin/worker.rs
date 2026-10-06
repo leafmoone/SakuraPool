@@ -337,10 +337,6 @@ enum Inbound {
     Hello(Hello),
     Request(Request),
 }
-#[cfg(test)]
-fn read_line(reader: &mut impl BufRead) -> io::Result<Result<Vec<u8>, &'static str>> {
-    read_line_bounded(reader, MAX_LINE_BYTES)
-}
 fn read_line_bounded(
     reader: &mut impl BufRead,
     limit: usize,
@@ -660,100 +656,5 @@ fn respond(
     if let Err(error) = emit(stdout, &message, limit) {
         eprintln!("worker stdout failure: {error:?}");
         std::process::exit(2);
-    }
-}
-
-#[cfg(test)]
-mod line_reader_tests {
-    use super::*;
-    use std::io::{BufReader, Cursor, Read};
-    struct CountingReader {
-        inner: Cursor<Vec<u8>>,
-        consumed: std::sync::atomic::AtomicU64,
-    }
-    impl Read for CountingReader {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            let n = self.inner.read(buf)?;
-            self.consumed
-                .fetch_add(n as u64, std::sync::atomic::Ordering::SeqCst);
-            Ok(n)
-        }
-    }
-    impl CountingReader {
-        fn consumed(&self) -> u64 {
-            self.consumed.load(std::sync::atomic::Ordering::SeqCst)
-        }
-    }
-    #[test]
-    fn line_at_exact_limit_is_accepted_one_over_is_rejected() {
-        let mut reader = BufReader::new(Cursor::new(vec![b'x'; MAX_LINE_BYTES]));
-        assert_eq!(
-            read_line(&mut reader).unwrap().unwrap().len(),
-            MAX_LINE_BYTES
-        );
-        let mut reader = BufReader::new(Cursor::new(vec![b'x'; MAX_LINE_BYTES + 1]));
-        assert_eq!(read_line(&mut reader).unwrap(), Err("line_too_long"));
-    }
-    #[test]
-    fn oversized_line_is_rejected_early_and_remainder_drained() {
-        let mut data = vec![b'j'; 1024 * 1024];
-        data.extend_from_slice(b"\nclean\n");
-        let mut reader = BufReader::new(CountingReader {
-            inner: Cursor::new(data),
-            consumed: 0.into(),
-        });
-        assert_eq!(read_line(&mut reader).unwrap(), Err("line_too_long"));
-        assert!(reader.get_ref().consumed() <= (1024 * 1024 + 16 * 1024) as u64);
-        assert_eq!(read_line(&mut reader).unwrap(), Ok(b"clean".to_vec()));
-    }
-    #[test]
-    fn oversized_line_without_newline_uses_no_unbounded_memory() {
-        let mut reader = BufReader::new(CountingReader {
-            inner: Cursor::new(vec![b'k'; 16 * 1024 * 1024]),
-            consumed: 0.into(),
-        });
-        assert_eq!(read_line(&mut reader).unwrap(), Err("line_too_long"));
-        assert_eq!(reader.get_ref().consumed(), (16 * 1024 * 1024) as u64);
-    }
-    #[test]
-    fn eof_flushes_partial_line_then_reports_close() {
-        let mut reader = BufReader::new(Cursor::new(b"partial".to_vec()));
-        assert_eq!(read_line(&mut reader).unwrap(), Ok(b"partial".to_vec()));
-        assert_eq!(read_line(&mut reader).unwrap(), Ok(Vec::new()));
-    }
-    #[test]
-    fn crlf_and_chunked_lines_are_read_in_full() {
-        let mut reader = BufReader::new(Cursor::new(b"a\r\nb".to_vec()));
-        assert_eq!(read_line(&mut reader).unwrap(), Ok(b"a".to_vec()));
-        assert_eq!(read_line(&mut reader).unwrap(), Ok(b"b".to_vec()));
-    }
-    #[test]
-    fn malformed_lines_report_codes_without_oversized_buffer() {
-        assert!(parse_inbound(vec![0xff, 0xfe]).is_err());
-    }
-    #[test]
-    fn lexical_allocation_attacks_are_rejected() {
-        for text in [
-            "[]".to_owned(),
-            format!("{{\"x\":{}}}", "9".repeat(1000)),
-            format!("{{\"x\":{}0{}}}", "[".repeat(64), "]".repeat(64)),
-            format!("{{\"x\":[{}0]}}", "0,".repeat(65_536)),
-            "{\"x\":1e999}".to_owned(),
-        ] {
-            assert!(lexical_bounds(&text).is_err());
-        }
-    }
-    #[test]
-    fn checked_writer_never_exceeds_extent() {
-        let mut bytes = Vec::new();
-        assert!(emit(
-            &mut bytes,
-            &Outbound::ProtocolError {
-                error: "invalid_json"
-            },
-            16
-        )
-        .is_err());
-        assert!(bytes.len() <= 16);
     }
 }

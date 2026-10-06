@@ -1,6 +1,0 @@
-{"commit": "92dc235048634f6e6404133645bbfa9a7172a5cc", "command": ["C:\\Users\\PC\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe", "-m", "pytest", "tests", "-q", "-p", "no:cacheprovider"], "cwd": "D:\\SakuraTool\\SakuraPool", "PYTHONPATH": "D:\\SakuraTool\\SakuraPool\\src"}
-........................................................................ [ 38%]
-........................................................................ [ 77%]
-...............................s..........                               [100%]
-185 passed, 1 skipped in 40.37s
-exit=0

@@ -1,3 +1,0 @@
-{"commit": "92dc235048634f6e6404133645bbfa9a7172a5cc", "command": ["D:\\SakuraTool\\SakuraPool\\.venv312finalr4\\Scripts\\python.exe", "-c", "import sys\nfrom pathlib import Path\nsys.path.insert(0,'D:\\\\SakuraTool\\\\SakuraPool\\\\tests')\nfrom synthetic_p2 import ObjectSpec,SampleSpec,build_p2_directory\nbuild_p2_directory(Path('p2'),dataset='ds',source='src',objects=[ObjectSpec('a.tar',[SampleSpec('1.jpg','1',[('t',None)])])])\n"], "cwd": "C:\\Users\\PC\\AppData\\Local\\Temp\\sp-final-r4-epfdqqc6", "PYTHONPATH": null}
-
-exit=0

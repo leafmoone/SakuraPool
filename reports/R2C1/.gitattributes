@@ -1,2 +1,0 @@
-# Preserve raw verification output with Windows core.autocrlf enabled.
-*.log -text whitespace=cr-at-eol

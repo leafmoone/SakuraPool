@@ -423,38 +423,3 @@ fn is_transient(code: &'static str) -> bool {
         "connect_failed" | "malformed_status" | "body_too_short" | "io_error" | "server_error"
     )
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn transient_classification_is_closed() {
-        assert!(is_transient("connect_failed"));
-        assert!(is_transient("body_too_short"));
-        assert!(!is_transient("body_too_large"));
-        assert!(!is_transient("unexpected_status"));
-    }
-
-    #[test]
-    fn location_resolution_keeps_loopback_and_rejects_garbage() {
-        let base = LoopbackTarget {
-            host: "127.0.0.1".into(),
-            port: 8080,
-            path: "/a".into(),
-        };
-        assert_eq!(
-            resolve_location(&base, "/b?q=1").unwrap(),
-            "http://127.0.0.1:8080/b?q=1"
-        );
-        assert!(resolve_location(&base, "http://127.0.0.1:9999/c").is_ok());
-        for location in [
-            "https://127.0.0.1:1/x",
-            "http://example.com:80/x",
-            "//127.0.0.1:1/x",
-            "",
-        ] {
-            assert!(resolve_location(&base, location).is_err());
-        }
-    }
-}

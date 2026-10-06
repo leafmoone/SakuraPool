@@ -1,7 +1,0 @@
-{
-  "pytest": "11 passed",
-  "ruff": "passed",
-  "git_diff_check": "passed",
-  "build": "passed",
-  "wheel_cli_smoke": "passed"
-}

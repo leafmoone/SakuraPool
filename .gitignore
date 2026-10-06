@@ -10,3 +10,19 @@ build/
 .bench-inst/
 rust/target/
 .rustup/
+
+# Local development and acceptance material is not part of the product tree.
+/reports/
+/tests/
+/rust/tests/
+/tools/*
+!/tools/p4_token_bootstrap.py
+/plan.md
+/agents.md
+/AGENTS.md
+/docs/P5A_PLAN.md
+/docs/P5B_PLAN.md
+/docs/P5_ROADMAP.md
+/docs/PROJECT_RULES.md
+/docs/index-builder-prep-v2-evidence.md
+*.log

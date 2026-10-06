@@ -1,9 +1,0 @@
-python=3.14.5 (tags/v3.14.5:5607950, May 10 2026, 10:43:50) [MSC v.1944 64 bit (AMD64)]
-platform=Windows-11-10.0.26100-SP0
-pytest.log sha256=efe9987b61def145f8be8951f3b20d7b45f6483e4d8327e28bfae58384f08d57 bytes=95
-ruff.log sha256=3aab40c93f605b78e9513cfc46902407d9a0a1e73fc1c00e9558790b0225b845 bytes=31
-diff-check.log sha256=6fb46d89e092b2eca0cd33b47d205457f6257037d19c829b9f2ab11137c6e9b3 bytes=244
-build.log sha256=f8abf6e6f6f3aa1762ddf68086b4cbddf4179ca41870d97859481c98d567ea29 bytes=3422
-wheel-smoke.log sha256=543540271e22783f67d8c9b30d1e63c33f5f84a6c2e2714f6cfc9cbd8a3aa34d bytes=619
-BASE_SHA=a4895b9d36e553b8505be46b8e7216e168fabb96
-IMPLEMENTATION_SHA=8d3ff42b6544eb5da9d0e1cc4fa25ddee3fbdc52

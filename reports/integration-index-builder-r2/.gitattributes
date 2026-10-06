@@ -1,2 +1,0 @@
-# Retain terminal output bytes without whitespace normalization.
-*.log -text -whitespace

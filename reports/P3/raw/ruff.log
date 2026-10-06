@@ -1,3 +1,0 @@
-$ cmd: python -m ruff check . (host 3.14, tree cef41a5)
-All checks passed!
-exit=0
