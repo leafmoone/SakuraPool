@@ -303,8 +303,9 @@ def test_publish_race_no_overwrite(lightweight, monkeypatch):
     assert len(stages) == 1 and (stages[0] / "image.jpg").is_file()
 
 
-@pytest.mark.parametrize("lightweight", [6], indirect=True)
-def test_six_lane_reverse_completion_frozen_names(lightweight):
+@pytest.mark.parametrize("lightweight,workers", [(3, 3), (5, 5), (6, 6), (7, 7)],
+                         indirect=["lightweight"])
+def test_positive_workers_reverse_completion_frozen_names(lightweight, workers):
     env = lightweight
     with create_task(env.publication, env.directory, env.workspace, env.query) as task:
         seq_by_object = {}
@@ -312,10 +313,10 @@ def test_six_lane_reverse_completion_frozen_names(lightweight):
             for row in task.db.execute("SELECT * FROM items"):
                 loc = pub.runtime.location(row["rid"])
                 seq_by_object[pub.runtime.object_ref(loc["object_idx"])["object_path"]] = row["seq"]
-    gate = threading.Barrier(6)
+    gate = threading.Barrier(workers)
     lock = threading.Lock()
-    release = [threading.Event() for _ in range(6)]
-    release[5].set()
+    release = [threading.Event() for _ in range(workers)]
+    release[workers - 1].set()
     active = peak = 0
     completion = []
 
@@ -342,14 +343,14 @@ def test_six_lane_reverse_completion_frozen_names(lightweight):
                     if seq:
                         release[seq - 1].set()
 
-    result = run_task(env.directory, Delayed(), workers=6, control=object())
-    assert result["delivered_verified"] == 6 and peak == 6
+    result = run_task(env.directory, Delayed(), workers=workers, control=object())
+    assert result["delivered_verified"] == workers and peak == workers
     with TaskDB(env.directory) as task:
         assert len(task.candidates(limit=12)) == 0
         for row in task.db.execute("SELECT * FROM items"):
             assert row["output_stem"] == f"1girl_{row['seq'] + 1}"
             assert (env.directory / "output" / (row["output_stem"] + ".jpg")).is_file()
-    assert completion == [5, 4, 3, 2, 1, 0]
+    assert completion == list(reversed(range(workers)))
 
 
 def test_v3_inspect_export_db_readonly_execution_gate(lightweight, capsys):
@@ -494,19 +495,135 @@ def test_six_lane_sql_failure_drains_and_closes_all(lightweight, monkeypatch):
     assert len(set(closed)) == 6 and once
 
 
-def test_six_lane_memory_cap_rejects_large_chunk_without_clone(tmp_path):
-    from types import SimpleNamespace
+@pytest.mark.parametrize("lightweight", [8], indirect=True)
+def test_no_aggregate_memory_gate_large_chunk_small_payload(lightweight, monkeypatch):
+    from dataclasses import replace
 
-    from sakurapool.capacity import CapacityConfig
+    from sakurapool.storage.production_resources import ProductionFootprint
+    from sakurapool.workspace import Workspace
+
+    env = lightweight
+    capacity = replace(env.workspace.capacity, range_chunk_bytes=16 << 20)
+    workspace = Workspace.init(env.workspace.root.parent / "large-chunk", capacity=capacity)
+    directory = workspace.tasks / "small"
+    gate = threading.Barrier(8)
+    closed = []
+
+    class Lane(env.transport):
+        def clone(self):
+            return Lane()
+
+        def close(self):
+            closed.append(id(self))
+
+        @contextmanager
+        def read_range_owned(self, obj, offset, length):
+            assert length == 128  # No memory pressure or large allocation in this test.
+            gate.wait(timeout=10)
+            with super().read_range_owned(obj, offset, length) as body:
+                yield body
+
+    Lane.capacity = capacity
+    Lane.root = workspace.root
+    Lane.max_range_bytes = capacity.range_chunk_bytes
+    with create_task(env.publication, directory, workspace, env.query):
+        pass
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("aggregate memory estimation must not participate")
+
+    monkeypatch.setattr(ProductionFootprint, "admit", forbidden)
+    assert run_task(directory, Lane(), workers=8, control=object())["delivered_verified"] == 8
+    assert len(set(closed)) == 8
+
+
+@pytest.mark.parametrize("workers", [0, -1, True, False, 1.0, "3", None])
+def test_invalid_workers_rejected_before_task_or_lane_access(tmp_path, workers):
     from sakurapool.tasks.pipeline import run_pipeline
 
-    class Transport:
-        def clone(self):
-            raise AssertionError("memory admission must precede lane creation")
+    with pytest.raises(TaskError, match="WORKERS_INVALID"):
+        run_task(tmp_path / "absent", object(), workers=workers)
+    with pytest.raises(TaskError, match="WORKERS_INVALID"):
+        run_pipeline(object(), object(), object(), workers=workers, metadata=False)
 
-    with pytest.raises(TaskError, match="DOWNLOAD_MEMORY_LIMIT"):
-        run_pipeline(SimpleNamespace(capacity=CapacityConfig(range_chunk_bytes=16 << 20)),
-                     object(), Transport(), workers=6, metadata=False)
+
+@pytest.mark.parametrize("lightweight", [3], indirect=True)
+def test_huge_positive_workers_only_create_available_lanes(lightweight, monkeypatch):
+    from sakurapool.tasks import pipeline
+
+    env = lightweight
+    huge = 10 ** 100
+    with create_task(env.publication, env.directory, env.workspace, env.query):
+        pass
+    gate = threading.Barrier(3)
+    clones = []
+    closed = []
+    executor_sizes = []
+    original_executor = pipeline.ThreadPoolExecutor
+
+    def executor(**kwargs):
+        executor_sizes.append(kwargs["max_workers"])
+        assert kwargs["max_workers"] <= 3
+        return original_executor(**kwargs)
+
+    class Lane(env.transport):
+        def clone(self):
+            assert len(clones) < 3
+            lane = Lane()
+            clones.append(id(lane))
+            return lane
+
+        def close(self):
+            closed.append(id(self))
+
+        @contextmanager
+        def read_range_owned(self, obj, offset, length):
+            gate.wait(timeout=10)
+            with super().read_range_owned(obj, offset, length) as body:
+                yield body
+
+    monkeypatch.setattr(pipeline, "ThreadPoolExecutor", executor)
+    result = run_task(env.directory, Lane(), workers=huge, control=object())
+    assert result["delivered_verified"] == 3 and set(clones) == set(closed)
+    assert len(clones) == 3
+    # No READY rows: huge input still succeeds without creating lanes or executor threads.
+    completed = run_task(env.directory, Lane(), workers=huge, control=object())
+    assert completed["delivered_verified"] == 3
+    assert len(clones) == 3 and executor_sizes == [3, 1]
+
+
+@pytest.mark.parametrize("lightweight", [20], indirect=True)
+def test_candidate_claim_window_above_twelve_and_sql_int64(lightweight):
+    env = lightweight
+    huge = 10 ** 100
+    with create_task(env.publication, env.directory, env.workspace, env.query) as task:
+        assert len(task.candidates(limit=14)) == 14
+        candidates = task.candidates(limit=huge)
+        assert len(candidates) == 20
+        claimed = task.claim(expected=candidates[-1], window=huge)
+        assert claimed["seq"] == 19
+        assert len(task.candidates(limit=huge)) == 19
+        for invalid in (0, -1, True, 1.0):
+            with pytest.raises(TaskError, match="TASK_IDENTITY_INVALID"):
+                task.candidates(limit=invalid)
+
+
+@pytest.mark.parametrize("action", ["run", "resume"])
+def test_cli_workers_positive_integer_no_choices_or_maximum(action):
+    import argparse
+
+    from sakurapool.tasks.cli import add_parser
+
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers(dest="command", required=True))
+    base = ["task", action, "unused", "--profile", "unused"]
+    assert parser.parse_args(base).workers == 1
+    for value in (3, 5, 7, 10 ** 100):
+        assert parser.parse_args([*base, "--workers", str(value)]).workers == value
+    for value in ("0", "-1", "true", "3.5"):
+        with pytest.raises(SystemExit) as caught:
+            parser.parse_args([*base, "--workers", value])
+        assert caught.value.code == 2
 
 
 def test_intent_and_member_sql_failure_do_not_move_or_delete_data(lightweight):

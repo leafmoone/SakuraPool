@@ -148,7 +148,8 @@ def test_all_lanes_closed_after_first_close_failure(lightweight, monkeypatch, wi
     expected = RuntimeError if with_primary else TaskError
     with pytest.raises(expected) as caught:
         run_task(env.directory, env.transport(), workers=2, control=object(), fault_hook=hook)
-    assert closed == [0, 1]
+    # Lanes are lazy: an immediate first-claim fault owns only lane 0.
+    assert closed == ([0] if with_primary else [0, 1])
     if with_primary:
         assert caught.value is primary
         assert caught.value.task_secondary == ("LANE_CLOSE_FAILED",)

@@ -27,7 +27,7 @@ hidden legacy download switch. Request-ID deduplication remains bounded at 256;
 rotation clears conditional proofs and revalidates them before further Range IO.
 
 The following remain technical safety/format boundaries, not consumption quotas:
-bounded concurrent working memory, chunk/header/RPC buffers, selection heap and
+per-request chunk/header/RPC buffers, selection heap and
 SQLite/JSON parser bounds, exact indexed extents and image SHA, bounded metadata
 validation, trusted origin/redirect policy, conditional positive/negative proof,
 finite Origin retry (at most 3) plus CDN hop, owned temporary files and atomic
@@ -154,28 +154,47 @@ fixed `20261004T143905Z-upload` scope and merged at
 `62f86cc487af41de7d84bfb5a14d2fb1e0e172ac`; independent semantic comparison
 remains subset-only, and global index completion is not claimed. See
 [the P5-D report](reports/P5D/REPORT.md). The current lightweight workflow is
-tracked in [plan.md](plan.md). Default task workers=1; 2/4/6 are explicit upper
-bounds, with actual concurrency limited by object distribution and technical
-working memory. Earlier P3/P4 CLI examples below are historical/admin interfaces,
+tracked in [plan.md](plan.md). Default task workers=1; `--workers` and the API accept
+any strictly positive integer, without an enumeration or configured maximum.
+Actual concurrency depends on ready work, object distribution and available OS
+resources. Earlier P3/P4 CLI examples below are historical/admin interfaces,
 not the default task workflow.
 
 ### Speed and concurrency limits
 
-Six lanes are configurable, not a promise of 50% more public-network throughput.
-At an 8 MiB chunk, shared technical admission is 72,884,352 bytes per lane: four
-lanes 291,537,408 bytes (~278 MiB), six 437,306,112 bytes (~417 MiB), below the fixed
-512 MiB simultaneous-working-memory bound. Eight would require 583,074,816 bytes and
-remain unsupported. Larger chunks can cause six lanes to fail admission; candidate
-lookahead is bounded at 2W (<=12) and simultaneous requests to the same TAR stay gated.
+The previous 1/2/4/6 choices and estimated 512 MiB aggregate-memory admission are
+removed by explicit user contract change. Zero, negative and non-integer workers
+(including API booleans) are invalid; default remains 1. No machine-RAM detection,
+automatic worker increase or replacement memory ceiling is introduced. Choosing
+large concurrency can exhaust real machine resources; successful execution or
+throughput growth is not guaranteed.
+
+Let L be the smaller of requested workers and currently ready records. Lanes are
+created lazily for independent usable work, not eagerly for the full input. Active
+operations are bounded by L, candidate/claim lookahead and event envelopes by 2L,
+and completion envelopes by L. SQL lookahead is clipped to actual READY rows before
+binding LIMIT, so very large positive Python integers do not overflow SQLite or
+impose a hidden input maximum. There is no fixed 12-record candidate ceiling.
+Simultaneous requests to the same TAR remain gated, and per-request chunk/header/RPC,
+proof-cache, finite retry, integrity and no-overwrite boundaries are unchanged.
 
 The completed one-authorized-run 1000-image v3 retest delivered 1,438,207,693 verified
 bytes in ~1615.97 seconds (~0.84877 MiB/s including startup verification). Its 323
 samples found four in-progress items in 317 of 318 active samples. Rust already
 reuses origin/CDN clients; bounded 256-request generation rotation deliberately
 refreshes connection/proof caches. Low Python CPU is not proof of the remote bottleneck:
-individual request latency/attempts were not recorded. Six-lane tests are small local
-synthetic correctness/utilization evidence, not public or production speed evidence.
-No extra public comparison was run for this change, and current v3 outputs are untouched.
+individual request latency/attempts were not recorded.
+
+A separately authorized single six-lane public run on commit
+`a55892f497643d84423dd489168dd21ed0a61503` used the exact same frozen 1000 identities,
+metadata=false and GIF opt-in, in a new v4 task. All 1000 images and 1,438,207,693
+bytes verified in ~1150.56 seconds (~1.19210 MiB/s /10.00003 Mbps including startup).
+The observed rate is ~40.45% above the historical four-lane v3 rate, but this is
+**not controlled A/B**: code/layout, time, provider/CDN, network and caches differ;
+there is no causal worker-gain or 50% speedup guarantee. Original v3 outputs and
+manifest remain intact. These measurements belong to a558 +workers6, not the later
+unrestricted-worker/no-aggregate-admission change; that change has offline tests
+only and did not trigger another public run.
 
 ## Workspace and implementation boundaries
 
@@ -207,10 +226,12 @@ threshold and an independent 100-field limit. Configured decoded header bytes ab
 canonical HTTP/1.1 206 status line; extra wire whitespace or a longer reason phrase
 can hit the underlying parser boundary earlier. It is not a universal response guarantee.
 
-Download lane admission checks a fixed 512 MiB conservative live-working-set
-model; it is not a cumulative quota or formal process RSS ceiling. Protocol
-header factors cover conservative pinned hyper/bytes growth/copy scenarios.
-Native/unrelated process memory and allocator caches are outside this model.
+Download lanes have no estimated aggregate-memory admission or worker-count
+maximum. This does not remove the independent per-request protocol/parser/header
+and chunk capacities described above, nor image/metadata integrity checks. There
+is no promise that a chosen worker count fits physical RAM; actual OS resource
+failures remain possible. Historical protocol allocation factors are not a new
+aggregate download ceiling.
 
 P6-A real-workspace metadata validation is **PARTIAL**: two of three items were
 published and exported after formal pause; fresh-process resume failed, and a subsequent

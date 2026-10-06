@@ -28,23 +28,18 @@ def _safe_diagnostic(error):
 
 
 def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=None, control=None):
-    """At most W active operations and 2W event envelopes; payloads stay lane-local."""
-    from ..storage.bounded_json import VALIDATION_INFLIGHT_BYTES
-    from ..storage.production_resources import ProductionFootprint
+    """At most W active operations; create lanes only for available independent work."""
     from .runner import delivery_mapping, preflight, verify_delivery
 
-    lane_memory = ProductionFootprint.admit(
-        "range", task.capacity.range_chunk_bytes, capacity=task.capacity
-    ).memory
-    working_memory = workers * (
-        lane_memory + VALIDATION_INFLIGHT_BYTES + (192 << 10) + 4 * task.capacity.rpc_line_bytes
-    )
-    # Fixed technical live-working-set bound, not a cumulative user quota/RSS claim.
-    if working_memory > (512 << 20):
-        raise TaskError("DOWNLOAD_MEMORY_LIMIT", "preflight")
+    if type(workers) is not int or workers < 1:
+        raise TaskError("WORKERS_INVALID", "preflight")
+    ready = task.db.execute("SELECT count(*) FROM items WHERE state='READY'").fetchone()[0]
+    # This is available work, not an input maximum or a memory-admission estimate.
+    lane_count = min(workers, ready)
+    window = 2 * lane_count
     owner = get_ident()
-    calls = queue.Queue(maxsize=2 * workers)
-    completions = queue.Queue(maxsize=workers)
+    calls = queue.Queue(maxsize=max(1, 2 * lane_count))
+    completions = queue.Queue(maxsize=max(1, lane_count))
     active, lanes, free = {}, [], []
     first_error = None
     stop = False
@@ -166,8 +161,8 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
 
     def schedule(executor):
         nonlocal stop
-        while free and not stop:
-            candidates = task.candidates(limit=2 * workers)
+        while not stop and (free or len(lanes) < lane_count):
+            candidates = task.candidates(limit=window)
             if not candidates:
                 stop = True
                 break
@@ -186,9 +181,14 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
             if selected is None:
                 break
             candidate, prepared = selected
+            if not free:
+                # Never precreate W processes for a small task or busy-TAR backlog.
+                lane = transport.clone() if hasattr(transport, "clone") else transport
+                lanes.append((lane, OrderedDict()))
+                free.append(len(lanes) - 1)
             index = free[0]
             preflight(task, publication, candidate, lanes[index][0], prepared=prepared)
-            item = task.claim(expected=candidate, window=2 * workers)
+            item = task.claim(expected=candidate, window=window)
             if item is None:
                 stop = True
                 break
@@ -206,14 +206,10 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
 
     try:
         with ThreadPoolExecutor(
-            max_workers=workers, thread_name_prefix="sakura-download"
+            max_workers=max(1, lane_count), thread_name_prefix="sakura-download"
         ) as executor:
-            # SQLite/publication handles never cross threads. Real transport clone handshakes
+            # SQLite/publication handles never cross threads. Lazy clone handshakes
             # before requests; each lane holds its own bounded conditional-proof cache.
-            for index in range(workers):
-                lane = transport.clone() if hasattr(transport, "clone") else transport
-                lanes.append((lane, OrderedDict()))
-                free.append(index)
             try:
                 while True:
                     complete()

@@ -412,8 +412,12 @@ class TaskDB:
         return {"requested": value, "state": self.meta("state")}
 
     def candidates(self, *, limit):
-        if type(limit) is not int or not 1 <= limit <= 12:
+        if type(limit) is not int or limit < 1:
             raise TaskError("TASK_IDENTITY_INVALID")
+        # A positive Python integer may exceed SQLite's signed 64-bit binding range.
+        # Clip lookahead to actual task rows, never reject or cap the worker input.
+        available = self.db.execute("SELECT count(*) FROM items WHERE state='READY'").fetchone()[0]
+        limit = min(limit, available)
         rows = self.db.execute(
             "SELECT seq,rid,record_id FROM items WHERE state='READY' ORDER BY seq LIMIT ?", (limit,)
         ).fetchall()

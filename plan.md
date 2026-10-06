@@ -1,4 +1,24 @@
-# Flat naming execution — implementation reviewed, delivery authorized
+# Current execution — positive workers/no aggregate admission reviewed
+
+Current user explicitly supersedes the old choices/512 MiB contract: accept every strictly positive integer `workers`, keep default 1, remove the pipeline's estimated aggregate-memory ceiling (not increase it or replace it with detected RAM). Preserve per-request chunk/header/RPC capacities, integrity, finite retry, owned staging/no-overwrite and legacy isolation. Sole writer remains this topic/worktree; base `a55892f497643d84423dd489168dd21ed0a61503`, tree `533b901ddf75422804eae538a3688635df7401ae`. No new public run, main merge or huge-worker/OOM stress test. Root's direct authorization permits implementation without a design-permission round; original reviewer reviews only this delta, then ordinary explicit-path commit/push dev/topic and WAITING_REVIEW.
+
+## Open
+- [ ] Root authorized ordinary explicit-eight-path commit/push after review; record actual commit/remote verification in the final delivery report, then WAITING_REVIEW. Push success is not asserted by this pre-commit plan.
+
+## Done
+- [x] Removed CLI/API worker enumeration and aggregate memory estimate/gate; strict positive-int API validation precedes task/lane access, CLI validation precedes profile/credentials; default remains 1.
+- [x] Removed fixed-12 candidate/claim ceiling. L=min(requested workers, actual READY count); window=2L, queues/executor bounded by available work, lanes cloned only when scheduling an independent candidate. SQL LIMIT clips to actual READY rows, not an artificial worker maximum.
+- [x] Updated README and offline regressions: 3/5/6/7-barrier reverse completion, 8 lanes with 16MiB configured chunks but 128-byte payload and forbidden aggregate-footprint estimator, workers=10**100 on three records and on completed task (only three total clones), 20-record candidate14/huge claim, invalid0/negative/bool/float/nonint pre-side-effect gates, run/resume CLI arbitrary positive integer/default1. Existing SQL fault drain/all-owned-close tests retained; immediate first-claim failure now owns only the lazily created lane.
+- [x] Original reviewer returned limited technical implementation PASS for frozen tree `b95c425893e5c43452a10d917358dc9cb9bcff1d`; root independently confirmed that same tree/eight staged paths and unstaged diff0.
+- [x] Latest independent root same 12-file verification **146 passed in 62.55s, exit0** (`bash_984fca2c`), followed by scoped Ruff All checks passed, exit0. Earlier writer 146/63.18s and 146/63.42s rounds overlap and are not additive. Scoped whitespace checks exit0, Rust diff against HEAD exit0, no new Cargo build/test or public run. Root authorized only this plan evidence update before ordinary delivery; source/tests/README/storage/Rust must remain identical to reviewed b95c.
+- [x] The only authorized public six-lane run and final offline audit completed on **a558**, before any new product edits: `bash_2989ddc2`, CLI exit0, natural exit, 1000 DONE/VERIFIED and 1,438,207,693 bytes; all original v3 images verified intact and protected DB/manifest/ledger identities/sizes/mtime unchanged.
+- [x] Audit `D:/dataset/test/flat-a558-workers6-retest/final-analysis.json`: 1150.562177499989s (19.176min), 1.1920970159580948MiB/s /10.000034564842203Mbps; 227 samples, zero errors. Versus historical four-lane v3: observed throughput +40.4504671%, elapsed -28.8005216%, **not controlled A/B or causal worker gain**. No new export/migration, original UNKNOWN preserved, no remaining workers. These results remain permanently bound to a558 +workers6, never the new delta.
+
+---
+
+# Previous flat naming execution — completed at a55892f
+
+All choices/512 MiB/candidate12 statements in the previous execution below describe the reviewed **a558 historical contract**, superseded by the current execution above; they are not current limits.
 
 ## Authority and base
 
@@ -11,7 +31,7 @@ Root relays the user's new naming/performance request. Sole writer remains in th
 - [x] Latest final evidence: root independently ran the updated `ad24bf654c2d886012f12d78b882c0b2d7fe37f9` 12-file matrix (`bash_a8ba4238`), **132 passed in 58.93s, exit0**; root scoped Ruff exit0. Earlier 127/53/partial rounds overlap and are not additive.
 - [x] First actual tree frozen as `6abcb416d64a81671550b0c6c95e3c4759a7d0e4` and sent for one read-only implementation review.
 - [x] Original reviewer returned limited technical implementation PASS for `ad24bf654c2d886012f12d78b882c0b2d7fe37f9`; root confirmed this conclusion and independent 132-case PASS. No product change from first freeze.
-- [ ] Ordinary commit/push and complete report; WAITING_REVIEW.
+- [x] Ordinary commit `a55892f497643d84423dd489168dd21ed0a61503` (tree `533b901ddf75422804eae538a3688635df7401ae`, parent `3163ed596029d719e64c8cf06086a570828eecd6`) pushed normally to origin dev/topic; main unchanged and root independently verified clean. Prior stage reached WAITING_REVIEW before the new authorization.
 
 ## Deterministic filenames
 

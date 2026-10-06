@@ -452,7 +452,7 @@ def run_task(
     connection_profile=None,
     workers=1,
 ):
-    if type(workers) is not int or workers not in (1, 2, 4, 6):
+    if type(workers) is not int or workers < 1:
         raise TaskError("WORKERS_INVALID", "preflight")
     with TaskDB(directory) as task, task.runner_lock():
         if getattr(transport, "ledger", None) is not None:

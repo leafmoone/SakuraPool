@@ -1,11 +1,22 @@
 """Task CLI: lightweight state; archived quota tasks never gain a writable connection."""
 
+import argparse
 import json
 from pathlib import Path
 
 from ..workspace import Workspace
 from .context import LEGACY_CAPACITY
 from .store import TaskDB, TaskError
+
+
+def _positive_workers(value):
+    try:
+        workers = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("workers must be a positive integer") from None
+    if workers < 1:
+        raise argparse.ArgumentTypeError("workers must be a positive integer")
+    return workers
 
 
 def add_parser(subparsers):
@@ -36,7 +47,7 @@ def add_parser(subparsers):
             command.add_argument("--failure-seq", type=int, help="read a bounded persisted failure")
         elif name in ("run", "resume"):
             command.add_argument("--profile", required=True)
-            command.add_argument("--workers", type=int, choices=(1, 2, 4, 6), default=1)
+            command.add_argument("--workers", type=_positive_workers, default=1)
         elif name == "export":
             command.add_argument("--manifest", required=True)
 
