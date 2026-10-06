@@ -30,8 +30,8 @@ def test_lazy_chunk_generation_credit_and_stale_proof(monkeypatch):
     plan = StreamPlan(0, 9, 9, 7, 3)
     assert plan.chunk_count == 6
     assert list(plan.lengths()) == [3, 3, 3, 3, 3, 1]
-    assert plan.generation_body == 128
-    assert plan.generation_attempts == 24
+    assert plan.generation_body == 6 * production.network_body_budget(3)
+    assert plan.generation_attempts == 12
     identity = ("origin", "repo", "type", "revision", "path", 16)
     obj = object()
     monkeypatch.setattr(production, "proof_key", lambda *a, **k: "proof")
@@ -44,7 +44,7 @@ def test_lazy_chunk_generation_credit_and_stale_proof(monkeypatch):
     lane._live_proofs = {"proof"}
     lane._test = True
     lane._lane_requests, lane._lane_body, lane._lane_attempts = 250, 0, 0
-    lane._generation_budget = lambda **kwargs: {"body": 128, "attempts": 24}
+    lane._generation_budget = lambda **kwargs: {"body": plan.generation_body, "attempts": 12}
     assert lane.predict_warm(identity, plan)
     for index in range(6):
         changed = list(identity)
@@ -53,9 +53,9 @@ def test_lazy_chunk_generation_credit_and_stale_proof(monkeypatch):
     lane._lane_requests = 251
     assert not lane.predict_warm(identity, plan)
     lane._lane_requests = 250
-    lane._generation_budget = lambda **kwargs: {"body": 128, "attempts": 23}
+    lane._generation_budget = lambda **kwargs: {"body": plan.generation_body, "attempts": 11}
     assert not lane.predict_warm(identity, plan)
-    lane._generation_budget = lambda **kwargs: {"body": 128, "attempts": 24}
+    lane._generation_budget = lambda **kwargs: {"body": plan.generation_body, "attempts": 12}
     lane._live_proofs.clear()
     assert not lane.predict_warm(identity, plan)
 

@@ -10,6 +10,15 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const CONTROL_RESPONSE_BODY_CAP: u64 = 65_536;
 pub const NEGATIVE_CONDITION_BODY_CAP: u64 = CONTROL_RESPONSE_BODY_CAP;
+pub const ORIGIN_STATUS_MAX_ATTEMPTS: u64 = 3;
+pub const HTTP_ATTEMPTS_MAX: u64 = ORIGIN_STATUS_MAX_ATTEMPTS + 1;
+
+pub fn network_body_budget(size: u64, wrong: bool) -> Result<u64, &'static str> {
+    let control = CONTROL_RESPONSE_BODY_CAP.checked_add(1).ok_or("production_budget")?;
+    let business = if wrong { control } else { size.checked_add(1).ok_or("production_budget")? };
+    control.checked_mul(ORIGIN_STATUS_MAX_ATTEMPTS)
+        .and_then(|v| v.checked_add(business.max(control))).ok_or("production_budget")
+}
 
 fn drain_control(r: &mut Response, a: &mut Accounting) -> Result<(), &'static str> {
     a.complete = false;
@@ -167,6 +176,10 @@ pub struct Accounting {
     pub cdn_http_status: Option<u16>,
     #[serde(skip)]
     pub cdn_content_length: Option<u64>,
+    #[serde(skip)]
+    pub origin_status_retried: u64,
+    #[serde(skip)]
+    pub origin_status_exhausted: u64,
 }
 impl Accounting {
     fn observe_headers(&mut self, response: &Response) {
@@ -192,7 +205,9 @@ impl Accounting {
         self.content_encoding_present = h.contains_key("content-encoding");
     }
     pub fn observation(&self) -> serde_json::Value {
-        serde_json::json!({"origin_http_status":self.origin_http_status,"cdn_http_status":self.cdn_http_status,"content_length":self.cdn_content_length})
+        serde_json::json!({"origin_http_status":self.origin_http_status,"cdn_http_status":self.cdn_http_status,"content_length":self.cdn_content_length,
+            "origin_status_retried":self.origin_status_retried,
+            "origin_status_exhausted":self.origin_status_exhausted})
     }
     pub fn diagnostic(&self) -> serde_json::Value {
         serde_json::json!({"phase":self.phase,"http_status":self.http_status,"attempts":self.attempts,"body_bytes_observed":self.body,
@@ -551,6 +566,8 @@ pub struct ExecutionContext {
     origin_identity: Option<String>,
     cdn_client: Option<Client>,
     cdn_hosts: std::collections::BTreeSet<String>,
+    // Injectable only through the local Rust API; production defaults to real sleep.
+    retry_sleep: Option<fn(Duration)>,
 }
 impl ExecutionContext {
     fn origin_client(&mut self, identity: &str) -> Result<Client, &'static str> {
@@ -618,22 +635,42 @@ fn transfer(
             HeaderValue::from_str(v).map_err(|_| "credential_invalid")?,
         );
     }
-    a.phase = "origin";
-    a.http_status = None;
-    a.attempts += 1;
-    a.complete = false;
-    let mut r = req.send().map_err(|error| network_error(&error, true))?;
-    a.observe_headers(&r);
-    headers(&r, t.http_header_bytes)?;
-    drain_control(&mut r, a)?;
-    if r.status().as_u16() != 302 {
-        return Err("origin_status");
-    }
-    let target = location(
-        single(r.headers(), "location")?.ok_or("location_missing")?,
-        t,
-    )?;
-    drop(r);
+    let mut origin_attempt = 0;
+    let target = loop {
+        a.phase = "origin";
+        a.http_status = None;
+        a.complete = false;
+        a.content_length_present = false;
+        a.content_range_present = false;
+        a.etag_present = false;
+        a.etag_is_strong = false;
+        a.content_encoding_present = false;
+        a.attempts += 1;
+        origin_attempt += 1;
+        let mut r = req.try_clone().ok_or("network_ambiguous")?
+            .send().map_err(|error| network_error(&error, true))?;
+        a.observe_headers(&r);
+        headers(&r, t.http_header_bytes)?;
+        drain_control(&mut r, a)?;
+        let status = r.status().as_u16();
+        if matches!(status, 400 | 403) && origin_attempt < ORIGIN_STATUS_MAX_ATTEMPTS {
+            a.origin_status_retried += 1;
+            drop(r);
+            context.retry_sleep.unwrap_or(std::thread::sleep)(
+                Duration::from_secs(1 << (origin_attempt - 1)),
+            );
+            continue;
+        }
+        if status != 302 {
+            if matches!(status, 400 | 403) && origin_attempt == ORIGIN_STATUS_MAX_ATTEMPTS {
+                a.origin_status_exhausted = 1;
+            }
+            return Err("origin_status");
+        }
+        let target = location(single(r.headers(), "location")?.ok_or("location_missing")?, t)?;
+        drop(r);
+        break target;
+    };
     drop(origin_client);
     let cdn = context.cdn_client(&target)?;
     let mut req = cdn
@@ -833,6 +870,16 @@ pub fn run_with_context(t: Transfer, context: &mut ExecutionContext) -> Outcome 
 }
 #[cfg(test)]
 mod diagnostic_tests {
+    #[test]
+    fn retry_budget_contract() {
+        assert_eq!(super::ORIGIN_STATUS_MAX_ATTEMPTS, 3);
+        assert_eq!(super::HTTP_ATTEMPTS_MAX, 4);
+        assert_eq!(super::network_body_budget(1, false), Ok(262148));
+        assert_eq!(super::network_body_budget(1, true), Ok(262148));
+        assert_eq!(super::network_body_budget(8 << 20, false), Ok(8585220));
+        assert!(super::network_body_budget(u64::MAX, false).is_err());
+    }
+
     #[test]
     fn control_response_framing_loopback() {
         use std::io::{Read, Write};

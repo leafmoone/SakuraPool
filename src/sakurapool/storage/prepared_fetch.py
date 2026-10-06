@@ -6,7 +6,7 @@ from threading import get_ident
 from types import MappingProxyType, SimpleNamespace
 
 from ..capacity import UINT64_MAX, CapacityConfig
-from .production_resources import chunked_body_budget
+from .production_resources import SESSION_ATTEMPTS_PER_TRANSFER, chunked_body_budget
 from .publication import PublicationCorrupt
 
 _FACTORY = object()
@@ -48,7 +48,7 @@ class StreamPlan:
 
     @property
     def generation_attempts(self):
-        return 4 * self.chunk_count
+        return SESSION_ATTEMPTS_PER_TRANSFER * self.chunk_count
 
     def lengths(self):
         """Yield actual Range lengths without constructing a chunk-sized list."""

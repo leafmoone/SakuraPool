@@ -208,6 +208,8 @@ def mode_run(profile, root, obj, mode, count, label, extra=0):
                 unknown_row(row)
                 samples.append(row)
                 break
+            before_retry = getattr(transport, "_origin_status_retried", 0)
+            before_exhausted = getattr(transport, "_origin_status_exhausted", 0)
             before_usage = ledger.inspect_policy()["usage"]
             before_artifacts = set(ledger.root.glob("rust-transfer-*"))
             try:
@@ -263,6 +265,15 @@ def mode_run(profile, root, obj, mode, count, label, extra=0):
                 generation += 1
                 last_worker = worker
             observation = getattr(transport, "last_result", {}).get("observation", {})
+            row["origin_status_retried"] = (
+                getattr(transport, "_origin_status_retried", 0) - before_retry
+            )
+            row["origin_status_exhausted"] = (
+                getattr(transport, "_origin_status_exhausted", 0) - before_exhausted
+            )
+            row["retry_success_observed"] = (
+                row["origin_status_retried"] > 0 and row["result"] == "PASS"
+            )
             row["origin_status"] = observation.get("origin_http_status")
             row["cdn_status"] = observation.get("cdn_http_status")
             row["origin_reached"] = (

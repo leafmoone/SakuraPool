@@ -20,16 +20,120 @@ from sakurapool.storage.transport import RemoteIOError
 channel = status_channel
 
 
+@pytest.mark.parametrize("persistent", [False, True])
+def test_stale_worker_capability_before_network(channel, monkeypatch, persistent):
+    ledger, transport, obj = channel
+    children = []
+
+    class Stale:
+        capabilities = {"bounded_session_v1", "production_transfer_v2"}
+
+        def __init__(self, *args, **kwargs):
+            self._proc = object()
+            children.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.close()
+
+        def close(self):
+            self._proc = None
+
+        cancel = close
+
+        def send_raw(self, raw):
+            pytest.fail("stale worker must not receive production request")
+
+    monkeypatch.setattr(production, "RustWorker", Stale)
+    if persistent:
+        transport.enable_persistent()
+    with pytest.raises(RemoteIOError) as caught:
+        with transport.transfer(obj, condition="observe"):
+            pass
+    assert caught.value.code == "WORKER_CAPABILITY_UNAVAILABLE"
+    transport.close()
+    assert all(child._proc is None for child in children)
+    state = snapshot(ledger)
+    assert state["pending_count"] == 0
+    assert state["usage"]["attempts"] == 0
+    assert state["usage"]["body"] == 0
+    assert state["usage"]["inflight"] == 0
+
+
+@pytest.mark.parametrize("failed_index", [2, 3, 4])
+def test_four_lease_admission_failure_no_network(channel, monkeypatch, failed_index):
+    ledger, transport, obj = channel
+    terminal(monkeypatch, complete=True)
+    original = ledger.reserve
+    count = 0
+
+    def reserve(spec):
+        nonlocal count
+        if spec.attempt:
+            count += 1
+            if count == failed_index:
+                raise OSError("synthetic admission failure")
+        return original(spec)
+
+    monkeypatch.setattr(ledger, "reserve", reserve)
+    with pytest.raises(OSError, match="synthetic admission failure"):
+        with transport.transfer(obj, condition="observe"):
+            pass
+    state = snapshot(ledger)
+    assert state["pending_count"] == 0
+    assert state["usage"]["body"] == 0
+    assert state["usage"]["attempts"] == failed_index - 1
+
+
+@pytest.mark.parametrize("failed_index", [1, 2, 3, 4])
+def test_four_lease_partial_settlement_unknown(channel, monkeypatch, failed_index):
+    ledger, transport, obj = channel
+    terminal(monkeypatch, "origin", "origin_status", observed=7, complete=True, status=400)
+    original_reserve = ledger.reserve
+    original_settle = ledger.settle
+    network = []
+    settled = 0
+
+    def reserve(spec):
+        lease = original_reserve(spec)
+        if spec.attempt:
+            network.append(lease)
+        return lease
+
+    def settle(lease, **kwargs):
+        nonlocal settled
+        if lease in network:
+            settled += 1
+            if settled == failed_index:
+                raise OSError("synthetic settlement failure")
+        return original_settle(lease, **kwargs)
+
+    monkeypatch.setattr(ledger, "reserve", reserve)
+    monkeypatch.setattr(ledger, "settle", settle)
+    with pytest.raises(RemoteIOError) as caught:
+        with transport.transfer(obj, condition="observe"):
+            pass
+    assert caught.value.accounting_state == "UNKNOWN"
+    state = snapshot(ledger)
+    assert state["pending_count"] == 5 - failed_index
+    assert state["usage"]["attempts"] == 4
+    assert state["usage"]["saved_samples"] == 0
+    assert getattr(transport, "_http_status_candidate", None) is None
+    assert transport._unresolved_network
+
+
 def test_protocol_and_checked_budgets():
     source = (Path(__file__).parents[1] / "rust/src/production.rs").read_text()
     assert "CONTROL_RESPONSE_BODY_CAP: u64 = 65_536" in source
     assert CONTROL_RESPONSE_BODY_CAP == 65536
-    assert network_body_budget(1) == 131074
-    assert network_body_budget(1, condition="wrong") == 131074
-    assert network_body_budget(8 << 20) == 8454146
+    assert network_body_budget(1) == 262148
+    assert network_body_budget(1, condition="wrong") == 262148
+    assert network_body_budget(8 << 20) == 8585220
     assert checked_body_mul(UINT64_MAX, 0) == 0
     assert checked_body_mul(UINT64_MAX, 1) == UINT64_MAX
-    assert chunked_body_budget(1, 0, UINT64_MAX) == 131074
+    assert chunked_body_budget(1, 0, UINT64_MAX) == 262148
     for call in (
         lambda: checked_body_mul(UINT64_MAX, 2),
         lambda: checked_body_add(UINT64_MAX, 1),

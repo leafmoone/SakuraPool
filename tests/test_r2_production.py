@@ -184,6 +184,24 @@ def twohop(monkeypatch):
 
         def do_GET(self):
             state["calls"].append(("origin", dict(self.headers)))
+            state.setdefault("origin_paths", []).append(self.path)
+            if state.get("origin_sequence"):
+                status = state["origin_sequence"].pop(0)
+                if status == -1:
+                    self.send_response(400)
+                    self.send_header("Content-Length", "8")
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.wfile.write(b"bad")
+                    self.close_connection = True
+                    return
+                if status != 302:
+                    self.send_response(status)
+                    body = state.get("control_body", b"error")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
             assert self.headers.get("Authorization") == "Bearer " + TOKEN
             if state.get("malformed_phase") == "origin":
                 self.connection.sendall(state["malformed_wire"])
@@ -314,13 +332,127 @@ def test_malformed_response_worker_python_unknown(twohop, phase, framing):
     assert getattr(error, "_http_status_finalized", None) is None
     with ledger._locked():
         _, (_, _, leases, _) = ledger._read_pair()
-        assert len(leases) == 2
-    assert ledger.status()["body"] == 131074
+        assert len(leases) == 4
+    assert ledger.status()["body"] == 262148
     assert "accounting_basis" not in error.public_diagnostic()
     assert not list(ledger.root.glob("rust-transfer-*"))
     outer = PublicationFetchError("publication_range", delivered=False, cleanup_safe=True,
                                   output_lease="CONFIRMED", underlying=error, secondary=())
     assert outer.accounting_state == "UNKNOWN"
+
+
+@pytest.mark.parametrize("sequence", [[400, 302], [403, 302], [400, 400, 302]])
+def test_origin_finalized_retry_success(twohop, sequence):
+    state, ledger, transport, obj = twohop
+    state["origin_sequence"] = list(sequence)
+    state["redirect_body"] = b"redirect"
+    with transport.transfer(obj, length=1, condition="observe") as (_, result):
+        assert result["bytes"] == 1
+    assert transport.last_result["accounting"] == {
+        "body": 5 * (len(sequence) - 1) + 8 + 1,
+        "attempts": len(sequence) + 1, "complete": True,
+    }
+    assert ledger.status()["attempts"] == 4
+    assert ledger.status()["saved_samples"] == 0
+    assert transport.last_result["observation"]["origin_status_retried"] == len(sequence) - 1
+    assert transport.last_result["observation"]["origin_status_exhausted"] == 0
+    assert len(set(state["origin_paths"])) == 1
+    origins = [headers for hop, headers in state["calls"] if hop == "origin"]
+    assert all(headers == origins[0] for headers in origins)
+    with ledger._locked():
+        _, (_, _, leases, _) = ledger._read_pair()
+        assert not leases
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_real_stale_worker_rejected_before_http(twohop, persistent):
+    state, ledger, transport, obj = twohop
+    stale = Path("D:/SakuraTool/SakuraPool-p6-stream-target/debug/sakurapool-worker.exe")
+    assert stale.is_file()
+    transport.worker = stale
+    if persistent:
+        transport.enable_persistent()
+    with pytest.raises(RemoteIOError) as caught:
+        with transport.transfer(obj, condition="observe"):
+            pass
+    assert caught.value.code == "WORKER_CAPABILITY_UNAVAILABLE"
+    assert not state["calls"]
+    assert ledger.status()["attempts"] == 0
+    assert ledger.status()["body"] == 0
+    transport.close()
+    assert transport._request_worker._proc is None
+    with ledger._locked():
+        _, (_, _, leases, _) = ledger._read_pair()
+        assert not leases
+    assert ledger.status()["inflight"] == 0
+
+
+def test_worker_whole_production_budget_rejects_before_http(twohop):
+    import json
+    from dataclasses import asdict
+
+    from sakurapool.storage.production_resources import ProductionFootprint
+    from sakurapool.storage.rust_bridge import RustWorker
+
+    state, ledger, transport, obj = twohop
+    footprint = ProductionFootprint.admit("range", 1)
+    budget = {"body": 2, "attempts": 2, "disk": footprint.artifacts,
+              "inflight": footprint.memory}
+    with RustWorker(transport.worker, job_budget=budget) as worker:
+        assert {"production_transfer_v2", "production_http_status_v1"} <= set(worker.capabilities)
+        payload = dict(profile="twohop_test", object=asdict(obj), token=TOKEN,
+                       cookie=None, start=0, length=1, condition="observe", mode="range",
+                       output_root=str(ledger.root), output_name="unused", report_name=None,
+                       json_limit=1 << 20)
+        worker.send_raw((json.dumps(dict(type="request", request_id="bad-budget",
+                         operation="fetch_range", budget=budget,
+                         payload={"production": payload})) + "\n").encode())
+        response = worker.read_raw()
+        assert not response["ok"]
+    assert not state["calls"]
+    assert ledger.status()["attempts"] == 0
+
+
+def test_origin_retry_second_read_failure_unknown(twohop):
+    state, ledger, transport, obj = twohop
+    state["origin_sequence"] = [400, -1]
+    with pytest.raises(RemoteIOError) as caught:
+        with transport.transfer(obj, length=1, condition="observe"):
+            pass
+    assert caught.value.accounting_state == "UNKNOWN"
+    assert transport.last_result["accounting"]["attempts"] == 2
+    assert not transport.last_result["accounting"]["complete"]
+    assert transport.last_result["accounting"]["body"] >= 5
+    assert len(state["calls"]) == 2
+    assert all(hop == "origin" for hop, _ in state["calls"])
+    with ledger._locked():
+        _, (_, _, leases, _) = ledger._read_pair()
+        assert len(leases) == 4
+    assert ledger.status()["saved_samples"] == 0
+
+
+@pytest.mark.parametrize("status,count", [(400, 3), (403, 3), (401, 1)])
+def test_origin_finalized_retry_exhaustion(twohop, status, count):
+    state, ledger, transport, obj = twohop
+    state["origin_rejection"] = status
+    state["control_body"] = b"error"
+    with pytest.raises(RemoteIOError) as caught:
+        with transport.transfer(obj, length=1, condition="observe"):
+            pass
+    assert caught.value.accounting_state == "CONFIRMED"
+    assert len(state["calls"]) == count
+    assert all(hop == "origin" for hop, _ in state["calls"])
+    assert transport.last_result["accounting"] == {
+        "body": 5 * count, "attempts": count, "complete": True,
+    }
+    assert transport.last_result["observation"]["origin_status_retried"] == count - 1
+    assert transport.last_result["observation"]["origin_status_exhausted"] == (count == 3)
+    assert ledger.status()["body"] == 5 * count
+    assert ledger.status()["attempts"] == 4
+    assert ledger.status()["saved_samples"] == 0
+    with ledger._locked():
+        _, (_, _, leases, _) = ledger._read_pair()
+        assert not leases
 
 
 def test_origin_control_scan_payload_sha(twohop):
@@ -433,7 +565,7 @@ def test_rust_auth_stripping_conditional_proof_and_real_bytes(twohop):
     with transport.read_range_owned(bound, 512, 15) as body:
         assert body == state["raw"][512:527]
     assert ledger.status()["body"] == 17
-    assert ledger.status()["attempts"] == 8
+    assert ledger.status()["attempts"] == 16
     assert ledger.status()["inflight"] == 0
     assert not list(ledger.root.glob("rust-transfer-*"))
     assert TOKEN.encode() not in b"".join(p.read_bytes() for p in ledger.slots)
@@ -483,7 +615,7 @@ def test_range_headers_reject_without_body_or_fallback(twohop, mode):
             pass
     assert len(state["calls"]) == 2
     # Nonempty unread rejected bodies are unknown, not zero. Empty 302 is known.
-    expected_body = 0 if mode == "cdn-redirect" else 1 if mode == "200" else 131074
+    expected_body = 0 if mode == "cdn-redirect" else 1 if mode == "200" else 262148
     assert ledger.status()["body"] == expected_body
     assert ledger.status()["inflight"] == 0
     diagnostic = transport.last_result["diagnostic"]
@@ -556,7 +688,7 @@ def test_wrong_etag_and_wrong_size_reject(twohop):
     with pytest.raises(RemoteIOError):
         with transport.transfer(obj, condition="observe"):
             pass
-    assert ledger.status()["body"] == 131074  # unread response: reservation stays pending
+    assert ledger.status()["body"] == 262148  # unread response: reservation stays pending
     state["calls"].clear()
     with pytest.raises(RemoteIOError):
         with transport.transfer(
@@ -573,9 +705,9 @@ def test_short_body_known_prefix_and_unknown_remainder_retained(twohop):
         with transport.transfer(obj, length=10, condition="observe"):
             pass
     # Actual prefix charged; the unobserved remainder is not silently refunded.
-    assert ledger.status()["body"] == 131074
+    assert ledger.status()["body"] == 262148
     assert ledger.status()["inflight"] == 0
-    assert ledger.status()["attempts"] == 2
+    assert ledger.status()["attempts"] == 4
 
 
 def test_ignore_conditional_does_not_write_production_proof(twohop):
@@ -859,8 +991,8 @@ def test_worker_crash_does_not_refund_pending_body(twohop, monkeypatch):
     with pytest.raises(RemoteIOError, match="accounting uncertain"):
         with transport.transfer(obj, condition="observe"):
             pass
-    assert ledger.status()["body"] == 131074
-    assert ledger.status()["attempts"] == 2
+    assert ledger.status()["body"] == 0  # Startup failed before network admission.
+    assert ledger.status()["attempts"] == 0
     assert ledger.status()["inflight"] == 0
 
 
@@ -884,7 +1016,7 @@ def test_partial_or_invalid_fullstream_never_marks_stage_complete(twohop, mode):
     else:
         assert not retained
         # Early parser stop retains shared reservation.
-        assert ledger.status()["body"] - before == 131074
+        assert ledger.status()["body"] - before == 262148
 
 
 def test_stage_traversal_and_scope_changes_rejected_before_network(twohop):

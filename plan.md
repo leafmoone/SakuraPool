@@ -1,3 +1,18 @@
+# P6-A FINAL PRODUCT CLOSURE
+
+Current authority: BASE ea37eae07031322646ecb44da7ad37eb3aa11e46, feature-only worktree. Sole exact design PASS. Protect all four historical tasks and eight original-workspace pending plus old diagnostics; never resume/refund/reset/settle/delete them. Original profile remains authoritative and unchanged.
+
+- [x] BASE/origin feature/dev/main and clean state verified; precise design reviewed once.
+- [ ] Same-instance production capability gate before network reserves; new ready capability, cold/persistent missing-cap cleanup.
+- [ ] Origin finalized400/403 internal retry maximum3/backoff1,2; distinct session2/HTTP4/ledger4; shared checked cumulative budget and all consumers.
+- [ ] Direct loopback/fault/capability/consumer tests, dedicated locked build, Rust production/worker/protocol, Ruff/diff; freeze for sole.
+- [ ] Reviewed new-domain cold50/persistent100 retry soak; extra<=300 only if no400/403 observed.
+- [ ] Separate profile-http-final.json with only worker changed; programmatic resolved path and local two-cap handshake before create, no token/provider during handshake.
+- [ ] Unique metadata-http-status-final2 original3records metadata workers1, old8pending protected; max1 explicit resume only confirmed READY; UNKNOWN immediate stop/no final3.
+- [ ] Actual3DONE/export3/metadataJSON/saved+3 proof; ordinary feature product/docs commit/push and full28-field report WAITING_REVIEW.
+
+## Previous HTTP status execution (historical)
+
 # P6-A NETWORK STABILITY — HTTP STATUS FINALIZATION
 
 Current execution supersedes prior HTTP/retry stop rules. Base e049a7c84031301faef592cec3f11ce428fde640 preserved; only existing worktree/feature branch writes. Freeze old user3UNKNOWN/6pending and previous cold/persistent2pending each plus raw results.

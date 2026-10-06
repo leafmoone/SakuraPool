@@ -28,7 +28,7 @@ def test_workspace_conservative_preserves_old_pending_and_quota(tmp_path, monkey
     with ledger._locked():
         _, (_, _, leases, _) = ledger._read_pair()
         assert historical in leases and leases[historical]["body"] == 7
-    assert after["usage"]["body"] == before["usage"]["body"] + 131074
+    assert after["usage"]["body"] == before["usage"]["body"] + 262148
     policy = dict(after["policy"])
     policy["body"] = after["usage"]["body"]
     ws.update_policy(ResourcePolicy(**policy), expected_version=after["policy_version"])

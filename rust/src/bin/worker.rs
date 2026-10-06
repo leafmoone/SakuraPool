@@ -7,13 +7,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::io::{self, BufRead, Write};
 
-const CAPABILITIES: [&str; 6] = [
+const CAPABILITIES: [&str; 7] = [
     "hash_file",
     "fetch_range",
     "scan_tar",
     "scan_http_tar",
     "bounded_session_v1",
     "production_transfer_v2",
+    "production_http_status_v1",
 ];
 const MAX_SESSION_REQUESTS: usize = 256;
 const MAX_REQUEST_ID_BYTES: usize = 64;
@@ -529,11 +530,9 @@ fn dispatch(
                 rpc,
                 transfer.http_header_bytes,
             )?;
-        let required_body = if transfer.mode == "range" && transfer.condition == "wrong" {
-            sakurapool_rust::production::NEGATIVE_CONDITION_BODY_CAP + 1
-        } else {
-            bytes.checked_add(1).ok_or("production_budget")?
-        };
+        let required_body = sakurapool_rust::production::network_body_budget(
+            bytes, transfer.mode == "range" && transfer.condition == "wrong",
+        )?;
         if request.budget.body < required_body
             || request.budget.attempts < 2
             || request.budget.disk < required_disk

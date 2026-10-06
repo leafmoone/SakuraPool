@@ -219,13 +219,17 @@ def preflight(task, pub, item, transport, *, prepared=None, proof_warm=None, led
         proof_cached = proof_warm
     range_count, max_chunk = chunk_plan(loc["image_size"], meta_size, capacity)
     from ..storage.prepared_fetch import stream_plan
-    from ..storage.production_resources import checked_body_add, network_body_budget
+    from ..storage.production_resources import (
+        LEDGER_ATTEMPTS_PER_TRANSFER,
+        checked_body_add,
+        network_body_budget,
+    )
 
     required = {
         "saved_samples": 1,
         "saved_bytes": loc["image_size"] + meta_size,
         "body": stream_plan(loc, size, metadata=metadata, capacity=capacity).generation_body,
-        "attempts": 2 * range_count,
+        "attempts": LEDGER_ATTEMPTS_PER_TRANSFER * range_count,
     }
     if not proof_cached:
         from ..storage.production_resources import checked_body_add, network_body_budget
@@ -240,7 +244,7 @@ def preflight(task, pub, item, transport, *, prepared=None, proof_warm=None, led
             network_body_budget(1, condition="wrong"),
         )
         required["metadata"] = 2 * listing_cap
-        required["attempts"] += 8
+        required["attempts"] += 2 + 3 * LEDGER_ATTEMPTS_PER_TRANSFER
     if not ledger.offline_mode:
         from ..storage.production_resources import ProductionFootprint
 

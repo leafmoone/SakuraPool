@@ -23,6 +23,9 @@ from .budget import BudgetLedger, Reservation, _cluster_bytes, _disk_usage, is_r
 from .location_gate import normalize_endpoint, two_hop_proof_key
 from .modelscope import ListedFile, ModelScopeDataset
 from .production_resources import (
+    HTTP_ATTEMPTS_MAX,
+    LEDGER_ATTEMPTS_PER_TRANSFER,
+    SESSION_ATTEMPTS_PER_TRANSFER,
     STAGE_DISK_CAP,
     STREAM_MEMORY,
     ProductionFootprint,
@@ -309,7 +312,7 @@ class RustProductionTransport:
             raise RustWorkerError("generation body integer capacity exceeded")
         return {
             "body": body,
-            "attempts": 512,
+            "attempts": SESSION_ATTEMPTS_PER_TRANSFER * 256,
             "disk": self.ledger.limits["disk"],
             "inflight": max(
                 0, self.ledger.limits["inflight"] - getattr(self.ledger, "effective_headroom", 0)
@@ -584,7 +587,7 @@ class RustProductionTransport:
             else:
                 requests = len(lengths)
                 body = checked_body_add(*(network_body_budget(n) for n in lengths))
-                attempts = 4 * requests
+                attempts = SESSION_ATTEMPTS_PER_TRANSFER * requests
             # Coordinator prediction cannot invoke the lane's owner-ledger RPC.
             # Actual admission refreshes policy and reserves; this is credit only.
             credit = self._generation_budget(refresh=False)
@@ -603,7 +606,7 @@ class RustProductionTransport:
                         network_body_budget(1),
                         network_body_budget(1, condition="wrong"),
                     ),
-                    6,
+                    3 * SESSION_ATTEMPTS_PER_TRANSFER,
                     3,
                 )
             else:
@@ -616,7 +619,7 @@ class RustProductionTransport:
                 else:
                     self._admit_generation(
                         checked_body_add(*(network_body_budget(n) for n in lengths)),
-                        4 * len(lengths),
+                        SESSION_ATTEMPTS_PER_TRANSFER * len(lengths),
                         len(lengths),
                     )
         return self._verified_object_body(candidate)
@@ -739,19 +742,8 @@ class RustProductionTransport:
         footprint = ProductionFootprint.admit(mode, size, capacity=self.capacity)
         memory, disk = footprint.memory, footprint.artifacts
         body_budget = network_body_budget(size, condition=condition)
-        budget = {"body": body_budget, "attempts": 2, "disk": disk, "inflight": memory}
-        lease1 = self.ledger.reserve(Reservation(body=body_budget, attempt=True))
-        try:
-            lease2 = self.ledger.reserve(Reservation(attempt=True))
-        except BaseException as primary:
-            try:
-                self.ledger.settle(lease1)  # No network; admitted attempts stay charged.
-            except BaseException:
-                primary.finalization_secondary = (
-                    *getattr(primary, "finalization_secondary", ()),
-                    "reservation_rollback",
-                )
-            raise
+        budget = {"body": body_budget, "attempts": SESSION_ATTEMPTS_PER_TRANSFER,
+                  "disk": disk, "inflight": memory}
         payload = dict(
             profile="twohop_test" if self._test else "modelscope_https_v1",
             object=asdict(obj),
@@ -794,6 +786,28 @@ class RustProductionTransport:
         worker_type = CorrectWorker
         with self._execution_worker(worker_type, budget) as worker:
             self._request_worker = worker
+            if not {"production_transfer_v2", "production_http_status_v1"}.issubset(
+                worker.capabilities
+            ):
+                error = RustWorkerError("production capability unavailable")
+                error.diagnostic_code = "WORKER_CAPABILITY_UNAVAILABLE"
+                raise error
+            leases = []
+            try:
+                for index in range(LEDGER_ATTEMPTS_PER_TRANSFER):
+                    leases.append(self.ledger.reserve(Reservation(
+                        body=body_budget if index == 0 else 0, attempt=True
+                    )))
+            except BaseException as primary:
+                for lease in leases:
+                    try:
+                        self.ledger.settle(lease)  # No network; admitted attempts stay charged.
+                    except BaseException:
+                        primary.finalization_secondary = (
+                            *getattr(primary, "finalization_secondary", ()), "reservation_rollback"
+                        )
+                raise
+            lease1 = leases[0]
             request_id = uuid.uuid4().hex
             worker.send_raw(
                 (
@@ -824,15 +838,22 @@ class RustProductionTransport:
                 or type(accounting["body"]) is not int
                 or not 0 <= accounting["body"] <= body_budget
                 or type(accounting["attempts"]) is not int
-                or not 0 <= accounting["attempts"] <= 2
+                or not 0 <= accounting["attempts"] <= HTTP_ATTEMPTS_MAX
                 or type(accounting["complete"]) is not bool
             ):
                 raise RustWorkerError("production accounting invalid; leases pending")
             self._request_terminal = True
-            self.ledger.consume_body(lease1, accounting["body"])
-            if accounting["complete"]:
-                self.ledger.settle(lease1)
-                self.ledger.settle(lease2)
+            try:
+                self.ledger.consume_body(lease1, accounting["body"])
+                if accounting["complete"]:
+                    for lease in leases:
+                        self.ledger.settle(lease)
+            except BaseException as error:
+                self._unresolved_network = True
+                raise RemoteIOError(
+                    "production network settlement uncertain", code="network_ambiguous",
+                    phase="worker", accounting="UNKNOWN",
+                ) from error
             self.last_result = {
                 "accounting": dict(accounting),
                 "diagnostic": _safe_diagnostic(result.get("diagnostic"), accounting),
@@ -845,9 +866,15 @@ class RustProductionTransport:
                         ("origin_http_status", 599),
                         ("cdn_http_status", 599),
                         ("content_length", 2**63 - 1),
+                        ("origin_status_retried", 2),
+                        ("origin_status_exhausted", 1),
                     )
                     for value in (observation.get(key),)
                 }
+            for name in ("origin_status_retried", "origin_status_exhausted"):
+                value = self.last_result.get("observation", {}).get(name)
+                if type(value) is int:
+                    setattr(self, "_" + name, getattr(self, "_" + name, 0) + value)
             if "production_error" in result:
                 code = result["production_error"]
                 self.last_result["production_error"] = (
@@ -893,7 +920,7 @@ class RustProductionTransport:
                     and safe_code.startswith(diagnostic["phase"] + "_")
                 ):
                     self._conservative_candidate = {
-                        "leases": (lease1, lease2),
+                        "leases": tuple(leases),
                         "maximum": body_budget,
                         "observed": accounting["body"],
                         "used": False,
@@ -954,7 +981,8 @@ class RustProductionTransport:
                     else obj.object_size
                 )
                 self._admit_generation(
-                    network_body_budget(size, condition=kwargs.get("condition", "match")), 2, 1
+                    network_body_budget(size, condition=kwargs.get("condition", "match")),
+                    SESSION_ATTEMPTS_PER_TRANSFER, 1
                 )
                 if (
                     getattr(self, "_persistent", False)
@@ -1561,7 +1589,7 @@ class RustProductionTransport:
         if not 0 < length <= self.max_range_bytes:
             raise RemoteIOError("production Range exceeds bound")
         with self._lane_lock:
-            self._admit_generation(network_body_budget(length), 2, 1)
+            self._admit_generation(network_body_budget(length), SESSION_ATTEMPTS_PER_TRANSFER, 1)
             needs_proof = (
                 getattr(self, "_persistent", False)
                 and proof_key(obj, test=self._test) not in self._live_proofs

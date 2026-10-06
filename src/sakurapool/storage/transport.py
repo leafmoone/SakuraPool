@@ -51,6 +51,7 @@ _SAFE_CODES = frozenset(
     {
         "remote_io",
         "network_ambiguous",
+        "WORKER_CAPABILITY_UNAVAILABLE",
         "http_status",
         "metadata_encoding",
         "redirect_policy",

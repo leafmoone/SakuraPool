@@ -9,6 +9,11 @@ from ..capacity import UINT64_MAX, CapacityConfig
 
 CONTROL_RESPONSE_BODY_CAP = 65_536  # Explicit worker protocol value; Rust parity is tested.
 NEGATIVE_CONDITION_BODY_CAP = CONTROL_RESPONSE_BODY_CAP
+ORIGIN_STATUS_MAX_ATTEMPTS = 3
+HTTP_ATTEMPTS_MAX = ORIGIN_STATUS_MAX_ATTEMPTS + 1
+LEDGER_ATTEMPTS_PER_TRANSFER = HTTP_ATTEMPTS_MAX
+# Worker dispatch commits once for request and once for operation, not per HTTP send.
+SESSION_ATTEMPTS_PER_TRANSFER = 2
 
 
 def checked_body_add(*values):
@@ -49,7 +54,9 @@ def chunked_body_budget(image_size, metadata_size, chunk):
 def network_body_budget(size, *, condition="match"):
     origin = checked_body_add(CONTROL_RESPONSE_BODY_CAP, 1)
     business = origin if condition == "wrong" else checked_body_add(size, 1)
-    return checked_body_add(origin, max(business, origin))
+    return checked_body_add(
+        checked_body_mul(origin, ORIGIN_STATUS_MAX_ATTEMPTS), max(business, origin)
+    )
 
 
 MAX_RANGE = 8 << 20

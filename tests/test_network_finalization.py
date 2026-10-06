@@ -36,7 +36,8 @@ def terminal(monkeypatch, phase="origin", code="origin_connect", observed=0, cra
     class Worker:
         _proc = object() if live else None
 
-        capabilities = {"bounded_session_v1"}
+        capabilities = {"bounded_session_v1", "production_transfer_v2",
+                        "production_http_status_v1"}
         cancelled = False
 
         def cancel(self):
@@ -92,7 +93,7 @@ def test_terminal_full_original_charge(channel, monkeypatch, phase, code):
     assert error.public_diagnostic()["accounting_basis"] == "CONSERVATIVE_MAX_CHARGE"
     state = snapshot(ledger)
     assert state["usage"]["body"] == production.network_body_budget(1)
-    assert state["usage"]["attempts"] == 2
+    assert state["usage"]["attempts"] == 4
     assert state["pending_count"] == 0
     assert state["usage"]["saved_samples"] == 0
 
@@ -104,7 +105,7 @@ def test_crash_no_envelope_stays_unknown(channel, monkeypatch):
         with transport.transfer(obj, condition="observe"):
             pass
     assert caught.value.accounting_state == "UNKNOWN"
-    assert snapshot(ledger)["pending_count"] == 2
+    assert snapshot(ledger)["pending_count"] == 4
 
 
 @pytest.mark.parametrize("failure", ["consume", "consume_after_commit", "second_settle", "cleanup"])
@@ -141,12 +142,12 @@ def test_failed_finalization_never_confirms(channel, monkeypatch, failure):
             pass
     assert caught.value.accounting_state == "UNKNOWN"
     state = snapshot(ledger)
-    assert state["pending_count"] == (1 if failure == "second_settle" else 3
-                                     if failure == "cleanup" else 2)
+    assert state["pending_count"] == (3 if failure == "second_settle" else 5
+                                     if failure == "cleanup" else 4)
     if failure in {"second_settle", "consume_after_commit"}:
         assert transport._conservative_candidate["used"]
         assert state["usage"]["body"] == production.network_body_budget(1)
-        assert state["usage"]["attempts"] == 2
+        assert state["usage"]["attempts"] == 4
 
 
 @pytest.mark.parametrize("delivered,safe,output,secondary", [
@@ -422,7 +423,8 @@ def test_persistent_wrapper_continuation_and_failure(channel, monkeypatch, failu
         assert caught.value.accounting_state == "CONFIRMED"
         assert transport._lane_worker is worker
         assert transport._lane_requests == 2
-        assert transport._lane_body == 2 * production.network_body_budget(1) and transport._lane_attempts == 4
+        assert transport._lane_body == 2 * production.network_body_budget(1)
+        assert transport._lane_attempts == 4
     else:
         assert worker.cancelled and transport._lane_failed
         assert getattr(transport, "_unresolved_network", False)
@@ -466,7 +468,7 @@ def test_early_unknown_blocks_later_finalized_evidence(channel, monkeypatch):
     with pytest.raises(RemoteIOError) as caught:
         with transport.transfer(obj, condition="observe"):
             pass
-    assert snapshot(ledger)["pending_count"] == 2
+    assert snapshot(ledger)["pending_count"] == 4
     error = PublicationFetchError("publication_range", delivered=False,
                                   cleanup_safe=True, output_lease="CONFIRMED",
                                   secondary=[], underlying=caught.value)
