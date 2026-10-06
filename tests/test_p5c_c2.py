@@ -279,8 +279,9 @@ def test_synthetic_pipeline_owner_and_content(multiple, monkeypatch, workers):
     peak = [0]
     prepare = PreparedFetch._prepare
 
-    def observed_prepare(pub, record_id):
-        descriptor = prepare(pub, record_id)
+    def observed_prepare(pub, record_id, **kwargs):
+        assert kwargs["capacity"].range_chunk_bytes == 8 << 20
+        descriptor = prepare(pub, record_id, **kwargs)
         live[:] = [reference for reference in live if reference() is not None]
         live.append(weakref.ref(descriptor))
         peak[0] = max(peak[0], len(live))

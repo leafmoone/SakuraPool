@@ -32,6 +32,18 @@ def test_nine_mib_three_mib_chunks_and_tail():
     assert plan.saved_bytes == (9 << 20) + 7
 
 
+def test_32_mib_image_capacity_with_8_mib_chunks():
+    location = dict(image_offset=512, image_size=27591302,
+                    metadata_offset=0, metadata_size=0, flags=0)
+    with pytest.raises(PublicationCorrupt):
+        stream_plan(location, 33554432)
+    capacity = CapacityConfig(image_max_bytes=32 << 20)
+    plan = stream_plan(location, 33554432, capacity=capacity)
+    assert plan.chunk_count == 4
+    assert max(length for _, length in plan.chunks()) == 8 << 20
+    assert sum(length for _, length in plan.chunks()) == 27591302
+
+
 def test_larger_than_legacy_range_footprint():
     capacity = CapacityConfig(range_chunk_bytes=12 << 20)
     footprint = ProductionFootprint.admit("range", 9 << 20, capacity=capacity)

@@ -556,7 +556,9 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
                     busy_keys = {object_key(descriptors[i]) for i in active}
                     selected = None
                     for candidate in candidates:
-                        descriptor = PreparedFetch._prepare(publication, candidate["record_id"])
+                        descriptor = PreparedFetch._prepare(
+                            publication, candidate["record_id"], capacity=task.capacity
+                        )
                         if object_key(descriptor) not in busy_keys:
                             selected = (candidate, descriptor)
                             break
