@@ -27,6 +27,18 @@ def _safe_diagnostic(error):
     return safe_failure(error.public_diagnostic()) if isinstance(error, RemoteIOError) else {}
 
 
+
+def _select_free_lane(free, lanes, prepared, capacity):
+    """Prefer an already warm idle lane; prediction never authorizes a fetch."""
+    # Match the data plane's next-chunk admission, not an entire multi-chunk image.
+    lengths = [min(prepared.location["image_size"], capacity.range_chunk_bytes)]
+    for index in free:
+        predict = getattr(lanes[index][0], "predict_warm", None)
+        if callable(predict) and predict(prepared.transport_identity, lengths):
+            return index
+    return free[0]
+
+
 def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=None, control=None):
     """At most W active operations; create lanes only for available independent work."""
     from .runner import delivery_mapping, preflight, verify_delivery
@@ -186,7 +198,7 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
                 lane = transport.clone() if hasattr(transport, "clone") else transport
                 lanes.append((lane, OrderedDict()))
                 free.append(len(lanes) - 1)
-            index = free[0]
+            index = _select_free_lane(free, lanes, prepared, task.capacity)
             preflight(task, publication, candidate, lanes[index][0], prepared=prepared)
             item = task.claim(expected=candidate, window=window)
             if item is None:
@@ -194,7 +206,7 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
                 break
             if fault_hook:
                 fault_hook("CLAIMED", item)
-            free.pop(0)
+            free.remove(index)
             active[index] = (item, prepared)
             try:
                 mapping = delivery_mapping(task, item, publication)

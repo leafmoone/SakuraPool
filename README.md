@@ -411,8 +411,12 @@ operations are bounded by L, candidate/claim lookahead and event envelopes by 2L
 and completion envelopes by L. SQL lookahead is clipped to actual READY rows before
 binding LIMIT, so very large positive Python integers do not overflow SQLite or
 impose a hidden input maximum. There is no fixed 12-record candidate ceiling.
-Simultaneous requests to the same TAR remain gated, and per-request chunk/header/RPC,
-proof-cache, finite retry, integrity and no-overwrite boundaries are unchanged.
+Simultaneous requests to the same TAR remain gated. For the earliest eligible
+record, the scheduler prefers a free lane with a matching live object binding;
+otherwise it uses free-lane FIFO order. This is a scheduling hint for the next
+chunk, not authorization: data-plane binding and conditional proofs are still
+validated. Per-request chunk/header/RPC, proof-cache, finite retry, integrity and
+no-overwrite boundaries are unchanged.
 
 ## Workspace and implementation boundaries
 
