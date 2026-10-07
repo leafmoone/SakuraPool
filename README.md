@@ -1,5 +1,170 @@
 # SakuraPool
 
+SakuraPool builds committed TAR indexes, compiles read-only query runtimes, and
+uses source-separated publications for verified selective image/JSON retrieval.
+It does not decode images or run models. Ordinary use needs a complete local
+publication, not original TAR downloads or a new indexing run.
+
+## Deploy the product
+
+Use Python 3.10+ with the pinned dependencies; the current verified Windows
+interpreter is Python 3.13. PyArrow 18.1.0 / NumPy 2.2.6 do not provide Windows
+CPython 3.14 wheels. A newer version number alone does not establish compatibility.
+The Python wheel contains the Python package, not a prebuilt Rust executable.
+Build the worker from this repository or the source distribution with the committed
+Cargo.lock/toolchain. Rust needs a working platform linker (GNU on the verified host).
+
+```console
+git clone --branch main https://github.com/leafmoone/SakuraPool.git
+cd SakuraPool
+python -m venv .venv
+# Activate .venv using your shell, then:
+python -m pip install '.[remote]'
+```
+
+PowerShell worker build (project-local output, no inherited shared Cargo target):
+
+```powershell
+Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+# GNU Windows toolchain: add your installed MinGW/MSYS2 UCRT64 compiler bin.
+# Example if installed at the conventional location:
+$env:PATH = "C:\msys64\ucrt64\bin;" + $env:PATH
+cargo build --manifest-path rust/Cargo.toml --locked --release --bin sakurapool-worker --target-dir rust/target
+$worker = (Resolve-Path rust/target/release/sakurapool-worker.exe).Path
+sakura --version
+```
+
+On POSIX use:
+
+```console
+env -u CARGO_TARGET_DIR cargo build --manifest-path rust/Cargo.toml --locked --release --bin sakurapool-worker --target-dir rust/target
+```
+
+The executable is `rust/target/release/sakurapool-worker`. Keep its absolute path for the private
+connection profile below. Source distributions carry the Rust sources/lockfile;
+compiling the worker does not require image data or ModelScope credentials. A
+prepopulated Cargo dependency cache permits the same command with `--offline`.
+
+## Public source indexes and explicit installation
+
+Public index repository: [leafmoone/SakuraPool](https://modelscope.cn/datasets/leafmoone/SakuraPool).
+Pin release **`8d0aab1697b57288caf13b4c18c08fb2fa401518`**. It covers **715 committed
+partitions / 22,792 TAR objects / 26,430,011 retained records**, verified from the
+COMMIT/Parquet contracts and exact fixed provider path/size/SHA metadata, not an
+estimated 22M/30M/40M or a claim of unique image content.
+
+| Source | Partitions | TAR objects | Records | Local index bytes |
+|---|---:|---:|---:|---:|
+| anime_pictures | 32 | 1,000 | 642,954 | 169,066,240 |
+| bangumi | 94 | 3,000 | 4,168,774 | 836,745,004 |
+| danbooru | 361 | 11,552 | 11,132,809 | 2,978,602,701 |
+| gamecg | 8 | 240 | 5,177,447 | 1,212,210,257 |
+| konachan | 32 | 1,000 | 318,760 | 80,221,647 |
+| yande | 94 | 3,000 | 1,124,564 | 245,637,771 |
+| zerochan | 94 | 3,000 | 3,864,703 | 935,541,500 |
+
+Each source has an independent runtime and publication, with 12 required files.
+Download only the chosen source, preserve every relative path, and do not mix
+sources/snapshots. `catalog.json` is the public file/source catalog. The release
+combines 612 partitions from `leafmoone/sakurapool-index` at
+`f94469c4b5c8b5d082c5c34f116a2286a633968b` and 103 disjoint partitions from
+`leafmoone/sakurapool-index-checkpoint-20261003t111628z` at
+`ec49db9baff7c1dc10457e5012e6b8f3be1ae64a`.
+
+Index acquisition is explicit; SakuraPool has no automatic discovery/installer.
+The following standalone example uses the verified public dataset file API and
+no credential. Change `source` to another table entry and use a fresh destination;
+it downloads index files only, not images. Install `.[remote]` for `requests`.
+
+```python
+from pathlib import Path, PurePosixPath
+import requests
+
+repo = "leafmoone/SakuraPool"
+revision = "8d0aab1697b57288caf13b4c18c08fb2fa401518"
+source = "konachan"
+root = Path("local-index")
+root.mkdir(exist_ok=False)
+url = f"https://modelscope.cn/api/v1/datasets/{repo}/repo"
+with requests.Session() as session:
+    session.trust_env = False  # Do not inherit .netrc/proxy credentials.
+    response = session.get(url, params={"Revision": revision, "FilePath": "catalog.json"},
+                           timeout=(10, 60))
+    response.raise_for_status()
+    catalog = response.json()
+    entry = next(item for item in catalog["sources"] if item["source"] == source)
+    for item in entry["files"]:
+        relative = PurePosixPath(entry["path"]) / item["path"]
+        if relative.is_absolute() or ".." in relative.parts or "\\" in str(relative):
+            raise ValueError("invalid catalog path")
+        target = root / str(relative)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        size = 0
+        with session.get(url, params={"Revision": revision, "FilePath": str(relative)},
+                         stream=True, timeout=(10, 60)) as response:
+            response.raise_for_status()
+            with target.open("xb") as output:
+                for chunk in response.iter_content(1024 * 1024):
+                    size += len(chunk)
+                    if size > item["bytes"]:
+                        raise ValueError("index file exceeds declared size")
+                    output.write(chunk)
+        if size != item["bytes"]:
+            raise ValueError("index file is truncated")
+print(root / entry["path"])
+```
+
+Then fully verify the downloaded publication; its root is the selected source
+folder, **not** `local-index` itself:
+
+```console
+sakura publication verify local-index/sources/konachan --full
+```
+
+Public index access does **not** grant access or rights to the original images.
+Image locators remain `leafmoone/webdataset_danbooru_v3` at
+`73306f1dc5459238710f477b376c36da997d020c`. That repository is marked private;
+original-repository authorization and credentials are required. Anonymous detail
+metadata is readable, but it is not proof of anonymous image access. Apache-2.0
+covers the distributed index metadata, not original-image or third-party rights.
+No image TAR or private checkpoint management file is mirrored in the public index.
+
+### Query one source and create an image-download task
+
+Save `{"sources":["konachan"]}` as `source-query.json`. A source query is a query
+JSON field, not a `task create --source` option. Task creation is local/offline:
+
+```console
+sakura task create --publication local-index/sources/konachan --query source-query.json --selection first --limit 3 --task-dir TASK
+sakura task inspect TASK
+```
+
+For later retrieval, save a **private** `TASK_PROFILE.json` with your built worker
+path and a credential reference (do not put the token itself in this JSON):
+
+```json
+{
+  "format": "sakurapool-task-connection-v1",
+  "origin": "https://modelscope.cn",
+  "repositories": ["leafmoone/webdataset_danbooru_v3"],
+  "worker": "/absolute/path/to/sakurapool-worker",
+  "credential_ref": {"env": "MODELSCOPE_API_TOKEN"}
+}
+```
+
+On Windows the worker path must be your real absolute `.exe` path, escaped for
+JSON. Set `MODELSCOPE_API_TOKEN` privately to a credential with original-repository
+access, then explicitly start the image task:
+
+```console
+sakura task run TASK --profile TASK_PROFILE.json --workers 1
+sakura task export TASK --manifest TASK/manifest.jsonl
+```
+
+This example selects three images; creation/inspection do not download them.
+`publication fetch` downloads selected image records, not index packages. Larger
+worker counts are explicit choices, not automatic tuning or throughput promises.
+
 ## Lightweight downloads (current contract)
 
 New downloads use **TaskDB v4**, frozen flat-output naming, and **workspace manifest v2**. The production
@@ -134,27 +299,14 @@ transaction. Frozen selection/seed/plan and verified deliveries are unchanged.
 There is no output ceiling, ledger lease or consumption audit to update.
 
 
-SakuraPool builds reusable P2 TAR indexes, compiles read-only P3 query snapshots,
-and distributes runtime-first publication v2 for verified selective Range retrieval.
-Local, download and remote builders and explicit budgeted Rust production profiles
-are available; credentials and live binding proofs are never distributed.
-No image decoding, model execution or production throughput claim.
-
-P5-A adds bounded publication construction and a serial Python reader:
+The serial Python publication reader is:
 `from sakurapool.storage.publication_session import PublicationSession`.
 A session fully verifies once, serves multiple record fetches and closes its bounded
-binding cache. It owns the publication handle, not the caller's transport/ledger.
+binding cache. It owns the publication handle, not the caller's transport.
 PublicationSession itself is serial and same-thread: no cross-thread SQLite use.
 The task coordinator separately supports bounded concurrent lanes; this is not a
 concurrent scheduler inside a shared PublicationSession.
-See [P5 roadmap and task design](docs/P5_ROADMAP.md). P5-B serial task and real
-closure certification is complete; see the [closure report](reports/P5B/REAL_CLOSURE_REPORT.md).
-P5-C bounded pipeline is approved and merged. P5-D validation is complete for the
-fixed `20261004T143905Z-upload` scope and merged at
-`62f86cc487af41de7d84bfb5a14d2fb1e0e172ac`; independent semantic comparison
-remains subset-only, and global index completion is not claimed. See
-[the P5-D report](reports/P5D/REPORT.md). The current lightweight workflow is
-tracked in [plan.md](plan.md). Default task workers=1; `--workers` and the API accept
+Default task workers=1; `--workers` and the API accept
 any strictly positive integer, without an enumeration or configured maximum.
 Actual concurrency depends on ready work, object distribution and available OS
 resources. Earlier P3/P4 CLI examples below are historical/admin interfaces,
@@ -177,24 +329,6 @@ binding LIMIT, so very large positive Python integers do not overflow SQLite or
 impose a hidden input maximum. There is no fixed 12-record candidate ceiling.
 Simultaneous requests to the same TAR remain gated, and per-request chunk/header/RPC,
 proof-cache, finite retry, integrity and no-overwrite boundaries are unchanged.
-
-The completed one-authorized-run 1000-image v3 retest delivered 1,438,207,693 verified
-bytes in ~1615.97 seconds (~0.84877 MiB/s including startup verification). Its 323
-samples found four in-progress items in 317 of 318 active samples. Rust already
-reuses origin/CDN clients; bounded 256-request generation rotation deliberately
-refreshes connection/proof caches. Low Python CPU is not proof of the remote bottleneck:
-individual request latency/attempts were not recorded.
-
-A separately authorized single six-lane public run on commit
-`a55892f497643d84423dd489168dd21ed0a61503` used the exact same frozen 1000 identities,
-metadata=false and GIF opt-in, in a new v4 task. All 1000 images and 1,438,207,693
-bytes verified in ~1150.56 seconds (~1.19210 MiB/s /10.00003 Mbps including startup).
-The observed rate is ~40.45% above the historical four-lane v3 rate, but this is
-**not controlled A/B**: code/layout, time, provider/CDN, network and caches differ;
-there is no causal worker-gain or 50% speedup guarantee. Original v3 outputs and
-manifest remain intact. These measurements belong to a558 +workers6, not the later
-unrestricted-worker/no-aggregate-admission change; that change has offline tests
-only and did not trigger another public run.
 
 ## Workspace and implementation boundaries
 
@@ -232,11 +366,6 @@ and chunk capacities described above, nor image/metadata integrity checks. There
 is no promise that a chosen worker count fits physical RAM; actual OS resource
 failures remain possible. Historical protocol allocation factors are not a new
 aggregate download ceiling.
-
-P6-A real-workspace metadata validation is **PARTIAL**: two of three items were
-published and exported after formal pause; fresh-process resume failed, and a subsequent
-resume retained one operation UNKNOWN and two pending leases. No final three-item
-closure is claimed. See the final P6-A report for the execution deviation and evidence.
 
 ## Task API (recoverable task workflow)
 
@@ -279,18 +408,18 @@ Object paths/revisions/digests come from the pinned publication, not this profil
 Successful durable delivery receipts recover without redownloading. Unknown
 output is preserved and blocked; neither filename existence nor absence of a
 historic lease proves success. There is no end-to-end exactly-once claim.
-Only new v3 tasks can export; legacy v1/v2 export requires separately authorized
-migration and is currently rejected without writing. Exports stream only
+New v4 tasks and receipt-verified v3 archives can export; legacy v1/v2 export
+requires migration and is currently rejected without writing. Exports stream only
 receipt-verified deliveries with source/plan identity,
 relative task paths and delivery hashes, without image copies or archives.
 The manifest must be directly inside TASK (for example TASK/subset.jsonl), so
-its `output/<record_id>/...` paths resolve relative to the manifest's directory;
+its relative `output/...` paths resolve relative to the manifest's directory;
 a different export base is explicitly rejected.
 Legacy binary ledger formats remain archives/admin compatibility and are not
 used by new downloads. No exact per-task network consumption is recorded or
 inferred from historical global counters.
 
-Explicit current task bounds: 100,000 frozen entries, 10,000 in-memory sample
+Default technical task capacities (configurable, not consumption quotas): 100,000 frozen entries, 10,000 in-memory sample
 heap entries, 512-record identity batches, 32 MiB TaskDB, 33 MiB journal allowance,
 64 KiB plan header and 32 MiB exported manifest. SQLite temp work uses memory;
 the maximum DB page count is derived from its actual page size. Windows file/
@@ -336,29 +465,25 @@ Synthetic million-record measurements are not a production capacity guarantee.
 
 ## Project workflow and boundaries
 
-[Project rules](docs/PROJECT_RULES.md) are the canonical current workflow and
-boundary reference. The intended administrator flow is remote TAR indexing →
+The explicit administrator flow is remote TAR indexing →
 durable index → runtime compile/verify → versioned index publication. The user
 flow is install/verify a published index → query → locate image/JSON → Range
 retrieval → a small local dataset. Earlier P3 descriptions of remote scanning,
 publication and retrieval as future work are historical; current explicit interfaces
-are described above and do not imply a complete production index is available.
+are described above. The separately published fixed index scope is listed at the top.
 
 Ordinary users do not need complete local TARs; LocalTarScanner is for local
-inputs, testing and validation. No ready-to-import index currently exists; do not
-search for old hfutils/CheeseChaser indexes as a prerequisite. Large-repository
-index construction requires separate authorization after development and acceptance.
-The later P4 integration target is `leafmoone/game_cg_5M`; naming it grants no
-access, full scan or write permission. See the rules for bounded canary planning,
-object-version binding, component boundaries and dev/main review requirements.
+inputs, testing and validation. Use the published complete source folders above;
+do not search for old hfutils/CheeseChaser indexes as a prerequisite. New large
+image scans/builds require separate authorization; naming an image repository does
+not grant access, scanning or write permission.
 
-P4-R2 adds an explicit Rust production transport and two administrator pipeline
-interfaces; see [R2 transport](docs/R2_TRANSPORT.md) for configuration, gates and
-whole-TAR spool/memory limits. The early minimal live capability batch stopped
-BLOCKED (historical R2 evidence); subsequent approved small real closure evidence is
-linked above. Neither those small closures nor these interfaces certify a complete
-production-scale index. Ordinary fetch still requires a verified local package
-and must not implicitly scan. No real full-TAR download or large-repo build was run.
+The explicit Rust administrator pipeline has download-then-scan and
+remote-stream-scan modes; see [R2 transport](docs/R2_TRANSPORT.md) for configuration
+and whole-TAR spool/memory limits, and [local partition builder](docs/local-partition-builder.md)
+for already-local TARs. These indexing/administration interfaces are separate from
+ordinary lightweight retrieval; ordinary fetch requires a verified local publication
+and never implicitly scans original archives.
 
 ## Installation and CLI
 
@@ -370,13 +495,12 @@ x86-64, the current PyArrow 18.1.0 / NumPy 2.2.6 pins provide CPython 3.13 wheel
 but not 3.14 wheels. Removing the metadata upper bound does not certify 3.14 or
 permit silently upgrading those pins, transplanting Arrow, or using `--no-deps`.
 
-The current single-project-environment selection and independent certification
-are recorded in `reports/Python-venv-20260930/`; historical Fix3 Python 3.12 logs
-remain unchanged and do not certify this later contract. Verification subprocesses
-use the invoking interpreter (`sys.executable`) rather than a retired venv path.
+Verification subprocesses use the invoking interpreter (`sys.executable`)
+rather than a retired virtual-environment path. Development tests live on `dev`;
+product-only `main` and release distributions intentionally exclude tests/reports/plans.
 
 ```console
-python -m pip install -e '.[dev]'
+python -m pip install '.[remote]'
 sakura --version
 sakura config validate --config examples/index-config.json
 sakura index scan --config examples/index-config.json --dataset synthetic --input /local/tars --output /local/index
@@ -431,7 +555,7 @@ uint64 extent without opening or decoding images. P2 local objects use
 there is no in-place migration. Object IDs, record IDs, table columns, error codes,
 summary counts, and crash hooks changed. Existing P1 query APIs remain unchanged but
 are not automatically a query engine for the four domain tables. Historical P2 reports
-and `tools/verify_p2.py` describe the obsolete v1 protocol, not current certification.
+describe the obsolete v1 protocol, not current certification.
 
 ## Four Arrow tables
 
@@ -497,16 +621,7 @@ objects_skipped. created_at and timings are nondeterministic; logical rows/IDs/c
 are deterministic. Memory still scales with the largest shard (headers and rows are
 materialized); batched Parquet writing is not a bounded-memory streaming claim.
 
-## Verification
-
-```console
-PYTHONPATH=src python -m pytest -q
-python -m ruff check .
-git diff --check
-git diff 52358d6fca728d2bba12814490e0974a6907b218..HEAD --check
-python -m build --wheel --outdir /tmp/sakurapool-p2-wheel
-PYTHONPATH=src python tools/benchmark_indexer.py
-```
+## Durable format compatibility
 
 The current on-disk contract is `FORMAT_VERSION=4`, builder `sakurapool-p2-v4`.
 `storage_id` is a stable configured profile identifier (default `local`), independent of
@@ -516,12 +631,6 @@ object_size, object_version, and validator. `archive_format=tar` is separate fro
 new output directory. Future ModelScope validation MUST NOT use remote full-object SHA
 rereads as the normal validation path; use fixed revisions and object validators.
 P4 MUST NOT use remote full-object SHA rereads as the normal ModelScope validation path.
-
-The benchmark generates 10,000 synthetic samples in **one** TAR. It reports
-header/json/parquet/total seconds and process peak RSS including fixture generation
-and imports; total excludes fixture generation but includes whole-TAR validation.
-No production performance inference is valid. See the revision report for actual
-command logs, compatible installation failures/successes, and remaining gates.
 
 ## P3 runtime
 
@@ -603,23 +712,3 @@ a lazy bitmap result: `count()` / `len()`, `iter_rids()`, `limit(n)`,
 cached in a byte-budget LRU (`cache_bytes` on `RuntimeSnapshot.open`, 256 MiB
 default) with hits/misses/evictions counters; a single blob larger than the
 budget is never cached.
-
-Benchmark (`tools/bench_runtime.py`, synthetic corpus, deterministic seed):
-
-```console
-PYTHONPATH=src python tools/bench_runtime.py --workdir build/bench --scale 100k
-# scales: 100k (correctness + 300-spec reference differential), 1M, 5M
-# phases: gen, compile, query, diff — each phase is a child process, so peak RSS
-# is attributed per phase; results merge into build/bench/report.json
-```
-
-The current P3 performance evidence is
-[`reports/P3/bench-repair/benchmark.json`](reports/P3/bench-repair/benchmark.json),
-with methodology and validation in [`reports/P3/report.md`](reports/P3/report.md)
-and separate [installed-package evidence](reports/P3/bench-repair/benchmark-installed.json).
-Earlier benchmark artifacts are retained as history, not current acceptance evidence.
-These results cover synthetic workloads only, not network performance, full-repository
-coverage or a guarantee for 21M records. Generator/options/code/environment fingerprints
-must match; use a fresh benchmark workdir after workload changes rather than assuming
-old phase files automatically invalidate. Do not rerun large benchmarks without the
-applicable stage authorization.
