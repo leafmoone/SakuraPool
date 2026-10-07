@@ -5,6 +5,7 @@ import os
 from contextlib import ExitStack
 
 from ..fs_safety import plain_entry
+from ..storage.diagnostic_codes import _TRANSIENT_NETWORK_CODES
 from ..storage.publication import load_publication
 from .context import LEGACY_CAPACITY, effective_capacity
 from .plan import Selection, normalize_query, selected_records
@@ -265,6 +266,31 @@ def _recover_stage(task, row):
         or row["receipt"] is not None
     ):
         return False
+    details = task.failure_diagnostic(row["seq"]) or {}
+    if (row["code"] == "publication_pre_stage"
+            or details.get("code") == "publication_pre_stage"):
+        if not (
+            row["stage"] is None
+            and row["state"] == "FAILED"
+            and row["phase"] == "NETWORK_START"
+            and row["code"] == details.get("code") == "publication_pre_stage"
+            and details.get("phase") == "publication_fetch"
+            and details.get("operation_phase") == "NETWORK_START"
+            and details.get("cause_code") in _TRANSIENT_NETWORK_CODES
+            and details.get("cleanup") == "SAFE"
+            and details.get("delivery") == "NOT_PUBLISHED"
+            and row["published_members"] == "[]"
+        ):
+            return False
+        # Only the pre-stage producer can assert this no-image-write boundary.
+        # A crash after mkdir but before STAGED has no marker and stays blocked.
+        try:
+            workspace = getattr(task, "workspace", None)
+            _real_output_root(task.directory / "output", physical_root=(
+                workspace.root if workspace is not None else task.directory))
+        except (OSError, ValueError):
+            return False
+        return True
     if row["stage"] is None:
         return row["phase"] == "CLAIMED"
     if type(row["stage"]) is not str or len(row["stage"].encode("utf-8")) > 8192:
@@ -394,12 +420,7 @@ def reconcile(task, publication=None):
         # Failed operations never receive an unlimited automatic retry. Only an explicit
         # resume after a classified transient and verified unpublished cleanup may retry.
         details = task.failure_diagnostic(row["seq"]) or {}
-        transient = details.get("cause_code") in {
-            "origin_timeout",
-            "origin_connect",
-            "cdn_timeout",
-            "cdn_connect",
-        }
+        transient = details.get("cause_code") in _TRANSIENT_NETWORK_CODES
         if (
             row["state"] == "FAILED"
             and transient

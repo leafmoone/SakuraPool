@@ -156,6 +156,39 @@ def _check_row_ownership(
         for batch in handle.iter_batches(
             batch_size=batch_size, columns=["dataset_id", "object_id"]
         ):
+            # Other schemas and Python value types retain their original
+            # comparison behavior instead of Arrow's coercion rules.
+            if (
+                type(dataset) is str
+                and type(object_id) is str
+                and batch.schema.names == ["dataset_id", "object_id"]
+                and all(pa.types.is_string(field.type) for field in batch.schema)
+            ):
+                try:
+                    matches = True
+                    for column, value in zip(batch.columns, (dataset, object_id)):
+                        if not isinstance(column, pa.Array) or column.null_count:
+                            matches = False
+                            break
+                        if not len(column):
+                            continue
+                        # Reuse an existing scalar to avoid compute startup
+                        # and optional pandas detection during scalar creation.
+                        first = column[0]
+                        if (
+                            first.as_py() != value
+                            # Bound repeated strings by the current input size.
+                            or len(column) * first.as_buffer().size > column.nbytes
+                            or not column.equals(pa.repeat(first, len(column)))
+                        ):
+                            matches = False
+                            break
+                    if matches:
+                        continue
+                except UnicodeDecodeError:
+                    pass
+            # Keep the original row order and diagnostics for every failure,
+            # including malformed schemas and non-string values.
             rows = batch.to_pylist()
             for row in rows:
                 if row["dataset_id"] != dataset:

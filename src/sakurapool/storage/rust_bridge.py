@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -37,6 +38,7 @@ PRODUCTION_RPC_TIMEOUT_S = PRODUCTION_OPERATION_TIMEOUT_S + PRODUCTION_BRIDGE_MA
 _SHUTDOWN_TIMEOUT_S = 2.0
 _REJECTED = "worker rejected request"
 _ZERO_BUDGET = {"body": 0, "disk": 0, "inflight": 0, "attempts": 0}
+_STRING_SPECIAL = re.compile(rb'["\\\x00-\x1f]')
 
 
 class RustWorkerError(RuntimeError):
@@ -59,6 +61,9 @@ def _json_peak(raw, *, max_nodes=PROTOCOL_MAX_NODES):
     Counts keys as well as values, including duplicates discarded by loads.
     """
     length = len(raw)
+    # Only large legacy scan manifests use the run-skipping path. Ordinary
+    # control messages and small scans keep their existing scalar string walk.
+    legacy_strings = length > MAX_LINE_BYTES and max_nodes > PROTOCOL_MAX_NODES
     i = nodes = string_bytes = depth = 0
     stack = bytearray(PROTOCOL_MAX_DEPTH)
     first = True
@@ -87,19 +92,47 @@ def _json_peak(raw, *, max_nodes=PROTOCOL_MAX_NODES):
             nodes += 1
             i += 1
             start = i
-            while i < length and raw[i] != 34:
-                if raw[i] < 32:
-                    raise RustWorkerError("worker returned invalid json")
-                if raw[i] == 92:
-                    i += 1
-                    if i >= length or raw[i] not in b'"\\/bfnrtu':
+            if legacy_strings:
+                while i < length and raw[i] != 34:
+                    if raw[i] < 32:
                         raise RustWorkerError("worker returned invalid json")
-                    if raw[i] == 117:
-                        for j in range(i + 1, i + 5):
-                            if j >= length or raw[j] not in b"0123456789abcdefABCDEF":
-                                raise RustWorkerError("worker returned invalid json")
-                        i += 4
-                i += 1
+                    if raw[i] == 92:
+                        # Escapes keep the scalar path, avoiding a regex call for
+                        # every escape in a dense or mostly escaped string.
+                        i += 1
+                        if i >= length or raw[i] not in b'"\\/bfnrtu':
+                            raise RustWorkerError("worker returned invalid json")
+                        if raw[i] == 117:
+                            for j in range(i + 1, i + 5):
+                                if j >= length or raw[j] not in b"0123456789abcdefABCDEF":
+                                    raise RustWorkerError("worker returned invalid json")
+                            i += 4
+                    elif i + 1 < length and raw[i + 1] == 34:
+                        i += 1  # One ordinary byte before the closing quote.
+                        break
+                    else:
+                        # Skip longer ordinary runs in C, without a substring.
+                        match = _STRING_SPECIAL.search(raw, i + 1)
+                        if match is None:
+                            i = length
+                            break
+                        i = match.start()
+                        continue
+                    i += 1
+            else:
+                while i < length and raw[i] != 34:
+                    if raw[i] < 32:
+                        raise RustWorkerError("worker returned invalid json")
+                    if raw[i] == 92:
+                        i += 1
+                        if i >= length or raw[i] not in b'"\\/bfnrtu':
+                            raise RustWorkerError("worker returned invalid json")
+                        if raw[i] == 117:
+                            for j in range(i + 1, i + 5):
+                                if j >= length or raw[j] not in b"0123456789abcdefABCDEF":
+                                    raise RustWorkerError("worker returned invalid json")
+                            i += 4
+                    i += 1
             if i >= length:
                 raise RustWorkerError("worker returned invalid json")
             string_bytes += i - start

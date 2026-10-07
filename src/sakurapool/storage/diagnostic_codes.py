@@ -1,5 +1,9 @@
 """Static diagnostic allowlists shared with dependency-free offline task reads."""
 
+_TRANSIENT_NETWORK_CODES = frozenset(
+    {"origin_timeout", "origin_connect", "cdn_timeout", "cdn_connect"}
+)
+
 _SAFE_CODES = frozenset(
     {
         "remote_io",
@@ -30,6 +34,7 @@ _SAFE_CODES = frozenset(
         "publication_publish",
         "publication_accounting",
         "publication_range",
+        "publication_pre_stage",
         "publication_metadata",
         "worker_timeout",
         "worker_eof",
@@ -82,4 +87,3 @@ _SAFE_PHASES = frozenset(
         "scan",
     }
 )
-

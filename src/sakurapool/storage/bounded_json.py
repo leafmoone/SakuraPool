@@ -12,6 +12,7 @@ This is validator workspace, not total interpreter RSS. No decoder buffer,
 growing token, object graph or recursion is used.
 """
 
+import re
 from pathlib import Path
 
 READ_BYTES = 4096
@@ -19,6 +20,7 @@ MAX_DEPTH = 128
 MAX_NODES = 1_000_000
 CONTROL_BYTES = 4096
 VALIDATION_INFLIGHT_BYTES = READ_BYTES + MAX_DEPTH + CONTROL_BYTES
+_STRING_SPECIAL = re.compile(rb'["\\\x00-\x1f\x80-\xff]')
 
 
 class BoundedJSONError(ValueError):
@@ -95,6 +97,23 @@ def _string(reader):
                 if not 128 <= reader.take() <= 191:
                     raise BoundedJSONError("JSON UTF-8 continuation")
             count += remaining
+        elif reader.pos < reader.end:
+            # Avoid a regex call for a one-byte string or an escape/UTF-8
+            # boundary. The next byte is already in the fixed-size buffer.
+            value = reader.buffer[reader.pos]
+            if value == 34:
+                reader.pos += 1
+                return count
+            if value == 92 or value < 32 or value >= 128:
+                continue
+            # Both the consumed byte and this next byte are ordinary ASCII.
+            match = _STRING_SPECIAL.search(reader.buffer, reader.pos + 1, reader.end)
+            end = match.start() if match is not None else reader.end
+            count += end - reader.pos
+            reader.pos = end
+            if match is not None and reader.buffer[end] == 34:
+                reader.pos += 1
+                return count
 
 
 def _number(reader):

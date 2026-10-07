@@ -15,7 +15,7 @@ pub use http::{
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::io::{self, Read};
+use std::io::{self, BufReader, Read};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -580,7 +580,11 @@ pub fn scan_tar_reader_observed<R: Read, O: ScanObserver>(
 /// Sequentially scan an uncompressed archive file (one pass).
 pub fn scan_tar_file(path: &Path, limits: &ScanLimits) -> Result<TarScan, &'static str> {
     let file = std::fs::File::open(path).map_err(|_| "io_error")?;
-    scan_tar_reader(file, limits)
+    // Local-file read-ahead is fixed at 64 KiB, including on rejection. Keep
+    // HashCountReader above this buffer so parser byte counts/tail checks retain
+    // the existing logical, checkpoint-checked ScanLimits contract. No HTTP
+    // reader is buffered here; this is not an exact physical-read byte cap.
+    scan_tar_reader(BufReader::with_capacity(64 * 1024, file), limits)
 }
 
 /// Compatibility alias for [scan_tar_file].

@@ -63,6 +63,12 @@ filesystem calls or pipe writes are not a hard real-time cancellation guarantee.
 Range, negative-proof and whole-object scan operations share this deadline; it
 is not a promise that an arbitrarily large object can complete within it.
 
+Python provider-metadata lookups precede or accompany these operations through
+Requests. Their 10-second connection and 60-second socket-inactivity timeouts
+do not impose a total wall-clock deadline on slow headers or a trickling body.
+The 125/130-second Rust RPC/watchdog contract does not cover those metadata
+requests; their response-byte and pagination limits remain independent bounds.
+
 POSIX publication and owned-stage cleanup synchronize the affected directories
 before recording completion; directory-sync failures fail closed. Windows has
 no portable directory-fsync equivalent here: process-crash recovery is supported,
@@ -105,21 +111,29 @@ capability interface, not automatic permission for repeated live probing.
 The explicit plan contains `adapter` (existing `DatasetAdapter` fields) and a
 fresh `stage` path inside `D:/SakuraTool/SakuraPool-P4-work`. `--output-package`
 currently names a fresh **P2 durable directory**; it does not automatically compile
-P3 or publish a user package. Combined paths, proof, raw spool + stage + durable
-capacity and memory feasibility are checked before metadata/body HTTP.
+P3 or publish a user package. Fresh paths and the maximum simultaneous transfer,
+stage and durable-build footprint are checked before metadata/body HTTP. Provider
+binding and conditional proof gates still apply before an authorized transfer.
 
 ```console
 sakura index scan-remote --config production.json --plan admin-plan.json --output-package D:/SakuraTool/SakuraPool-P4-work/new-durable --mode download-then-scan
 sakura index scan-remote --config production.json --plan admin-plan.json --output-package D:/SakuraTool/SakuraPool-P4-work/new-durable --mode remote-stream-scan
 ```
 
-`download-then-scan`: Rust completes a bounded raw TAR spool before invoking the
-unchanged file scanner. `remote-stream-scan`: Response Read goes through a counting
-tee directly into the unchanged reader scanner, while writing the same raw spool.
-Python audits file extents, per-member digests and JSON payload, builds the shared
-`members.sqlite` / `stage.complete` contract, and invokes unchanged P2 v4 writing.
-Both modes use a **whole local TAR spool** temporarily; neither is a diskless build.
-The stamp is last, only after complete stream and extent/hash/size validation.
+`download-then-scan` writes and synchronizes a bounded whole-TAR spool before
+scanning it. Local scanning uses a fixed 64 KiB read buffer beneath the scanner's
+hash/count reader; the deadline reader remains outside that buffer.
+`remote-stream-scan` feeds the counted HTTP body directly to the scanner and does
+**not** retain a whole-TAR spool. Both modes write bounded member-record and JSON
+sidecars, then build the existing `members.sqlite` / `stage.complete` contract and
+P2 v4 output. Streaming still needs local sidecar, stage and durable-output space.
+
+Python checks sidecar/footer identities, counts, extents and metadata hashes. For
+download-then-scan it additionally rereads the retained TAR to audit the whole
+digest and every member extent. In remote-stream-scan, image bytes have been
+discarded: their hashes and the whole-TAR hash come from the trusted Rust scanner,
+not an independent Python reread. The completion stamp is written only after all
+mode-specific stream, extent, size and hash checks pass.
 
 After separately authorized P3 compile/verify, `publish_local_package(...,
 production_transport=...)` verifies the same frozen game repository chain and new
@@ -127,18 +141,28 @@ proof. Package contract, P2 schemas/ObjectId/RecordKey and P3 snapshot identitie
 are unchanged. The offline acceptance tests exercise both modes -> P2 -> P3
 query -> audited package -> exact Rust image/JSON Range fetch.
 
-Conservative transport inflight reservations are `4*N + 65,536` for Range and
-`64*object_size + 4,194,304` for FullStream/report audit. The latter accounts for
-existing scanner report/JSON expansion, not whole Python raw-TAR buffering. The
-fixed 256 MiB inflight and 4 GiB disk limits are not increased. Together with
-1152 MiB stage and 1152 MiB durable allowance, the observed 1,401,159,680 B real TAR
-fails feasibility; both production builders remain BLOCKED for that target.
-The administrator gate conservatively retains the durable-build allowance across
-staging: existing root occupancy plus the two 1152 MiB leases currently also exceeds
-the 4 GiB cap for a small object. The lower-level offline pipelines passing is not
-an administrator production READY verdict. No root swap, cleanup, cap increase or
-new dynamic stage-cap contract is used to evade this limit.
-No synthetic throughput or whole-TAR streaming benchmark is a production claim.
+The shared Python/Rust resource contract uses the configured protocol/header
+allocation allowance `P = protocolmemory(capacity)` in addition to payload memory:
+
+- Range inflight: `32 MiB + 2*N + P`, where `N` is the requested chunk length.
+- Either scan mode inflight: `128 MiB + P`, independent of TAR length.
+- Scan sidecars: at most 32 MiB of member records, 32 MiB of JSON metadata and a
+  4 KiB footer. Per-line, per-path, per-JSON and 100,000-member limits also apply.
+- Transfer disk `T`: sidecar capacity plus 16 KiB allocation overhead; only
+  download-then-scan additionally includes the complete TAR length.
+- Stage disk: the transfer artifacts plus a 128 MiB SQLite stage and 1 MiB stage
+  allowance, or `T + 129 MiB`.
+- Durable phase: a 128 MiB stage, the 1152 MiB durable-build allowance and 16 KiB
+  allocation overhead. Download-then-scan also retains `T`; remote-stream-scan
+  releases its transfer artifacts before this phase.
+
+Administrator preflight admits the maximum of these phase footprints against
+existing root occupancy and pending leases. It does not sum allocations from
+nonoverlapping phases or reserve the durable-build allowance throughout staging.
+The legacy 256 MiB inflight and 4 GiB disk ceilings remain unchanged. A valid
+footprint alone does not establish production readiness: current occupancy,
+proof/binding, record/metadata bounds, deadline and all validation gates must also
+pass. Passing a synthetic or loopback check is not a production throughput claim.
 
 ## User fetch
 

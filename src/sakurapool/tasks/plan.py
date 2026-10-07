@@ -170,13 +170,15 @@ def selected_records(runtime, query, selection, capacity=None):
         live_bytes = 0
         if selection.limit == 0:
             return
+        # Catalog record IDs are lowercase ASCII hex. Reuse the canonical seed
+        # prefix while hashing exactly the same JSON bytes as the v1 algorithm.
+        prefix = hashlib.sha256(
+            b"sakurapool-task-sample-v1\x00[" + canonical(selection.seed) + b',"'
+        )
         for record in candidates():
-            rank = int.from_bytes(
-                hashlib.sha256(
-                    b"sakurapool-task-sample-v1\x00" + canonical([selection.seed, record.record_id])
-                ).digest(),
-                "big",
-            )
+            digest = prefix.copy()
+            digest.update(record.record_id.encode("ascii") + b'"]')
+            rank = int.from_bytes(digest.digest(), "big")
             entry = (-rank, -int(record.record_id, 16), record)
             if len(heap) < selection.limit or entry > heap[0]:
                 amount = _entry_bytes(entry)

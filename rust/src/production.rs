@@ -5,7 +5,7 @@ use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub const CONTROL_RESPONSE_BODY_CAP: u64 = 65_536;
@@ -862,7 +862,13 @@ fn transfer(
         a.phase = "scan";
         crate::scan_tar_reader_observed(
             DeadlineReader {
-                inner: File::open(t.output_root.join(&t.output_name)).map_err(|_| "output_io")?,
+                // Fixed local-spool read-ahead, within the scan scratch allowance.
+                // DeadlineReader stays outside the buffer so every parser read
+                // checks the deadline, including reads satisfied from read-ahead.
+                inner: BufReader::with_capacity(
+                    64 * 1024,
+                    File::open(t.output_root.join(&t.output_name)).map_err(|_| "output_io")?,
+                ),
                 deadline,
             },
             &limits,

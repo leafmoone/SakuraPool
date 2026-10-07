@@ -12,6 +12,7 @@ from ..capacity import CapacityConfig
 from ..download_naming import DEFAULT_TEMPLATE, FLAT_POLICY, FilenameConfig
 from ..fs_durability import sync_directory
 from .bounded_json import validate_file
+from .diagnostic_codes import _TRANSIENT_NETWORK_CODES
 from .flat_delivery import DeliveryMapping, publish_flat
 from .modelscope import EXACT_LOOKUP_PAGE_SIZE, ModelScopeDataset, _io_error
 from .prepared_fetch import stream_plan
@@ -363,43 +364,62 @@ def _fetch_publication_sample(
             obj = None
     if attempt_hook is not None:
         attempt_hook("NETWORK_START", {})
-    if obj is None:
-        owned = control is None
-        reused = owned and getattr(transport, "_persistent", False)
-        if reused:
-            control = transport.metadata_control()
-        elif owned:
-            control = GuardedTransport(
-                None,
-                offline_mode=offline,
-                trusted_hosts=frozenset({urlsplit(endpoint).hostname}),
-                token=transport._token,
-                credential_origin=endpoint,
-                same_origin_cookie=transport._cookie,
-                capacity=capacity,
-            )
-        try:
-            obj = exact_provider_lookup(control, endpoint, repo, revision, path, size, digest.hex())
-        finally:
-            if owned and not reused:
-                control.close()
-        if obj.repo_type != repo_type:
-            raise PublicationCorrupt("repository type mismatch")
-        obj = transport.verify_conditions(obj)
-        pub._verified[key] = obj
-        while len(pub._verified) > 64:
-            pub._verified.popitem(last=False)
-    else:
-        pub._verified.move_to_end(key)
-    bound = BoundObject(
-        ModelScopeDataset(transport, obj.origin, obj.repo_id).download_url(
-            obj.revision, obj.object_path
-        ),
-        size,
-        obj.revision,
-        obj.validator,
-        repository=obj.repo_id,
-    )
+    control_finalizing = False
+    try:
+        if obj is None:
+            owned = control is None
+            reused = owned and getattr(transport, "_persistent", False)
+            if reused:
+                control = transport.metadata_control()
+            elif owned:
+                control = GuardedTransport(
+                    None,
+                    offline_mode=offline,
+                    trusted_hosts=frozenset({urlsplit(endpoint).hostname}),
+                    token=transport._token,
+                    credential_origin=endpoint,
+                    same_origin_cookie=transport._cookie,
+                    capacity=capacity,
+                )
+            try:
+                obj = exact_provider_lookup(
+                    control, endpoint, repo, revision, path, size, digest.hex())
+            finally:
+                if owned and not reused:
+                    control_finalizing = True
+                    control.close()
+                    control_finalizing = False
+            if obj.repo_type != repo_type:
+                raise PublicationCorrupt("repository type mismatch")
+            obj = transport.verify_conditions(obj)
+            pub._verified[key] = obj
+            while len(pub._verified) > 64:
+                pub._verified.popitem(last=False)
+        else:
+            pub._verified.move_to_end(key)
+        bound = BoundObject(
+            ModelScopeDataset(transport, obj.origin, obj.repo_id).download_url(
+                obj.revision, obj.object_path
+            ),
+            size,
+            obj.revision,
+            obj.validator,
+            repository=obj.repo_id,
+        )
+    except RemoteIOError as primary:
+        # This boundary ends before a stage name, directory or image file exists.
+        # Unknown transport cleanup must not become permission to retry.
+        safe = not control_finalizing and not bool(getattr(primary, "finalization_secondary", ()))
+        failure = LightweightFetchError(
+            "publication_pre_stage",
+            delivered=False,
+            cleanup_safe=safe,
+            secondary=() if safe else ("CONTROL_FINALIZATION_FAILED",),
+            underlying=primary,
+        )
+        failure.recoverable = safe and primary.code in _TRANSIENT_NETWORK_CODES
+        failure.details["recoverable"] = failure.recoverable
+        raise failure from None
     image_size, meta_size = plan.image_bytes, plan.metadata_bytes
     stage = output / (".publication-fetch-" + secrets.token_hex(16))
     created, receipts = {}, {}

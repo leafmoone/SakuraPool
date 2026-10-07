@@ -543,8 +543,14 @@ class BudgetLedger:
         ):
             raise BudgetCorrupt("budget slot header/identity invalid")
         head = raw[:_HEADER_SHA_OFFSET] + bytes(32) + raw[_HEADER_SHA_OFFSET + 32 : _HEADER.size]
-        if hashlib.sha256(head + raw[_HEADER.size :]).digest() != digest or any(
-            raw[_HEADER.size + length :]
+        hasher = hashlib.sha256(head)
+        hasher.update(memoryview(raw)[_HEADER.size :])
+        padding_start = _HEADER.size + length
+        # Authenticate every byte and reject any nonzero padding without
+        # copying the slot or iterating over its zero-filled tail in Python.
+        if (
+            hasher.digest() != digest
+            or raw.count(0, padding_start) != len(raw) - padding_start
         ):
             raise BudgetCorrupt("budget slot checksum or padding invalid")
         offset = _HEADER.size

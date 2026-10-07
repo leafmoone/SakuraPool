@@ -31,6 +31,12 @@ hashes. The provider SHA is checked before publication. Python reads only JSON
 extents; object rows are spooled and fragments published per object. JSON over
 `adapter.max_json_bytes` is rejected, not truncated.
 
+Local file reads use a fixed 64 KiB buffer below the scanner's hash/count reader.
+Hashes, member offsets and trailing-data checks count bytes consumed by the
+parser. A rejected scan may have prefetched up to one buffer beyond that logical
+position; `max_bytes` is not an exact physical-read cap. This local read-ahead
+does not change HTTP body accounting or retain complete TAR contents in memory.
+
 The code SHA supplied by the build orchestrator must identify the actual installed
 wheel/source used. Syntax validation alone does not attest the deployment. Worker
 version and executable SHA, adapter contract and durable/runtime format versions

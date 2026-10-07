@@ -111,6 +111,12 @@ A provider that truncates or silently clamps pages may reach the bounded walk
 limit; that is an incomplete lookup, never evidence that the object is absent.
 Oversized metadata responses fail rather than increasing the byte limit.
 
+Python metadata requests use a 10-second connection timeout and a 60-second
+socket-inactivity timeout. These are not an absolute metadata-operation deadline:
+a slowly progressing header or body can take longer. The native transfer deadline
+described below starts with the Rust RPC and does not cover this Python
+control-plane work. Byte and pagination bounds still apply.
+
 ### Downloading on Linux
 
 Install and verify the complete publication for the desired source using the
@@ -315,6 +321,10 @@ Resume never reselects records. A published receipt must match task/operation,
 file/directory identities and indexed image SHA before `DONE/VERIFIED`; valid
 published output is reused, not redownloaded. Crashed `IN_PROGRESS` can become
 `READY` only after claimed-before-network or exact owned-temp cleanup evidence.
+A caught metadata/proof failure before image-stage creation carries explicit
+pre-stage provenance; only a classified transient with safe control finalization
+can use the bounded explicit-resume path. A missing stage alone is not evidence:
+older unmarked failures and crashes before the stage stamp remain blocked.
 Unknown/replaced output and ambiguous protocol failures remain `BLOCKED`, not
 blindly retried. Classified transient, unpublished failures require explicit
 resume; at most two recovery retries survive process restarts. This is not an
@@ -515,6 +525,10 @@ query and deterministic selection into a SQLite TaskDB. Resume uses those exact
 seq rows, never repeats selection or sampling. `task_id` distinguishes instances;
 `plan_digest` binds the reproducible plan. Modes are `all`, `first`, explicit
 `records`, and versioned SHA256 top-K `sample` with an explicit seed.
+Sampling reuses the canonical seed-hash prefix while preserving the versioned
+hash input, rank tie-breaks, complete candidate validation and heap limits. The
+same publication, query, seed and selection settings produce the same frozen
+record order and selection/plan digests.
 
 ```text
 sakura task create --publication PUB --query QUERY.json --selection first --limit 3 --task-dir TASK
@@ -621,7 +635,8 @@ not grant access, scanning or write permission.
 
 The explicit Rust administrator pipeline has download-then-scan and
 remote-stream-scan modes; see [R2 transport](docs/R2_TRANSPORT.md) for configuration
-and whole-TAR spool/memory limits, and [local partition builder](docs/local-partition-builder.md)
+and bounded sidecar, spool and phase-specific memory/disk limits, and
+[local partition builder](docs/local-partition-builder.md)
 for already-local TARs. These indexing/administration interfaces are separate from
 ordinary lightweight retrieval; ordinary fetch requires a verified local publication
 and never implicitly scans original archives.
@@ -810,6 +825,12 @@ deleted, and the P2 inventory fails closed on any undeclared file (stray
 partials included), on `object_id != rel@sha256(input)`, and on fragment rows
 that claim a different (dataset, object). `rid` is a dense `uint32` in
 canonical order `(dataset_id, object_id, sample_path, record_id)`.
+Inventory ownership checks validate projected Arrow batches without materializing
+every ordinary string row in Python; unsupported or invalid batches retain the
+row-level validation path. Catalog compilation checks object metadata one batch
+at a time, accepting identical duplicates and rejecting conflicting rows without
+retaining the whole fragment. These paths preserve input diagnostics, canonical
+ordering and published snapshot bytes.
 `locations.npy` is a rid-ordered numpy memmap (`object_idx u4, image_offset u8,
 image_size u8, metadata_offset u8, metadata_size u8, format_id u2, flags u1`)
 with an 82-byte identity trailer (`SAP3LOC1`, snapshot_id, rid_count) appended

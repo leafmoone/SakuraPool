@@ -477,16 +477,22 @@ def _catalog(inventory: P2Inventory, staging: Path, snap_id: str) -> int:
 
         objects = sorted(inventory.objects, key=lambda o: (o.dataset_id, o.object_id))
         for object_idx, obj in enumerate(objects):
-            rows = [r for batch in _read_batches(_fragment_path(obj, "objects"))
-                    for r in batch
-                    if r["dataset_id"] == obj.dataset_id
-                    and r["object_id"] == obj.object_id]
-            if not rows:
+            first = None
+            conflict = False
+            for batch in _read_batches(_fragment_path(obj, "objects")):
+                for row in batch:
+                    if (row["dataset_id"] == obj.dataset_id
+                            and row["object_id"] == obj.object_id):
+                        if first is None:
+                            first = row
+                        elif not conflict and row != first:
+                            conflict = True
+            if first is None:
                 _fail(f"objects fragment missing row: {obj.object_id}")
-            first = rows[0]
-            for extra in rows[1:]:
-                if extra != first:
-                    _fail(f"object metadata conflict: {obj.object_id}")
+            # Finish reading/filtering before reporting conflicts, as before.
+            # Retain only the first row rather than every identical duplicate.
+            if conflict:
+                _fail(f"object metadata conflict: {obj.object_id}")
             cat.execute(
                 "INSERT INTO objects VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (object_idx, first["storage_id"], first["object_id"],
