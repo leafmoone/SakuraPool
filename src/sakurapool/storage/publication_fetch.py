@@ -12,7 +12,7 @@ from ..capacity import CapacityConfig
 from ..download_naming import DEFAULT_TEMPLATE, FLAT_POLICY, FilenameConfig
 from .bounded_json import validate_file
 from .flat_delivery import DeliveryMapping, publish_flat
-from .modelscope import ModelScopeDataset, _io_error
+from .modelscope import EXACT_LOOKUP_PAGE_SIZE, ModelScopeDataset, _io_error
 from .prepared_fetch import stream_plan
 from .production import (
     _CONSERVATIVE_FINALIZED,
@@ -189,7 +189,9 @@ def exact_provider_lookup(control, endpoint, repo_id, revision, path, size, dige
     provider = ModelScopeDataset(control, endpoint, repo_id)
     hub = provider.legacy_hub_id()
     root = path.rpartition("/")[0] or "/"
-    found = provider.find_legacy_file(hub, revision, root=root, path=path)
+    found = provider.find_legacy_file(
+        hub, revision, root=root, path=path, page_size=EXACT_LOOKUP_PAGE_SIZE
+    )
     if (
         found.size != size
         or found.revision_candidate != revision

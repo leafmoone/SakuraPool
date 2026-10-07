@@ -27,8 +27,10 @@ from .location_gate import (
 )
 from .transport import GuardedTransport, RemoteIOError, TwoHopResult
 
-PAGE_SIZE = 200
-MAX_PAGES = 50  # provider request ceiling; result is capped earlier
+PAGE_SIZE = 200  # Existing discovery/admin default.
+MAX_PAGES = 50  # Absolute provider request ceiling.
+EXACT_LOOKUP_PAGE_SIZE = 1000
+MAX_TREE_ENTRIES = PAGE_SIZE * MAX_PAGES  # Preserve the original 10,000-entry walk bound.
 MAX_LISTED = 1000  # bounded inspect memory; never full-repo crawl
 _SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}\Z")
 
@@ -246,7 +248,7 @@ class ModelScopeDataset:
             or type(page) is not int
             or not 1 <= page <= MAX_PAGES
             or type(page_size) is not int
-            or not 1 <= page_size <= PAGE_SIZE
+            or not 1 <= page_size <= EXACT_LOOKUP_PAGE_SIZE
             or not isinstance(root, str)
             or (root != "/" and not _is_canonical_path(root))
         ):
@@ -420,6 +422,9 @@ class ModelScopeDataset:
         """Shared scope walk, yielding bounded pages with consistent raw evidence."""
         if type(max_pages) is not int or not 1 <= max_pages <= MAX_PAGES:
             raise ValueError("tree page bound invalid")
+        if type(page_size) is not int or not 1 <= page_size <= EXACT_LOOKUP_PAGE_SIZE:
+            raise ValueError("tree page size invalid")
+        # A larger page reduces round trips, not the total retained-entry budget.
         raw_count = 0
         paths = set()
         total_profile = None
@@ -455,6 +460,13 @@ class ModelScopeDataset:
                     phase="provider_listing_shape",
                 )
             total_profile = profile
+            if raw_count + page.raw_count > MAX_TREE_ENTRIES:
+                raise _io_error(
+                    self,
+                    "provider listing raw entry bound exceeded",
+                    code="provider_listing_incomplete",
+                    phase="provider_exact_lookup",
+                )
             if paths.intersection(page.raw_paths):
                 raise _io_error(
                     self,
@@ -474,6 +486,13 @@ class ModelScopeDataset:
             yield page
             if page.complete or (page.total is not None and raw_count == page.total):
                 return
+            if raw_count >= MAX_TREE_ENTRIES:
+                raise _io_error(
+                    self,
+                    "provider listing raw entry bound reached",
+                    code="provider_listing_incomplete",
+                    phase="provider_exact_lookup",
+                )
             if not page.continuation:
                 return
         raise _io_error(

@@ -91,6 +91,18 @@ custom CA bundle. HTTPS verification remains enabled. As with other applications
 using system trust, a trusted TLS-inspecting proxy can inspect traffic; never
 put tokens, cookies or signed URLs in logs.
 
+### Exact metadata lookup bounds
+
+Image retrieval uses 1,000-entry pages for exact pinned-object metadata lookup.
+The provider response limit remains 1 MiB; no lookup walks more than 10,000 raw
+entries, with the original ceiling of fifty logical tree-page reads applied
+independently. Smaller provider pages can continue within those same bounds.
+Repository identity, root scope, revision, size, SHA, duplicate-path and pagination
+checks still apply. Discovery/admin defaults remain 200 entries per page.
+A provider that truncates or silently clamps pages may reach the bounded walk
+limit; that is an incomplete lookup, never evidence that the object is absent.
+Oversized metadata responses fail rather than increasing the byte limit.
+
 ### Downloading on Linux
 
 Install and verify the complete publication for the desired source using the
