@@ -29,6 +29,11 @@ _STDERR_TAIL_BYTES = 64 * 1024
 _STDOUT_QUEUE_LINES = 1
 _QUEUE_WAIT_S = 0.05
 _TIMEOUT_S = 60.0
+# Mirrored by rust/src/production.rs; includes all hops and bounded backoff.
+PRODUCTION_HTTP_TIMEOUT_S = 30
+PRODUCTION_OPERATION_TIMEOUT_S = 4 * PRODUCTION_HTTP_TIMEOUT_S + 3 + 2
+PRODUCTION_BRIDGE_MARGIN_S = 5
+PRODUCTION_RPC_TIMEOUT_S = PRODUCTION_OPERATION_TIMEOUT_S + PRODUCTION_BRIDGE_MARGIN_S
 _SHUTDOWN_TIMEOUT_S = 2.0
 _REJECTED = "worker rejected request"
 _ZERO_BUDGET = {"body": 0, "disk": 0, "inflight": 0, "attempts": 0}
@@ -160,6 +165,13 @@ class RustWorker:
         if not binary.is_file():
             raise RustWorkerError("worker binary missing")
         self.binary = binary
+        if (
+            isinstance(timeout_s, bool)
+            or not isinstance(timeout_s, (int, float))
+            or not math.isfinite(timeout_s)
+            or timeout_s <= 0
+        ):
+            raise ValueError("worker timeout must be positive and finite")
         self.timeout_s = timeout_s
         from ..capacity import CapacityConfig
 

@@ -1,5 +1,10 @@
 # Rust transport and administrator interfaces
 
+This page describes ledger-backed administrator/indexing operations and the
+legacy canary-package fetch interface. Current TaskDB v4 downloads use the
+[lightweight download contract](../README.md#lightweight-downloads-current-contract)
+and do not instantiate this administrator budget ledger.
+
 These interfaces do not grant blanket network/index-build authorization.
 The actual production worker must advertise `production_transfer_v2` and
 `production_http_status_v1` before network attempt reservation. `profile.worker`
@@ -10,8 +15,10 @@ are not retried; UNKNOWN accounting stays pending.
 
 ## Boundaries
 
-- Python `ModelScopeDataset` controls repo identity, SDK legacy numeric-ID
-  resolution, revision candidates, bounded tree pages and canonical object paths.
+- Python `ModelScopeDataset` controls repo identity, legacy numeric-ID
+  resolution, revision candidates, bounded tree pages and canonical
+  object paths. The audited `modelscope-hub 0.4.0` routes are a reference only;
+  the SDK is not imported or required.
   Numeric IDs are not public repo identity; a candidate/echo is not immutable proof.
 - `ProviderObject` carries `repo_id`, `repo_type`, `origin`, `revision`,
   `object_path`, `object_size`, `validator` and `cdn_host`. Repository revision,
@@ -23,9 +30,12 @@ are not retried; UNKNOWN accounting stays pending.
   fields and restricted output artifacts are additive. Two hops are internal to
   one logical worker operation; no externally coordinated continuation protocol.
 - Origin receives Bearer plus optional SDK `m_session_id` cookie. The next request
-  uses a fresh credential-free client: no Authorization, Cookie or Referer. Both
-  clients disable proxies, automatic redirects and retries. Only the gated first
-  302 Location is accepted, and no further CDN redirect is followed.
+  uses a separate credential-free client: no Authorization, Cookie or Referer.
+  Production clients honor standard environment proxy configuration; synthetic
+  loopback transport disables proxies. Automatic redirects and HTTP-library
+  retries are disabled. The Rust CDN client reuses a bounded pool within a lane:
+  at most one idle connection per host, a 15-second idle timeout, with the pool
+  cleared on a scheme change or after more than eight distinct CDN authorities. Only the gated first 302 Location is accepted, and no further CDN redirect is followed.
 - Strict Location checks reject userinfo, fragments, encoded-host/path escapes,
   unexpected hosts, credential echo and uncertain/expired signatures. Signed URLs
   exist only in memory/anonymous pipes, never in config, argv, logs or manifests.
@@ -40,6 +50,23 @@ are not retried; UNKNOWN accounting stays pending.
   leases pending. Only trustworthy complete accounting is settled.
 - Post-canary diagnostics expose only phase, numeric HTTP status, read bytes and
   accounting completeness. They do not retroactively diagnose the real batch.
+
+## Timeouts and output durability
+
+Each production Rust transfer RPC has a 125-second total deadline, covering up
+to three 30-second Origin attempts, 1-second and 2-second backoffs, one 30-second
+CDN attempt, and two seconds of internal headroom. Every request/body timeout
+remains at most 30 seconds and is clamped to the remaining operation time. The
+Python response watchdog is 130 seconds, allowing five seconds for IPC and
+teardown; the handshake retains its separate 60-second timeout. Blocking local
+filesystem calls or pipe writes are not a hard real-time cancellation guarantee.
+Range, negative-proof and whole-object scan operations share this deadline; it
+is not a promise that an arbitrarily large object can complete within it.
+
+POSIX publication and owned-stage cleanup synchronize the affected directories
+before recording completion; directory-sync failures fail closed. Windows has
+no portable directory-fsync equivalent here: process-crash recovery is supported,
+but directory power-loss durability is not guaranteed.
 
 ## Configuration
 

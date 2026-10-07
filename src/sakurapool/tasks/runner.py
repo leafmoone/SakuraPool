@@ -6,13 +6,18 @@ from contextlib import ExitStack
 
 from ..fs_safety import plain_entry
 from ..storage.publication import load_publication
-from ..storage.publication_fetch import _cleanup_owned_stage, _content_sha
-from ..storage.retrieval import _real_output_root
 from .context import LEGACY_CAPACITY, effective_capacity
 from .plan import Selection, normalize_query, selected_records
 from .store import TaskDB, TaskError
 
 RECONCILE_PAGE_ROWS = 64
+
+
+def _real_output_root(*args, **kwargs):
+    # Keep offline task creation/inspection independent of remote transport extras.
+    from ..storage.retrieval import _real_output_root as check_root
+
+    return check_root(*args, **kwargs)
 
 
 def create_task(
@@ -160,6 +165,8 @@ def verify_delivery(task, item, publication=None):
         except (ValueError, OSError):
             raise TaskError("OUTPUT_CONFLICT", "recovery") from None
         return receipt
+    from ..storage.publication import sha as _content_sha
+
     try:
         image_name = image_filename(
             publication.runtime.image_format(location["format_id"]), task.image_extensions
@@ -250,6 +257,8 @@ def _identity(value):
 
 def _recover_stage(task, row):
     """Only a durable exact owned-stage identity allows cleanup; never name-only adoption."""
+    from ..storage.publication_fetch import _cleanup_owned_stage
+
     if (
         row["delivery"] != "NONE"
         or row["phase"] in {"PREPARED", "PUBLISH_INTENT", "PARTIAL", "PUBLISHED"}
@@ -341,7 +350,11 @@ def reconcile(task, publication=None):
                     "SELECT * FROM items WHERE seq=?", (row["seq"],)
                 ).fetchone()
                 verify_delivery(task, current, publication)
-                task.finish_item(row["seq"], state="DONE", operation=row["operation_id"])
+                # Hash/proof checks still run for DONE rows. Only identical persistence
+                # is skipped; inconsistent delivery or stale diagnostics get repaired.
+                if not (current["state"] == "DONE" and current["delivery"] == "VERIFIED"
+                        and current["code"] is None and current["diagnostic"] is None):
+                    task.finish_item(row["seq"], state="DONE", operation=row["operation_id"])
             except (TaskError, ValueError, OSError) as error:
                 classified = (error if isinstance(error, TaskError)
                               else TaskError("OUTPUT_UNCERTAIN", "recovery"))

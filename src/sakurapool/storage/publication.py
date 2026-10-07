@@ -17,7 +17,7 @@ import numpy as np
 import pyarrow.parquet as pq
 
 from ..runtime import RUNTIME_COMPILER
-from ..runtime.inventory import combine_inventories, load_p2_inventory
+from ..runtime.inventory import load_p2_inventory
 from ..runtime.snapshot import RuntimeSnapshot
 from .location_gate import _is_canonical_path, parse_repository
 
@@ -155,7 +155,7 @@ def p2_inputs(path):
         if p in roots:
             raise PublicationCorrupt("duplicate P2 root")
         roots.append(p)
-    return combine_inventories([load_p2_inventory(p) for p in roots])
+    return load_p2_inventory(roots)
 
 
 SCHEMA = """

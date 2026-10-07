@@ -26,6 +26,11 @@ python -m venv .venv
 python -m pip install '.[remote]'
 ```
 
+For offline indexing, runtime queries, publication verification and task
+creation/inspection/export, install `.` without extras. Network operations require
+`.[remote]` (Requests); the ModelScope SDK is not a runtime dependency. Its
+`modelscope-hub 0.4.0` routes remain the reference for the bounded provider adapter.
+
 PowerShell worker build from the repository root (the verified Windows GNU
 configuration; project-local output, no inherited shared Cargo target). Install
 the pinned toolchain first if it is not already present; MSYS2 UCRT64 must provide
@@ -78,8 +83,11 @@ the command-line workflow.
 Production requests honor standard `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and
 `NO_PROXY` environment configuration, including lower-case forms supported by
 Requests/reqwest. Python keeps automatic `.netrc` credential discovery disabled
-and resolves proxies separately for each request URL. A fresh CDN session never
-receives the origin bearer token or session cookie. Redirect checks and disabled
+and resolves proxies separately for each request URL. A separate credential-free
+CDN client never receives the origin bearer token or session cookie. The Rust worker reuses its
+bounded CDN connection pool within a lane (one idle connection per host,
+15-second idle timeout); scheme changes or more than eight distinct CDN
+authorities clear that pool. Redirect checks and disabled
 automatic redirect following remain in place; local synthetic loopback transport
 stays local even when proxies are configured.
 
@@ -294,7 +302,13 @@ validation, trusted origin/redirect policy, conditional positive/negative proof,
 finite Origin retry (at most 3) plus CDN hop, owned temporary files and atomic
 no-overwrite **per-file** publication. An image plus JSON is not pair-atomic:
 only the verified receipt/DONE state and exported manifest mark a complete delivery.
-Large images may stream over several configured chunks.
+Large images may stream over several configured chunks. Each production transfer
+RPC has a 125-second Rust deadline with request/body timeouts capped at 30 seconds
+and clamped to the time remaining; Python uses a 130-second response watchdog
+(the handshake retains 60 seconds). Blocking filesystem calls and pipe writes
+are not guaranteed to terminate at an exact wall-clock instant.
+The deadline includes the bounded Origin retries and CDN hop. Whole-object scans
+use the same bound, so large-object completion is not guaranteed.
 No change implies image decoding or conversion.
 
 Resume never reselects records. A published receipt must match task/operation,
@@ -305,6 +319,18 @@ Unknown/replaced output and ambiguous protocol failures remain `BLOCKED`, not
 blindly retried. Classified transient, unpublished failures require explicit
 resume; at most two recovery retries survive process restarts. This is not an
 end-to-end exactly-once or Windows directory power-loss guarantee.
+
+A hot rollback journal from an interrupted v4 task is validated using a bounded
+private recovered snapshot before the original task can be opened for writing.
+Read-only inspection/export uses that snapshot and leaves the original database
+and journal unchanged; an authorized writable open holds the runner lock and
+lets SQLite recover the original. Invalid, oversized or changing inputs fail
+closed. Recovery does not turn an uncertain delivery into a verified receipt.
+Automatic hot-journal recovery requires Python 3.11+ for exact SQLite error
+codes. Python 3.10 remains supported for ordinary operations, but this recovery
+case reports `TASKDB_RECOVERY_UNSUPPORTED` without writing the original. Reopen
+the same task using Python 3.11+; do not delete its journal. Hot legacy archives
+remain blocked rather than automatically migrated.
 
 Existing TaskDB v3 record-directory archives retain **read-only DB inspection and
 receipt-verified export compatibility**. Export creates a new manifest in that task

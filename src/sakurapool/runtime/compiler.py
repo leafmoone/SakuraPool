@@ -138,12 +138,14 @@ def _atomic_write(path: Path, data: bytes) -> None:
     os.replace(tmp, path)
 
 
-def _read_batches(path: Path) -> Iterator[list[dict[str, Any]]]:
+def _read_batches(
+    path: Path, *, columns: list[str] | None = None
+) -> Iterator[list[dict[str, Any]]]:
     with pq.ParquetFile(path) as handle:
         # Footer-only empty fragments are valid P2 output, not missing input.
         if handle.num_row_groups == 0:
             return
-        for batch in handle.iter_batches(batch_size=10_000):
+        for batch in handle.iter_batches(batch_size=10_000, columns=columns):
             yield batch.to_pylist()
 
 
@@ -225,7 +227,13 @@ def _stage1(inventory: P2Inventory, staging: Path) -> None:
             " has_metadata, image_format) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
         sample_count = 0
         for obj in objects:
-            for batch in _read_batches(_fragment_path(obj, "samples")):
+            # Inventory validation still checks the full schema and file hash.
+            # Avoid materializing unused text, tags and hashes as Python objects.
+            for batch in _read_batches(_fragment_path(obj, "samples"), columns=[
+                "dataset_id", "object_id", "sample_path", "record_id", "source",
+                "post_id", "offset_data", "size", "json_offset_data", "json_size",
+                "json_path", "image_format",
+            ]):
                 db.executemany(insert_sql, [
                     (s["dataset_id"], s["object_id"], s["sample_path"],
                      bytes.fromhex(s["record_id"]), s["source"], s["post_id"],
@@ -324,7 +332,10 @@ def _stage2(inventory: P2Inventory, staging: Path, chunk_size: int) -> None:
                     namespaces.append(ns)
                     ns_ids[ns] = ns_id
                 if known:
-                    namespace_known.setdefault(ns_id, BitMap()).add(rid)
+                    known_bitmap = namespace_known.get(ns_id)
+                    if known_bitmap is None:
+                        known_bitmap = namespace_known[ns_id] = BitMap()
+                    known_bitmap.add(rid)
                 for value, category in json.loads(tags_json):
                     key = (ns_id, value)
                     tag_id = tag_ids.get(key)
@@ -580,8 +591,14 @@ def _bitmaps(staging: Path, snap_id: str) -> None:
         dataset_bitmaps: dict[int, BitMap] = {}
         for rid, source_id, dataset_id in cat.execute(
                 "SELECT rid, source_id, dataset_id FROM records ORDER BY rid"):
-            source_bitmaps.setdefault(source_id, BitMap()).add(rid)
-            dataset_bitmaps.setdefault(dataset_id, BitMap()).add(rid)
+            source_bitmap = source_bitmaps.get(source_id)
+            if source_bitmap is None:
+                source_bitmap = source_bitmaps[source_id] = BitMap()
+            source_bitmap.add(rid)
+            dataset_bitmap = dataset_bitmaps.get(dataset_id)
+            if dataset_bitmap is None:
+                dataset_bitmap = dataset_bitmaps[dataset_id] = BitMap()
+            dataset_bitmap.add(rid)
         for source_id, bitmap in sorted(source_bitmaps.items()):
             store("source", source_id, bitmap)
         for dataset_id, bitmap in sorted(dataset_bitmaps.items()):

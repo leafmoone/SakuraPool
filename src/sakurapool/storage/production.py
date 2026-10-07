@@ -34,7 +34,7 @@ from .production_resources import (
     network_body_budget,
     protocolmemory,
 )
-from .rust_bridge import RustWorker, RustWorkerError
+from .rust_bridge import PRODUCTION_RPC_TIMEOUT_S, RustWorker, RustWorkerError
 from .transport import RemoteIOError
 
 MAX_RANGE = 8 * (1 << 20)
@@ -277,7 +277,7 @@ class RustProductionTransport:
     max_range_bytes = MAX_RANGE
 
     def _new_lightweight_worker(self):
-        return RustWorker(self.worker, capacity=self.capacity, lightweight=True, timeout_s=40)
+        return RustWorker(self.worker, capacity=self.capacity, lightweight=True)
 
     def _condition_proof(self, key):
         return (
@@ -358,6 +358,9 @@ class RustProductionTransport:
         worker = self._request_worker = self._lane_worker
         request_id = uuid.uuid4().hex
         try:
+            # Each logical transfer has its own finite budget; handshake keeps
+            # the bridge default. The lane lock prevents overlapping requests.
+            worker.timeout_s = PRODUCTION_RPC_TIMEOUT_S
             worker.send_raw(
                 (
                     json.dumps(
@@ -546,7 +549,7 @@ class RustProductionTransport:
                 raise RustWorkerError("execution channel closed")
         if not getattr(self, "_persistent", False):
             with worker_type(
-                self.worker, job_budget=budget, timeout_s=40, **self._worker_capacity()
+                self.worker, job_budget=budget, **self._worker_capacity()
             ) as worker:
                 yield worker
             return
@@ -630,7 +633,7 @@ class RustProductionTransport:
             raise RustWorkerError("execution generation budget exhausted")
         if self._lane_worker is None:
             worker = worker_type(
-                self.worker, job_budget=credit, timeout_s=40, **self._worker_capacity()
+                self.worker, job_budget=credit, **self._worker_capacity()
             )
             self._lane_worker = worker
             if "bounded_session_v1" not in worker.capabilities:
@@ -1154,6 +1157,9 @@ class RustProductionTransport:
                 raise
             lease1 = leases[0]
             request_id = uuid.uuid4().hex
+            # Each logical transfer has its own finite budget; handshake keeps
+            # the bridge default. The lane lock prevents overlapping requests.
+            worker.timeout_s = PRODUCTION_RPC_TIMEOUT_S
             worker.send_raw(
                 (
                     json.dumps(

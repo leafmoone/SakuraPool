@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 from ..capacity import CapacityConfig
 from ..download_naming import DEFAULT_TEMPLATE, FLAT_POLICY, FilenameConfig
+from ..fs_durability import sync_directory
 from .bounded_json import validate_file
 from .flat_delivery import DeliveryMapping, publish_flat
 from .modelscope import EXACT_LOOKUP_PAGE_SIZE, ModelScopeDataset, _io_error
@@ -409,12 +410,14 @@ def _fetch_publication_sample(
         stage.mkdir()
         stage_stat = stage.lstat()
         stage_identity = (stage_stat.st_dev, stage_stat.st_ino)
+        sync_directory(output)
         if attempt_hook is not None:
             attempt_hook("STAGED", {"name": stage.name, "identity": list(stage_identity)})
         image_digest = hashlib.sha256()
         # A single exclusive writer; hash is accumulated inside each payload lease.
         with (stage / ("image" + suffix)).open("xb") as f:
             created["image" + suffix] = _file_identity(f)
+            sync_directory(stage)
             if attempt_hook is not None:
                 attempt_hook(
                     "CREATED",
@@ -446,6 +449,7 @@ def _fetch_publication_sample(
             state["code"] = "publication_write"
             with (stage / "metadata.json").open("xb") as f:
                 created["metadata.json"] = _file_identity(f)
+                sync_directory(stage)
                 if attempt_hook is not None:
                     attempt_hook(
                         "CREATED",
@@ -482,6 +486,8 @@ def _fetch_publication_sample(
                         for final_name, staged_name in zip(delivery_mapping.names,
                                                           delivery_mapping.staged_names)},
         }
+        sync_directory(stage)
+        sync_directory(output)
         # After this intent-bearing boundary never delete downloaded or partially published data.
         prepared = True
         if attempt_hook is not None:

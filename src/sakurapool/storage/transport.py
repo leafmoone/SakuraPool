@@ -29,6 +29,7 @@ from urllib3.util.retry import Retry
 
 from ..capacity import CapacityConfig
 from .budget import MIB, BudgetLedger, Reservation
+from .diagnostic_codes import _SAFE_CODES, _SAFE_PHASES
 from .location_gate import (
     LocationRejected,
     RepositoryConfigError,
@@ -49,88 +50,6 @@ MAX_ATTEMPTS = 3  # redirects + retries + expired-URL resolution share this ceil
 _CONTENT_RANGE = re.compile(r"bytes ([0-9]+)-([0-9]+)/([0-9]+)\Z")
 
 
-_SAFE_CODES = frozenset(
-    {
-        "remote_io",
-        "network_ambiguous",
-        "WORKER_CAPABILITY_UNAVAILABLE",
-        "http_status",
-        "metadata_encoding",
-        "redirect_policy",
-        "invalid_json",
-        "provider_shape",
-        "provider_rejection",
-        "retry_policy",
-        "provider_page_shape",
-        "provider_entry_shape",
-        "provider_entry_type",
-        "provider_entry_path",
-        "provider_entry_duplicate",
-        "provider_entry_scope",
-        "provider_entry_size",
-        "provider_entry_revision_shape",
-        "provider_entry_digest",
-        "provider_listing_incomplete",
-        "provider_object_absent",
-        "provider_total_conflict",
-        "provider_page_repeat",
-        "publication_image_sha",
-        "publication_write",
-        "publication_publish",
-        "publication_accounting",
-        "publication_range",
-        "publication_metadata",
-        "worker_timeout",
-        "worker_eof",
-        "worker_protocol",
-        "validator_missing",
-        "redirect",
-        "location_encoding",
-        "location_invalid",
-        "validator_mismatch",
-        "cdn_status",
-        "origin_status",
-        "conditional_unsupported",
-        "body_framing",
-        "content_range",
-        "body_length",
-        "body_io",
-        "scan_failed",
-        "metadata_limit",
-        "origin_transport",
-        "cdn_transport",
-        "origin_timeout",
-        "origin_connect",
-        "origin_request",
-        "cdn_timeout",
-        "cdn_connect",
-        "cdn_request",
-        "rejected",
-    }
-)
-_SAFE_PHASES = frozenset(
-    {
-        "transport",
-        "metadata_send",
-        "metadata_headers",
-        "metadata_body",
-        "provider_revision_shape",
-        "provider_repository_shape",
-        "provider_tree_shape",
-        "provider_repository_request",
-        "provider_tree_request",
-        "provider_listing_shape",
-        "provider_exact_lookup",
-        "publication_fetch",
-        "worker",
-        "response_headers",
-        "two_hop_redirect",
-        "origin",
-        "cdn",
-        "body",
-        "scan",
-    }
-)
 
 
 class RemoteIOError(RuntimeError):
@@ -693,8 +612,6 @@ class GuardedTransport:
         )
         try:
             if hop1.status_code != 302:
-                hop1.close()
-                self._settle(lease1)  # non-302 body not read: 0 known
                 raise RemoteIOError(
                     "two-hop expects 302 at origin",
                     code="redirect_policy",
@@ -718,14 +635,16 @@ class GuardedTransport:
                 )
             raw_location = locations[0]
         except RemoteIOError:
-            hop1.close()
             self._settle(lease1)
             raise
         except Exception:
-            hop1.close()
             raise _AmbiguousRead(
                 "two-hop hop1 handling failed; reservation retained", phase="two_hop_redirect"
             ) from None
+        finally:
+            # No origin body is read, even on success, gate rejection or a
+            # failing ledger settlement. Release its socket before hop two.
+            hop1.close()
         self._settle(lease1)  # 302 body 0, known
         try:
             # The one-shot approval is generated FROM this hop-1 observation:

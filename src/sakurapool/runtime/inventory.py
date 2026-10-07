@@ -72,16 +72,27 @@ def combine_inventories(inventories: list[P2Inventory]) -> P2Inventory:
         _fail("no P2 inputs provided")
     if len(inventories) == 1:
         return inventories[0]
+    verified_inventories = []
+    for inventory in inventories:
+        # Public callers may construct dataclasses or mutate the input on disk.
+        verified = load_p2_inventory(inventory.root)
+        if verified.source_fingerprint != inventory.source_fingerprint:
+            _fail("inventory changed before combine")
+        verified_inventories.append(verified)
+    return _combine_verified_inventories(verified_inventories)
+
+
+def _combine_verified_inventories(inventories: list[P2Inventory]) -> P2Inventory:
+    """Combine inputs validated in this operation, without a second disk scan.
+
+    Only the loader and the revalidating public combine entry point use this
+    helper; no caller-provided inventory is trusted without loading it first.
+    """
     objects = []
     seen = set()
     paths = set()
     datasets = {}
-    for inventory in inventories:
-        # Revalidate disk inputs: callers cannot bypass integrity checks by
-        # constructing a P2Inventory dataclass themselves.
-        verified = load_p2_inventory(inventory.root)
-        if verified.source_fingerprint != inventory.source_fingerprint:
-            _fail("inventory changed before combine")
+    for verified in inventories:
         for dataset in {obj.dataset_id for obj in verified.objects}:
             contract = _json([verified.contract["adapter"], verified.contract["hash_images"]])
             if dataset in datasets and datasets[dataset] != contract:
@@ -333,7 +344,9 @@ def load_p2_inventory(
     if not roots:
         _fail("at least one P2 index directory is required")
     if len(roots) > 1:
-        return combine_inventories([load_p2_inventory(root) for root in roots])
+        return _combine_verified_inventories([
+            load_p2_inventory(root, _row_batch_size=_row_batch_size) for root in roots
+        ])
     all_objects: list[P2Object] = []
     contracts: list[dict[str, Any]] = []
     for root_value in roots:

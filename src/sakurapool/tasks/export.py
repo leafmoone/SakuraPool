@@ -3,8 +3,8 @@
 import os
 from pathlib import Path
 
+from ..fs_safety import plain_entry
 from ..storage.publication import load_publication
-from ..storage.retrieval import _real_output_root
 from .plan import canonical
 from .runner import check_publication_identity, verify_delivery
 from .store import TaskDB, TaskError
@@ -21,7 +21,8 @@ def export_task(directory, manifest):
 def _export_lightweight(task, manifest):
     with load_publication(task.meta("publication_path"), full_verify=True) as publication:
         check_publication_identity(task, publication)
-        _real_output_root(manifest.parent)
+        for directory in (manifest.parent, *manifest.parent.parents):
+            plain_entry(directory, directory=True)
         if os.path.lexists(manifest):
             raise TaskError("EXPORT_CONFLICT", "export")
         if manifest.parent != task.directory:

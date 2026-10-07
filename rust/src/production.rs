@@ -7,11 +7,28 @@ use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub const CONTROL_RESPONSE_BODY_CAP: u64 = 65_536;
 pub const NEGATIVE_CONDITION_BODY_CAP: u64 = CONTROL_RESPONSE_BODY_CAP;
 pub const ORIGIN_STATUS_MAX_ATTEMPTS: u64 = 3;
 pub const HTTP_ATTEMPTS_MAX: u64 = ORIGIN_STATUS_MAX_ATTEMPTS + 1;
+// Mirrored by Python rust_bridge.py. All modes share the same finite policy:
+// four 30s HTTP attempts + 1s/2s backoff + 2s local headroom.
+pub const HTTP_TIMEOUT_SECS: u64 = 30;
+pub const OPERATION_TIMEOUT_SECS: u64 = HTTP_ATTEMPTS_MAX * HTTP_TIMEOUT_SECS + 3 + 2;
+
+fn remaining(deadline: Instant, code: &'static str) -> Result<Duration, &'static str> {
+    deadline.checked_duration_since(Instant::now())
+        .filter(|value| !value.is_zero()).ok_or(code)
+}
+struct DeadlineReader<R> { inner: R, deadline: Instant }
+impl<R: Read> Read for DeadlineReader<R> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        remaining(self.deadline, "operation_timeout")
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "operation_timeout"))?;
+        self.inner.read(bytes)
+    }
+}
 
 pub fn network_body_budget(size: u64, wrong: bool) -> Result<u64, &'static str> {
     let control = CONTROL_RESPONSE_BODY_CAP.checked_add(1).ok_or("production_budget")?;
@@ -366,7 +383,7 @@ fn client(loopback: bool) -> Result<Client, &'static str> {
         .pool_max_idle_per_host(1)
         .pool_idle_timeout(Duration::from_secs(15))
         .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
         .build()
         .map_err(|_| "client_failed")
 }
@@ -603,6 +620,7 @@ fn transfer(
     a: &mut Accounting,
     context: &mut ExecutionContext,
 ) -> Result<serde_json::Value, &'static str> {
+    let deadline = Instant::now() + Duration::from_secs(OPERATION_TIMEOUT_SECS);
     let url = origin(t)?;
     let mut output = if t.mode == "remote-stream-scan" {
         None
@@ -649,10 +667,12 @@ fn transfer(
         a.etag_present = false;
         a.etag_is_strong = false;
         a.content_encoding_present = false;
+        let timeout = remaining(deadline, "origin_timeout")?
+            .min(Duration::from_secs(HTTP_TIMEOUT_SECS));
         a.attempts += 1;
         origin_attempt += 1;
         let mut r = req.try_clone().ok_or("network_ambiguous")?
-            .send().map_err(|error| network_error(&error, true))?;
+            .timeout(timeout).send().map_err(|error| network_error(&error, true))?;
         a.observe_headers(&r);
         headers(&r, t.http_header_bytes)?;
         drain_control(&mut r, a)?;
@@ -660,9 +680,11 @@ fn transfer(
         if matches!(status, 400 | 403) && origin_attempt < ORIGIN_STATUS_MAX_ATTEMPTS {
             a.origin_status_retried += 1;
             drop(r);
-            context.retry_sleep.unwrap_or(std::thread::sleep)(
-                Duration::from_secs(1 << (origin_attempt - 1)),
-            );
+            let pause = Duration::from_secs(1 << (origin_attempt - 1));
+            if remaining(deadline, "origin_timeout")? <= pause {
+                return Err("origin_timeout");
+            }
+            context.retry_sleep.unwrap_or(std::thread::sleep)(pause);
             continue;
         }
         if status != 302 {
@@ -698,9 +720,11 @@ fn transfer(
     a.etag_present = false;
     a.etag_is_strong = false;
     a.content_encoding_present = false;
+    let timeout = remaining(deadline, "cdn_timeout")?
+        .min(Duration::from_secs(HTTP_TIMEOUT_SECS));
     a.attempts += 1;
     a.complete = false;
-    let mut r = req.send().map_err(|error| network_error(&error, false))?;
+    let mut r = req.timeout(timeout).send().map_err(|error| network_error(&error, false))?;
     a.observe_headers(&r);
     headers(&r, t.http_header_bytes)?;
     a.complete = false;
@@ -717,6 +741,7 @@ fn transfer(
             .ok_or("output_io")?
             .sync_all()
             .map_err(|_| "output_io")?;
+        remaining(deadline, "body_io")?;
         return Ok(serde_json::json!({"status":412,"cdn_host":target.host_str(),"bytes":0}));
     }
     if status != if t.mode == "range" { 206 } else { 200 } {
@@ -768,6 +793,7 @@ fn transfer(
         let mut payload = 0u64;
         let mut eof = false;
         while payload < size + 1 {
+            remaining(deadline, "body_io")?;
             let cap = ((size + 1 - payload) as usize).min(chunk.len());
             let n = r.read(&mut chunk[..cap]).map_err(|_| "body_io")?;
             if n == 0 {
@@ -792,6 +818,7 @@ fn transfer(
             .ok_or("output_io")?
             .sync_all()
             .map_err(|_| "output_io")?;
+        remaining(deadline, "body_io")?;
         return Ok(
             serde_json::json!({"bytes":payload,"sha256":format!("{:x}",hash.finalize()),"etag":etag,"status":status,"cdn_host":target.host_str()}),
         );
@@ -812,7 +839,8 @@ fn transfer(
             complete: &mut a.complete,
             total: &mut a.body,
         };
-        crate::scan_tar_reader_observed(&mut counted, &limits, observer)
+        crate::scan_tar_reader_observed(
+            DeadlineReader { inner: &mut counted, deadline }, &limits, observer)
             .map_err(public_scan_error)?
     } else {
         a.phase = "body";
@@ -833,7 +861,10 @@ fn transfer(
         drop(tee);
         a.phase = "scan";
         crate::scan_tar_reader_observed(
-            File::open(t.output_root.join(&t.output_name)).map_err(|_| "output_io")?,
+            DeadlineReader {
+                inner: File::open(t.output_root.join(&t.output_name)).map_err(|_| "output_io")?,
+                deadline,
+            },
             &limits,
             observer,
         )
@@ -842,12 +873,14 @@ fn transfer(
     if payload != size || report.size != size || !a.complete {
         return Err("body_length");
     }
+    remaining(deadline, "scan_failed")?;
     let mut result = sidecars.take().ok_or("report_missing")?.finish(&report)?;
     result["bytes"] = serde_json::json!(payload);
     result["sha256"] = serde_json::json!(report.whole_sha256);
     result["etag"] = serde_json::json!(etag);
     result["status"] = serde_json::json!(status);
     result["cdn_host"] = serde_json::json!(target.host_str());
+    remaining(deadline, "scan_failed")?;
     Ok(result)
 }
 pub fn run(t: Transfer) -> Outcome {

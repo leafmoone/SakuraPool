@@ -55,10 +55,10 @@ def _spec_from_dict(data: dict[str, Any]) -> "RuntimeQuerySpec":
 
 
 def _runtime_command(args: argparse.Namespace) -> int:
-    from .runtime import RuntimeSnapshot, combine_inventories, compile_runtime, load_p2_inventory
+    from .runtime import RuntimeSnapshot, compile_runtime, load_p2_inventory
 
     if args.runtime_command == "compile":
-        combined = combine_inventories([load_p2_inventory(directory) for directory in args.inputs])
+        combined = load_p2_inventory(args.inputs)
         summary = compile_runtime(combined, args.output, chunk_size=args.chunk_size)
         print(
             json.dumps(

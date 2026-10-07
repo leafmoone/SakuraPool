@@ -7,9 +7,10 @@ from dataclasses import dataclass
 from itertools import islice
 
 from ..download_naming import FLAT_POLICY, safe_basename, safe_output_path
+from ..fs_durability import publish_noreplace as _publish_directory
+from ..fs_durability import sync_directory
 from ..fs_safety import plain_entry
 from ..image_formats import SUPPORTED_IMAGE_EXTENSIONS
-from .retrieval import _publish_directory
 
 
 @dataclass(frozen=True)
@@ -152,6 +153,9 @@ def publish_flat(output, receipt, mapping, *, hook=None, intent=False, published
     if remaining or os.path.lexists(stage):
         check_stage(output, receipt,
                     [receipt["receipt"][name]["staged_name"] for name in remaining])
+    if os.path.lexists(stage):
+        sync_directory(stage)
+    sync_directory(output)
     if not intent and hook:
         hook("PUBLISH_INTENT", {})
     # A crash can leave an unacknowledged, already-moved member. Ack its exact identity.
@@ -170,8 +174,12 @@ def publish_flat(output, receipt, mapping, *, hook=None, intent=False, published
             hook("MEMBER_PUBLISHED", {"name": name})
         remaining = [n for n in remaining if n != name]
     verify_final(output, receipt, mapping)
+    sync_directory(output)
+    if os.path.lexists(stage):
+        sync_directory(stage)
     if hook:
         hook("PUBLISHED", {})
     if os.path.lexists(stage):
         check_stage(output, receipt, []).rmdir()
+        sync_directory(output)
     return output / mapping.names[0]

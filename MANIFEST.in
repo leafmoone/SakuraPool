@@ -12,8 +12,7 @@ prune rust/target
 prune build
 prune dist
 prune .venv
-exclude agents.md AGENTS.md plan.md MEMORY.md
+exclude agents.md AGENTS.md AGENT.md plan.md MEMORY.md
 exclude docs/P5A_PLAN.md docs/P5B_PLAN.md docs/P5_ROADMAP.md docs/PROJECT_RULES.md docs/index-builder-prep-v2-evidence.md
 recursive-exclude tools *
-include tools/p4_token_bootstrap.py
 global-exclude *.py[cod] *.log

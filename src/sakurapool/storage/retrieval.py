@@ -7,17 +7,16 @@ paths, member paths or expected hashes from record_id. It never scans TARs.
 
 from __future__ import annotations
 
-import ctypes
 import hashlib
 import os
 import re
 import secrets
-import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from ..fs_durability import publish_noreplace as _publish_directory
 from .budget import BudgetExceeded, BudgetLedger, Reservation
 from .transport import MAX_MEMBER, BoundObject, GuardedTransport, RemoteIOError
 
@@ -108,27 +107,6 @@ def _real_output_root(root: Path, ledger=None, *, physical_root=None) -> Path:
     if not root.resolve().is_relative_to(physical_root.resolve()):
         raise ValueError("output escaped fixed budget root")
     return root
-
-
-def _publish_directory(stage: Path, final: Path) -> None:
-    """Atomic directory publish with no-replace even under an external race."""
-    if os.name == "nt":  # MoveFile/CRT rename rejects an existing target.
-        os.rename(stage, final)
-    elif sys.platform == "linux":
-        libc = ctypes.CDLL(None, use_errno=True)
-        libc.renameat2.argtypes = (
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_uint,
-        )
-        libc.renameat2.restype = ctypes.c_int
-        if libc.renameat2(-100, os.fsencode(stage), -100, os.fsencode(final), 1):
-            err = ctypes.get_errno()
-            raise OSError(err, "atomic no-replace publish failed")
-    else:
-        raise RuntimeError("atomic no-replace directory publish is unavailable")
 
 
 def fetch_bounded_samples(

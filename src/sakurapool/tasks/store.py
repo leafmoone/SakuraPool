@@ -7,12 +7,14 @@ import json
 import os
 import sqlite3
 import sys
+import tempfile
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
 from ..capacity import CapacityConfig
 from ..download_naming import FLAT_POLICY, FilenameConfig, safe_output_path, stem_key
+from ..fs_durability import sync_directory
 from ..fs_safety import plain_entry
 from .context import LEGACY_CAPACITY, WORKSPACE_FORMAT, bootstrap_workspace, resolve_workspace
 from .plan import FORMAT, canonical, plan_digest, selection_digest
@@ -49,15 +51,19 @@ def _connect(path, *, readonly=False, capacity=None):
         isolation_level=None,
         timeout=5,
     )
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA foreign_keys=ON")
-    if not readonly:
-        db.execute("PRAGMA journal_mode=DELETE")
-        db.execute("PRAGMA synchronous=FULL")
-        db.execute("PRAGMA temp_store=MEMORY")
-        page_size = db.execute("PRAGMA page_size").fetchone()[0]
-        db.execute(f"PRAGMA max_page_count={capacity.task_db_bytes // page_size}")
-    return db
+    try:
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA foreign_keys=ON")
+        if not readonly:
+            db.execute("PRAGMA journal_mode=DELETE")
+            db.execute("PRAGMA synchronous=FULL")
+            db.execute("PRAGMA temp_store=MEMORY")
+            page_size = db.execute("PRAGMA page_size").fetchone()[0]
+            db.execute(f"PRAGMA max_page_count={capacity.task_db_bytes // page_size}")
+        return db
+    except BaseException:
+        db.close()
+        raise
 
 
 def _check_files(path, capacity):
@@ -69,6 +75,88 @@ def _check_files(path, capacity):
             plain_entry(sidecar)
             if suffix != "-journal" or sidecar.stat().st_size > capacity.task_journal_bytes:
                 raise TaskError("TASKDB_SIDECAR_CONFLICT")
+
+
+def _file_signature(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _recovery_snapshot(path, capacity):
+    """Bounded, optimistic snapshot; reject any replacement/change during the copy."""
+    _check_files(path, capacity)
+    paths = (path, Path(str(path) + "-journal"))
+    limits = (capacity.task_db_bytes, capacity.task_journal_bytes)
+    infos = [plain_entry(p).stat() for p in paths]
+    if any(info.st_nlink != 1 for info in infos):
+        raise TaskError("TASKDB_RECOVERY_INVALID", "recovery")
+    before = [_file_signature(info) for info in infos]
+    contents = []
+    for p, limit, expected in zip(paths, limits, before):
+        with p.open("rb") as stream:
+            if _file_signature(os.fstat(stream.fileno())) != expected:
+                raise TaskError("TASKDB_RECOVERY_RACE", "recovery", recoverable=True)
+            data = stream.read(limit + 1)
+            if len(data) > limit:
+                raise TaskError("TASKDB_RECOVERY_LIMIT", "recovery")
+            if _file_signature(os.fstat(stream.fileno())) != expected:
+                raise TaskError("TASKDB_RECOVERY_RACE", "recovery", recoverable=True)
+        contents.append(data)
+    _check_files(path, capacity)
+    if [_file_signature(plain_entry(p).stat()) for p in paths] != before:
+        raise TaskError("TASKDB_RECOVERY_RACE", "recovery", recoverable=True)
+    return contents, (before, [hashlib.sha256(data).digest() for data in contents])
+
+
+def _validate_journal(data, capacity):
+    """Bound SQLite rollback writes; reject external super-journal references.
+
+    Only synced rollback headers are replayed. An unsynced zero-magic tail is
+    ignored by SQLite, but every replayable page number and original DB size is
+    bounded before a writable SQLite connection is opened even on the snapshot.
+    """
+    magic = b"\xd9\xd5\x05\xf9\x20\xa1\x63\xd7"
+    if len(data) < 28 or data[:8] != magic or data[-8:] == magic:
+        raise TaskError("TASKDB_RECOVERY_INVALID", "recovery")
+    offset = 0
+    geometry = None
+    while offset + 28 <= len(data) and data[offset:offset + 8] == magic:
+        count = int.from_bytes(data[offset + 8:offset + 12], "big")
+        nonce = int.from_bytes(data[offset + 12:offset + 16], "big")
+        pages = int.from_bytes(data[offset + 16:offset + 20], "big")
+        sector = int.from_bytes(data[offset + 20:offset + 24], "big")
+        size = int.from_bytes(data[offset + 24:offset + 28], "big")
+        if (not 512 <= sector <= 65536 or sector & (sector - 1)
+                or not 512 <= size <= 65536 or size & (size - 1)
+                or pages * size > capacity.task_db_bytes):
+            raise TaskError("TASKDB_RECOVERY_LIMIT", "recovery")
+        if geometry is not None and geometry != (pages, sector, size):
+            raise TaskError("TASKDB_RECOVERY_INVALID", "recovery")
+        geometry = (pages, sector, size)
+        offset += sector
+        if count == 0xffffffff:
+            count, remainder = divmod(max(0, len(data) - offset), size + 8)
+            if remainder:
+                raise TaskError("TASKDB_RECOVERY_INVALID", "recovery")
+        if count == 0 or count > max(0, (len(data) - offset) // (size + 8)):
+            raise TaskError("TASKDB_RECOVERY_INVALID", "recovery")
+        for _ in range(count):
+            page = int.from_bytes(data[offset:offset + 4], "big")
+            if page == 0:
+                raise TaskError("TASKDB_RECOVERY_INVALID", "recovery")
+            if page * size > capacity.task_db_bytes:
+                raise TaskError("TASKDB_RECOVERY_LIMIT", "recovery")
+            checksum = nonce
+            for index in range(size - 200, 0, -200):
+                checksum = (checksum + data[offset + 4 + index]) & 0xffffffff
+            stored = int.from_bytes(data[offset + 4 + size:offset + 8 + size], "big")
+            if checksum != stored:
+                raise TaskError("TASKDB_RECOVERY_INVALID", "recovery")
+            offset += size + 8
+        offset = ((offset + sector - 1) // sector) * sector
+    # SQLite ignores an unsynced (zero-magic) tail header. Any other torn header
+    # is conservatively rejected rather than accepting a partial rollback.
+    if offset < len(data) and any(data[offset:offset + 8]):
+        raise TaskError("TASKDB_RECOVERY_INVALID", "recovery")
 
 
 def _bounded_meta(db, key, limit, *, missing=False):
@@ -114,7 +202,7 @@ def _bounded_meta(db, key, limit, *, missing=False):
 
 def safe_failure(details):
     """Fixed typed allowlist, no paths, messages, URLs, credentials or consumption."""
-    from ..storage.transport import _SAFE_CODES, _SAFE_PHASES
+    from ..storage.diagnostic_codes import _SAFE_CODES, _SAFE_PHASES
 
     if type(details) is not dict:
         return {}
@@ -165,7 +253,34 @@ class TaskDB:
         self.workspace = bootstrap_workspace(self.directory, workspace)
         self.capacity = self.workspace.capacity if self.workspace is not None else LEGACY_CAPACITY
         _check_files(self.path, self.capacity)
-        probe = _connect(self.path, readonly=True)
+        self.readonly = readonly
+        self._shadow = None
+        try:
+            probe = _connect(self.path, readonly=True)
+            try:
+                self._validate_probe(probe, readonly=readonly)
+            finally:
+                probe.close()
+        except sqlite3.OperationalError as error:
+            journal = Path(str(self.path) + "-journal")
+            if (getattr(error, "sqlite_errorcode", None) is None
+                    and os.path.lexists(journal)):
+                # Older Python cannot distinguish READONLY_ROLLBACK. Diagnose only;
+                # never use a message-string match to authorize original recovery.
+                with plain_entry(journal).open("rb") as stream:
+                    hot = stream.read(8) == b"\xd9\xd5\x05\xf9\x20\xa1\x63\xd7"
+                if hot:
+                    raise TaskError("TASKDB_RECOVERY_UNSUPPORTED", "recovery") from None
+            if getattr(error, "sqlite_errorcode", None) != getattr(
+                sqlite3, "SQLITE_READONLY_ROLLBACK", 776
+            ):
+                raise
+            self._open_recovered(readonly=readonly)
+            return
+        _check_files(self.path, self.capacity)
+        self.db = _connect(self.path, readonly=readonly, capacity=self.capacity)
+
+    def _validate_probe(self, probe, *, readonly):
         try:
             self.version = probe.execute("PRAGMA user_version").fetchone()[0]
             if self.version not in (1, 2, 3, 4):
@@ -206,11 +321,61 @@ class TaskDB:
                 raise TaskError("PLAN_IDENTITY_MISMATCH", "plan")
         except (ValueError, KeyError, TypeError, RecursionError):
             raise TaskError("TASK_HEADER_INVALID") from None
-        finally:
+
+    def _open_recovered(self, *, readonly):
+        # The restored header, not the uncommitted database header, decides eligibility.
+        # Read-only inspection owns only a disposable recovered snapshot.
+        if readonly:
+            self._recover_snapshot(readonly=True)
+        else:
+            with _runner_lock(self.directory) as check_lock:
+                self._recover_snapshot(readonly=False, check_lock=check_lock)
+
+    def _recover_snapshot(self, *, readonly, check_lock=None):
+        shadow = tempfile.TemporaryDirectory(prefix="sakurapool-task-recovery-")
+        probe = None
+        try:
+            original, fingerprint = _recovery_snapshot(self.path, self.capacity)
+            _validate_journal(original[1], self.capacity)
+            shadow_path = Path(shadow.name) / "task.sqlite"
+            shadow_path.write_bytes(original[0])
+            Path(str(shadow_path) + "-journal").write_bytes(original[1])
+            del original
+            probe = _connect(shadow_path, capacity=self.capacity)
+            _check_files(shadow_path, self.capacity)
+            # Recovery never upgrades archived tasks, including read-only inspection.
+            self._validate_probe(probe, readonly=False)
+            header = _bounded_meta(probe, "header", self.capacity.task_header_bytes)
+            count, digest = selection_digest(probe.execute(
+                "SELECT seq,rid,record_id,source,dataset,post_id FROM items ORDER BY seq"))
+            if count != header.get("selection_count") or digest != header.get("selection_digest"):
+                raise TaskError("PLAN_IDENTITY_MISMATCH", "plan")
+            if probe.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                raise TaskError("TASKDB_RECOVERY_INVALID", "recovery")
+            if _recovery_snapshot(self.path, self.capacity)[1] != fingerprint:
+                raise TaskError("TASKDB_RECOVERY_RACE", "recovery", recoverable=True)
             probe.close()
-        _check_files(self.path, self.capacity)
-        self.db = _connect(self.path, readonly=readonly, capacity=self.capacity)
-        self.readonly = readonly
+            probe = None
+            if readonly:
+                self.db = _connect(shadow_path, readonly=True)
+                self._shadow = shadow
+                shadow = None
+            else:
+                # Only now may SQLite perform its own rollback on the original files.
+                # Never copy a recovered database back or remove the original journal.
+                check_lock()
+                self.db = _connect(self.path, capacity=self.capacity)
+                try:
+                    self._validate_probe(self.db, readonly=False)
+                    self.validate_plan()
+                except BaseException:
+                    self.db.close()
+                    raise
+        finally:
+            if probe is not None:
+                probe.close()
+            if shadow is not None:
+                shadow.cleanup()
 
     @classmethod
     def create(cls, directory, workspace, header, rows, *, publication_path, image_extensions=None,
@@ -317,6 +482,13 @@ class TaskDB:
                 os.fsync(lock.fileno())
         finally:
             db.close()
+        # Persist the new database and both created namespaces before acknowledging
+        # creation. Failures preserve the task for inspection, never erase user data.
+        with path.open("r+b") as stream:
+            os.fsync(stream.fileno())
+        sync_directory(directory / "output")
+        sync_directory(directory)
+        sync_directory(directory.parent)
         return cls(directory, workspace=workspace)
 
     @contextmanager
@@ -415,9 +587,8 @@ class TaskDB:
         if type(limit) is not int or limit < 1:
             raise TaskError("TASK_IDENTITY_INVALID")
         # A positive Python integer may exceed SQLite's signed 64-bit binding range.
-        # Clip lookahead to actual task rows, never reject or cap the worker input.
-        available = self.db.execute("SELECT count(*) FROM items WHERE state='READY'").fetchone()[0]
-        limit = min(limit, available)
+        # Bound only the SQL binding; an indexed LIMIT must not scan all READY rows.
+        limit = min(limit, (1 << 63) - 1)
         rows = self.db.execute(
             "SELECT seq,rid,record_id FROM items WHERE state='READY' ORDER BY seq LIMIT ?", (limit,)
         ).fetchall()
@@ -654,53 +825,16 @@ class TaskDB:
     def runner_lock(self):
         if self.version != 4 or self.readonly:
             raise TaskError("TASKDB_READONLY")
-        lock = plain_entry(self.directory / "runner.lock").open("r+b")
-        try:
-            try:
-                if os.name == "nt":
-                    import msvcrt
-
-                    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
-                else:
-                    import fcntl
-
-                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                raise TaskError("RUNNER_BUSY", recoverable=True) from None
-            lock.seek(0)
-            if lock.read() != b"T":
-                raise TaskError("RUNNER_LOCK_INVALID")
-            try:
-                yield
-            finally:
-                primary = sys.exc_info()[1]
-                try:
-                    lock.seek(0)
-                    if os.name == "nt":
-                        msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
-                    else:
-                        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-                except BaseException:
-                    if primary is None:
-                        raise
-                    primary.task_secondary = (
-                        *getattr(primary, "task_secondary", ()),
-                        "TASK_UNLOCK_FAILED",
-                    )
-        finally:
-            primary = sys.exc_info()[1]
-            try:
-                lock.close()
-            except BaseException:
-                if primary is None:
-                    raise
-                primary.task_secondary = (
-                    *getattr(primary, "task_secondary", ()),
-                    "TASK_LOCK_CLOSE_FAILED",
-                )
+        with _runner_lock(self.directory):
+            yield
 
     def close(self):
-        self.db.close()
+        try:
+            self.db.close()
+        finally:
+            if self._shadow is not None:
+                self._shadow.cleanup()
+                self._shadow = None
 
     def __enter__(self):
         return self
@@ -712,3 +846,59 @@ class TaskDB:
             if primary is None:
                 raise
             primary.task_secondary = (*getattr(primary, "task_secondary", ()), "TASK_CLOSE_FAILED")
+
+
+@contextmanager
+def _runner_lock(directory):
+    lock = plain_entry(directory / "runner.lock").open("r+b")
+    try:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise TaskError("RUNNER_BUSY", recoverable=True) from None
+        lock.seek(0)
+        if lock.read(2) != b"T":
+            raise TaskError("RUNNER_LOCK_INVALID")
+        identity = _file_signature(os.fstat(lock.fileno()))
+
+        def check_lock():
+            if _file_signature(plain_entry(directory / "runner.lock").stat()) != identity:
+                raise TaskError("RUNNER_LOCK_INVALID")
+
+        check_lock()
+        try:
+            yield check_lock
+        finally:
+            primary = sys.exc_info()[1]
+            try:
+                lock.seek(0)
+                if os.name == "nt":
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            except BaseException:
+                if primary is None:
+                    raise
+                primary.task_secondary = (
+                    *getattr(primary, "task_secondary", ()),
+                    "TASK_UNLOCK_FAILED",
+                )
+    finally:
+        primary = sys.exc_info()[1]
+        try:
+            lock.close()
+        except BaseException:
+            if primary is None:
+                raise
+            primary.task_secondary = (
+                *getattr(primary, "task_secondary", ()),
+                "TASK_LOCK_CLOSE_FAILED",
+            )
+

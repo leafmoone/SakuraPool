@@ -16,7 +16,6 @@ rust/target/
 /tests/
 /rust/tests/
 /tools/*
-!/tools/p4_token_bootstrap.py
 /plan.md
 /agents.md
 /AGENTS.md
