@@ -12,8 +12,8 @@ interpreter is Python 3.13. PyArrow 18.1.0 / NumPy 2.2.6 do not provide Windows
 CPython 3.14 wheels. A newer version number alone does not establish compatibility.
 The Python wheel contains the Python package, not a prebuilt Rust executable.
 Build the worker from this repository or the source distribution with the committed
-Cargo.lock. The Windows worker build/hello was verified with
-Rust 1.98.1 GNU and MSYS2 UCRT64; native Debian 13 verification is recorded below. `rust/rust-toolchain.toml` pins
+Cargo.lock. The Windows build uses Rust 1.98.1 GNU and MSYS2 UCRT64.
+For native Linux deployment, use the explicit host toolchain below. `rust/rust-toolchain.toml` pins
 `1.98.1-x86_64-pc-windows-gnu`; it is not a native Linux/macOS toolchain pin.
 Choose the toolchain explicitly below: rustup selects directory pins from the
 launch directory and its parents, not from Cargo's `--manifest-path`.
@@ -41,40 +41,12 @@ $worker = (Resolve-Path rust/target/release/sakurapool-worker.exe).Path
 sakura --version
 ```
 
-The generic POSIX guidance below needs the actual native host triple.
-Debian 13 x86-64 build/hello and offline smoke checks are verified below;
-macOS and real authenticated image retrieval remain unverified.
-From the repository root, install Rust 1.98.1 for your actual native host and
-select it explicitly as `cargo +1.98.1-<native-host-triple>`. Replace the placeholder
-with your Linux/macOS host triple; do not enter `rust/` and rely on its Windows
-host override. The host needs its native linker, compiler and build dependencies;
-a cross-compilation `--target` flag is not a substitute for a native-host toolchain.
+### Native Linux deployment
 
-```console
-# Replace <native-host-triple> before running these commands.
-toolchain='1.98.1-<native-host-triple>'
-rustup toolchain install "$toolchain" --profile minimal
-env -u CARGO_TARGET_DIR cargo "+$toolchain" build --manifest-path rust/Cargo.toml --locked --release --bin sakurapool-worker --target-dir rust/target
-```
-
-On POSIX the executable path would be `rust/target/release/sakurapool-worker`;
-on Windows it has the `.exe` suffix. Keep its absolute path for the private
-connection profile below. Source distributions carry the Rust sources/lockfile;
-compiling the worker does not require image data or ModelScope credentials.
-After the matching host toolchain and native build tools are installed, a
-prepopulated Cargo dependency cache permits adding `--offline` to the build command.
-`--offline` does not install a missing toolchain, linker or dependency cache.
-
-## Debian 13 native Linux deployment and validation
-
-Validated on Debian GNU/Linux 13.6, x86-64, Python 3.12.14, Rust
-`1.98.1-x86_64-unknown-linux-gnu`, against main commit
-`84f381e0b9685f7c832ebd31d567283038e06b1c` on 2026-10-07.
-The release worker built successfully with the committed Cargo.lock. This is
-build/CLI/offline verification, **not a completed real-image throughput benchmark**.
-
-Install Python with venv support, a native C compiler/linker, and Rust from their
-official distributions. Then, from the repository root (Bash):
+On Debian 13 x86-64, use Python 3.12 or 3.13 with the pinned dependencies, a
+native C compiler/linker, and Rust 1.98.1. Install prerequisites through your
+system package manager and Rust's official distribution. From the repository
+root in Bash:
 
 ```bash
 python3 -m venv .venv
@@ -87,110 +59,68 @@ env -u CARGO_TARGET_DIR cargo +1.98.1-x86_64-unknown-linux-gnu build \
   --bin sakurapool-worker --target-dir rust/target
 worker="$(pwd)/rust/target/release/sakurapool-worker"
 sakura --version
-sakura config validate --config examples/index-config.json
-sakura validate examples/query.json
-sakura evaluate examples/query.json examples/rows.json
 ```
 
-Keep the explicit native toolchain: `rust/rust-toolchain.toml` still pins a
-Windows host. The Python wheel alone does not supply the worker. If your managed
-Linux environment restricts home-directory writes, set `CARGO_HOME` and
-`RUSTUP_HOME` to writable project-local directories before installing and building.
-Do not disable network/access controls to work around a blocked provider.
+`rust/rust-toolchain.toml` pins a Windows host, so retain the explicit native
+Linux toolchain argument; do not rely on the directory override. On another
+architecture, select that host's native triple and linker. The executable on
+Linux is `rust/target/release/sakurapool-worker`, without `.exe`. The Python wheel
+does not contain a prebuilt worker. Source distributions include Rust sources
+and the lockfile. A populated toolchain/dependency cache allows adding `--offline`;
+it does not replace a missing compiler, linker or dependency cache.
 
-The Linux checks passed: pinned Python installation and `pip check`; CLI version,
-configuration and example query/evaluation; native release build; protocol-2 hello
-with `production_download_lightweight_v1` and exact execution-limit echo; a local
-three-record TAR index with computed image hashes; committed-index reuse; runtime
-compile, full verification and query; and rejection of zero workers. The local
-TAR is a synthetic functional fixture, not Danbooru data or a speed test.
-`cargo test --locked --release` completed but contains **zero Rust tests**.
-The `dot` branch adds 13 focused Python proxy/TLS/credential-isolation tests;
-these pass with `python -m unittest discover -s tests -v`. This is focused
-coverage, not the complete development suite on `dev`.
+For restricted home directories, set `CARGO_HOME` and `RUSTUP_HOME` to writable
+locations before installing/building. No system-level service is required for
+the command-line workflow.
 
-### Reproducible Danbooru / six-worker benchmark
+### Proxy and certificate configuration
 
-“worker6” means `--workers 6`; the source query is `danbooru`. Install the complete
-pinned `sources/danbooru` publication using the acquisition example below (set
-`source = "danbooru"`), preserve its paths, and fully verify it. This source's
-12 index files total 2,978,602,701 bytes; do not count index installation as image
-throughput. Public index access does not authorize original-image access.
+Production requests honor standard `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and
+`NO_PROXY` environment configuration, including lower-case forms supported by
+Requests/reqwest. Python keeps automatic `.netrc` credential discovery disabled
+and resolves proxies separately for each request URL. A fresh CDN session never
+receives the origin bearer token or session cookie. Redirect checks and disabled
+automatic redirect following remain in place; local synthetic loopback transport
+stays local even when proxies are configured.
+
+Python uses `REQUESTS_CA_BUNDLE` or `CURL_CA_BUNDLE` when configured, otherwise an
+available system CA file/directory, then Requests' default. Rust uses native
+system roots (`rustls-tls-native-roots`); native-root settings such as
+`SSL_CERT_FILE` apply. Keep the clients' trust settings consistent when using a
+custom CA bundle. HTTPS verification remains enabled. As with other applications
+using system trust, a trusted TLS-inspecting proxy can inspect traffic; never
+put tokens, cookies or signed URLs in logs.
+
+### Downloading on Linux
+
+Install and verify the complete publication for the desired source using the
+instructions below. Store the absolute native worker path in the private task
+profile. Credentials must reference an authorized environment/file; do not put
+the token itself in the profile or repository.
+
+For images larger than the default 8 MiB per-image capacity, create a workspace
+with a suitable technical capacity before creating the task. The example below
+allows images up to 32 MiB while leaving individual network chunks at 8 MiB;
+choose a larger image capacity when the selected images require it.
 
 ```bash
+printf '%s\n' '{"capacity":{"image_max_bytes":33554432}}' > capacity.json
+sakura workspace init WORKSPACE --config capacity.json
+printf '%s\n' '{"sources":["danbooru"]}' > source-query.json
 sakura publication verify local-index/sources/danbooru --full
-printf '%s\n' '{"sources":["danbooru"]}' > danbooru-query.json
-python tools/prepare_linux_benchmark.py \
-  --publication local-index/sources/danbooru --output benchmark-selection \
-  --seed linux-danbooru-1000-v1
-sakura task create --publication local-index/sources/danbooru \
-  --query benchmark-selection/danbooru-query.json --selection records \
-  --records benchmark-selection/danbooru-records.json --task-dir DANBOORU_1000
-sakura task inspect DANBOORU_1000
-# Use a private task profile with the absolute native worker path.
-# Supply authorized ModelScope credentials through your environment's secure flow.
-/usr/bin/time -v sakura task run DANBOORU_1000 --profile TASK_PROFILE.json --workers 6
-sakura task inspect DANBOORU_1000
-sakura task export DANBOORU_1000 --manifest DANBOORU_1000/manifest.jsonl
+sakura task create --workspace WORKSPACE \
+  --publication local-index/sources/danbooru --query source-query.json \
+  --selection first --limit 100 --task-dir WORKSPACE/tasks/images
+sakura task run WORKSPACE/tasks/images --profile TASK_PROFILE.json --workers 6
+sakura task inspect WORKSPACE/tasks/images
+sakura task export WORKSPACE/tasks/images --manifest WORKSPACE/tasks/images/manifest.jsonl
 ```
 
-These are follow-on commands, **not yet a claim that the 1,000-image run passed**.
-The helper full-verifies the publication, deterministically ranks eligible TARs
-and records by the seed, and freezes 1,000 records with unique indexed image
-hashes from six TARs. The per-TAR counts are 167/167/167/167/166/166, interleaved
-round-robin to exercise six lanes and cache reuse. This is a locality-friendly
-workload, not a representative global-random Danbooru sample.
-Use fresh selection/task/output directories, retain the generated selection.json
-and record IDs, and check all deliveries against indexed SHA256 and exact sizes.
-Report unique record IDs and unique content SHA256 separately: 1,000 selected
-records do not necessarily mean 1,000 unique image contents. Record failures,
-retries, elapsed time, delivered image bytes, metadata bytes if requested, and
-observed active lanes/distinct TARs. Do not silently drop failed or duplicate
-records or count a resumed cached file as newly downloaded bytes.
+Worker count is explicit; images in the same TAR can serialize despite multiple
+workers. Existing tasks freeze their selection and execution capacity. Use the
+supported resume workflow for interrupted tasks; do not replace their database,
+reuse a task directory for a new selection or overwrite delivered files.
 
-Report image goodput as verified newly downloaded image bytes divided by timed
-run seconds (MiB/s = bytes / seconds / 2**20; Mbit/s = bytes * 8 / seconds / 1e6).
-It is different from wire throughput, which includes metadata, headers, retries
-and transport overhead. Report bandwidth utilization only with a verified,
-applicable bandwidth-capacity denominator; nominal NIC speed, package-install
-speed and unrelated speed tests are not that denominator.
-
-Six requested workers do not guarantee six active transfers. Requests for the
-same TAR are deliberately gated. A seeded sample helps spread work across TARs;
-inspect the actual distribution. The coordinator's 2L candidate window (12 for
-six lanes) can also leave lanes idle behind a same-TAR prefix even when later
-independent TARs exist. Compare the same frozen record set before tuning worker
-count or scheduling, and preserve conditional proofs, retries, hashes and
-no-overwrite guarantees. No throughput improvement has been measured here.
-
-**Validation status (2026-10-07, in progress):** authorized access now works.
-The project control plane and native Rust worker have passed live metadata,
-positive Range and negative-condition probes. The public index installation
-and real 1,000-image run are still being completed; no final image throughput
-or bandwidth-utilization result is claimed at this checkpoint. The earlier
-anonymous original-repository requests returned provider authentication code
-`10020000500`; credentials remain outside source, profiles, logs and README.
-
-### Environment proxies and TLS on Linux
-
-Production HTTP requests now honor ordinary `HTTP_PROXY`, `HTTPS_PROXY`,
-`ALL_PROXY` and `NO_PROXY` environment configuration, including the lower-case
-forms supported by Requests/reqwest. No separate SakuraPool proxy opt-in is
-required. Python keeps `trust_env=False` only to prevent unrelated `.netrc`
-credential discovery; it explicitly resolves proxies per request URL. The fresh
-CDN session separately resolves its proxy and never receives the origin bearer
-or session cookie. Redirect validation and no automatic redirect following remain.
-Synthetic loopback tests still bypass proxies, even for mixed-case HTTP schemes.
-
-Python uses `REQUESTS_CA_BUNDLE` / `CURL_CA_BUNDLE` when configured, otherwise
-an available system CA file/directory (then Requests' default). Rust uses native
-system roots through reqwest's `rustls-tls-native-roots` feature. Standard native
-root settings such as `SSL_CERT_FILE` apply to the Rust loader. If configuring a
-custom CA location, make both clients' trust settings consistent. HTTPS verification
-is never disabled. No new trust anchor was installed in the validated environment;
-its already-provisioned system CA is used for the platform's managed egress.
-As with other applications using system trust, a trusted TLS-inspecting proxy
-can inspect traffic. Secrets and signed redirect URLs must not be put in logs.
 
 ## Public source indexes and explicit installation
 

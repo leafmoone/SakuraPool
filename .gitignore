@@ -26,3 +26,22 @@ rust/target/
 /docs/PROJECT_RULES.md
 /docs/index-builder-prep-v2-evidence.md
 *.log
+
+# Keep local credentials, indexes, outputs and development traces out of Git.
+/.cargo/
+/.private_env/
+/.env
+/.env.*
+/artifacts/
+/benchmarks/
+/notes/
+/scratch/
+/local-index/
+/DANBOORU_*/
+/LINUX_BENCHMARK/
+/benchmark-selection*/
+/TASK_PROFILE*.json
+/source-query.json
+/capacity.json
+/WORKSPACE/
+/docs/linux-validation-*.json
