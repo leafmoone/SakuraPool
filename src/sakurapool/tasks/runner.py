@@ -2,6 +2,7 @@
 
 import json
 import os
+from contextlib import ExitStack
 
 from ..fs_safety import plain_entry
 from ..storage.publication import load_publication
@@ -442,9 +443,17 @@ def preflight(task, pub, item, transport, *, prepared=None, **_ignored):
     return output
 
 
+def _check_task_transport(task, transport):
+    if getattr(transport, "ledger", None) is not None:
+        raise TaskError("CONSUMPTION_LEDGER_UNSUPPORTED", "preflight")
+    if effective_capacity(transport, task.capacity) != task.capacity:
+        raise TaskError("TASK_CAPACITY_CONFLICT", "preflight")
+    _real_output_root(task.directory, physical_root=getattr(transport, "root", None))
+
+
 def run_task(
     directory,
-    transport,
+    transport=None,
     *,
     control=None,
     resume=False,
@@ -454,47 +463,59 @@ def run_task(
 ):
     if type(workers) is not int or workers < 1:
         raise TaskError("WORKERS_INVALID", "preflight")
-    with TaskDB(directory) as task, task.runner_lock():
-        if getattr(transport, "ledger", None) is not None:
-            raise TaskError("CONSUMPTION_LEDGER_UNSUPPORTED", "preflight")
-        if effective_capacity(transport, task.capacity) != task.capacity:
-            raise TaskError("TASK_CAPACITY_CONFLICT", "preflight")
-        _real_output_root(task.directory, physical_root=getattr(transport, "root", None))
+    if transport is None and connection_profile is None:
+        raise TaskError("PROFILE_REQUIRED", "preflight")
+    with TaskDB(directory) as task, task.runner_lock(), ExitStack() as stack:
+        if transport is not None:
+            # Caller-owned transports retain their preflight order and lifecycle.
+            _check_task_transport(task, transport)
         if task.meta("state") in ("PAUSED", "CANCELLED", "FAILED", "BLOCKED") and not resume:
             raise TaskError("EXPLICIT_RESUME_REQUIRED")
-        with load_publication(task.meta("publication_path"), full_verify=True) as publication:
-            header = check_publication_identity(task, publication)
-            if connection_profile is not None:
-                from .profile import validate_allowlist
+        publication = stack.enter_context(
+            load_publication(task.meta("publication_path"), full_verify=True)
+        )
+        header = check_publication_identity(task, publication)
+        if connection_profile is not None:
+            from .profile import validate_allowlist
 
-                validate_allowlist(connection_profile, publication)
-            reconcile(task, publication)
-            with task.transaction() as db:
-                if resume:
-                    task.set_meta(db, "request", None)
-                task.set_meta(db, "state", "RUNNING")
+            validate_allowlist(connection_profile, publication)
+        if transport is None:
+            from .profile import connect_profile
+
+            # Credentials and worker creation follow verification under the same lock.
+            root = task.workspace.root if task.workspace is not None else task.directory
+            _real_output_root(task.directory, physical_root=root)
+            transport = stack.enter_context(
+                connect_profile(connection_profile, root=root, capacity=task.capacity)
+            )
+            _check_task_transport(task, transport)
+        reconcile(task, publication)
+        with task.transaction() as db:
+            if resume:
+                task.set_meta(db, "request", None)
+            task.set_meta(db, "state", "RUNNING")
+        try:
+            from .pipeline import run_pipeline
+
+            if workers != 1 and not hasattr(transport, "clone"):
+                raise TaskError("WORKER_CHANNEL_UNAVAILABLE", "preflight")
+            run_pipeline(
+                task,
+                publication,
+                transport,
+                workers=workers,
+                metadata=header["metadata"],
+                control=control,
+                fault_hook=fault_hook,
+            )
+            return task.inspect()
+        except BaseException as primary:
             try:
-                from .pipeline import run_pipeline
-
-                if workers != 1 and not hasattr(transport, "clone"):
-                    raise TaskError("WORKER_CHANNEL_UNAVAILABLE", "preflight")
-                run_pipeline(
-                    task,
-                    publication,
-                    transport,
-                    workers=workers,
-                    metadata=header["metadata"],
-                    control=control,
-                    fault_hook=fault_hook,
+                with task.transaction() as db:
+                    task.set_meta(db, "state", "FAILED")
+            except BaseException:
+                primary.task_secondary = (
+                    *getattr(primary, "task_secondary", ()),
+                    "TASK_FAILURE_PERSIST_FAILED",
                 )
-                return task.inspect()
-            except BaseException as primary:
-                try:
-                    with task.transaction() as db:
-                        task.set_meta(db, "state", "FAILED")
-                except BaseException:
-                    primary.task_secondary = (
-                        *getattr(primary, "task_secondary", ()),
-                        "TASK_FAILURE_PERSIST_FAILED",
-                    )
-                raise
+            raise

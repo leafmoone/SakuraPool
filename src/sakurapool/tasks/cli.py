@@ -118,24 +118,16 @@ def command(args):
 
             result = export_task(args.task_dir, args.manifest)
         else:
-            from ..storage.publication import load_publication
-            from .profile import connect_profile, read_profile, validate_allowlist
-            from .runner import check_publication_identity, run_task
+            from .profile import read_profile
+            from .runner import run_task
 
             profile = read_profile(args.profile)
-            with TaskDB(args.task_dir, readonly=True, workspace=workspace) as task:
-                with load_publication(task.meta("publication_path"), full_verify=True) as pub:
-                    check_publication_identity(task, pub)
-                    validate_allowlist(profile, pub)
-            root = workspace.root if workspace is not None else Path(args.task_dir).absolute()
-            with connect_profile(profile, root=root, capacity=capacity) as transport:
-                result = run_task(
-                    args.task_dir,
-                    transport,
-                    resume=action == "resume",
-                    connection_profile=profile,
-                    workers=args.workers,
-                )
+            result = run_task(
+                args.task_dir,
+                resume=action == "resume",
+                connection_profile=profile,
+                workers=args.workers,
+            )
         print(json.dumps(result, sort_keys=True))
         return 0
     except TaskError as error:

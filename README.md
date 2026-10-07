@@ -408,6 +408,13 @@ Actual concurrency depends on ready work, object distribution and available OS
 resources. Earlier P3/P4 CLI examples below are historical/admin interfaces,
 not the default task workflow.
 
+Task `run` and `resume` retain one fully verified publication handle under the
+runner lock. Task identity, profile allowlist and physical output root are checked
+before resolving credentials or starting an owned transport. The same verified
+handle is used for reconciliation and downloads, then closed when the run ends.
+Caller-supplied API transports remain caller-owned and still require full
+publication verification for each run.
+
 ### Speed and concurrency limits
 
 The previous 1/2/4/6 choices and estimated 512 MiB aggregate-memory admission are
