@@ -77,6 +77,9 @@ PROTOCOL_BOOTSTRAP_BYTES = 64 << 10
 PROTOCOL_MAX_DEPTH = 64
 PROTOCOL_MAX_NODES = 65_536
 PROTOCOL_NODE_BYTES = 256
+METADATA_BODY_CAP = 1 << 20
+METADATA_RESPONSE_LINE_BYTES = 2 << 20
+METADATA_RESPONSE_NODES = 128
 # Pinned hyper HTTP/1 parser default: 8192 + 4096 * 100. reqwest has no knob.
 HTTP_PARSER_BYTES = 417_792
 DURABLE_SPOOL_LIMITS = {
@@ -108,6 +111,22 @@ def protocolmemory(capacity=None):
     if memory > UINT64_MAX:
         raise ValueError("production memory integer boundary")
     return memory
+
+
+def metadata_resident_memory(capacity=None):
+    """Dedicated worker/client residency, mirrored by Rust metadata.rs."""
+    return protocolmemory(capacity) + (32 << 20)
+
+
+def metadata_response_memory(body, capacity=None):
+    """Transport copies only; excludes later provider JSON graphs/caller retention."""
+    capacity = CapacityConfig() if capacity is None else capacity
+    if type(body) is not int or not 0 <= body <= METADATA_BODY_CAP:
+        raise ValueError("metadata response bound invalid")
+    if not isinstance(capacity, CapacityConfig):
+        raise ValueError("typed capacity required")
+    return (13 * METADATA_RESPONSE_LINE_BYTES + 6 * (body + 1)
+            + 16 * capacity.http_header_bytes + 256 * METADATA_RESPONSE_NODES + 65_536)
 
 
 @dataclass(frozen=True)

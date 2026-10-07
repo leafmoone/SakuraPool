@@ -69,7 +69,12 @@ def verify_tree_object(config, obj, transport):
         token=transport._token,
         credential_origin=obj.origin,
         same_origin_cookie=transport._cookie,
+        worker=transport.worker,
+        metadata_origin=obj.origin,
+        metadata_mode="native",
+        capacity=transport.capacity,
     ) as control:
+        control.preflight_metadata()
         dataset = ModelScopeDataset(control, obj.origin, obj.repo_id)
         hub_id = dataset.legacy_hub_id()
         root = obj.object_path.rpartition("/")[0] or "/"

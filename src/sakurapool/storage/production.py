@@ -13,6 +13,7 @@ import secrets
 import stat
 import sys
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
@@ -259,6 +260,7 @@ class RustProductionTransport:
         self._proof_group = False
         self._live_proofs = set()
         self._closed = False
+        self._close_deadline = None
         if self.lightweight:
             self._persistent = True
             self._lane_worker = None
@@ -277,7 +279,27 @@ class RustProductionTransport:
     max_range_bytes = MAX_RANGE
 
     def _new_lightweight_worker(self):
-        return RustWorker(self.worker, capacity=self.capacity, lightweight=True)
+        worker = RustWorker(self.worker, capacity=self.capacity, lightweight=True)
+        try:
+            worker.require_metadata()
+        except BaseException:
+            worker.cancel(deadline=time.monotonic() + 5.0)
+            raise
+        return worker
+
+    def preflight_metadata(self):
+        """Check the additive capability before any task row/NETWORK_START mutation."""
+        if self._closed:
+            raise RemoteIOError("Closed production transport")
+        if self.lightweight:
+            try:
+                self._lane_worker.require_metadata()
+            except (RustWorkerError, AttributeError):
+                raise RemoteIOError("Native metadata capability unavailable",
+                                    code="WORKER_CAPABILITY_UNAVAILABLE", phase="worker",
+                                    lightweight=True) from None
+        else:
+            self.metadata_control().preflight_metadata()
 
     def _condition_proof(self, key):
         return (
@@ -737,20 +759,38 @@ class RustProductionTransport:
                 credential_origin=None if self.offline_mode else self.origin,
                 same_origin_cookie=self._cookie,
                 capacity=self.capacity,
+                worker=self.worker,
+                metadata_origin=self.origin,
+                metadata_mode="native",
             )
         return self._control
 
     def close(self):
-        with self._lane_lock:
-            self._closed = True
+        if self._close_deadline is None:
+            self._close_deadline = time.monotonic() + 5.0
+        deadline = self._close_deadline
+        self._closed = True
+        # Signal both children before waiting for a data-lane lock or any join.
+        control = getattr(self, "_control", None)
+        if control is not None:
+            control.signal_cancel(deadline=deadline)
+        worker = getattr(self, "_request_worker", None) or getattr(self, "_lane_worker", None)
+        if worker is not None and hasattr(worker, "_stop"):
+            worker.signal_cancel(deadline=deadline)
+        if not self._lane_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            raise RustWorkerError("execution channel close timed out")
+        try:
             active = self._operation_active or self._rotating
             worker = getattr(self, "_request_worker", None) or getattr(self, "_lane_worker", None)
-        if active:
-            if worker is not None and getattr(worker, "_construction_ready", True):
-                worker.cancel()
-            return  # Active owner finalizes payload before releasing resident quota.
-        with self._lane_lock:
+            if active:
+                if control is not None:
+                    control.close(deadline=deadline)
+                if worker is not None and getattr(worker, "_construction_ready", True):
+                    worker.cancel(deadline=deadline)
+                return  # Active owner finalizes payload before releasing resident quota.
             self._close_channel()
+        finally:
+            self._lane_lock.release()
 
     def cancel(self):
         self.close()
@@ -762,7 +802,7 @@ class RustProductionTransport:
         control = getattr(self, "_control", None)
         if control is not None:
             try:
-                control.close()
+                control.close(deadline=self._close_deadline)
                 self._control = None
             except BaseException as error:
                 primary = error
@@ -770,7 +810,7 @@ class RustProductionTransport:
             worker = self._lane_worker
             try:
                 if worker is not None:
-                    worker.close()
+                    worker.close(deadline=self._close_deadline)
             except BaseException as error:
                 if primary is None:
                     primary = error

@@ -6,6 +6,7 @@
 //! the Python durable ledger keeps the reservation pending).
 
 mod http;
+pub mod metadata;
 pub mod production;
 pub mod scan_sidecar;
 pub use http::{

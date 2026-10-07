@@ -362,6 +362,8 @@ def _fetch_publication_sample(
         except RemoteIOError:
             pub._verified.pop(key, None)
             obj = None
+    if isinstance(transport, RustProductionTransport):
+        transport.preflight_metadata()
     if attempt_hook is not None:
         attempt_hook("NETWORK_START", {})
     control_finalizing = False
@@ -380,6 +382,9 @@ def _fetch_publication_sample(
                     credential_origin=endpoint,
                     same_origin_cookie=transport._cookie,
                     capacity=capacity,
+                    worker=transport.worker,
+                    metadata_origin=endpoint,
+                    metadata_mode="native",
                 )
             try:
                 obj = exact_provider_lookup(

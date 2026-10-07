@@ -128,9 +128,15 @@ class MetadataBytes(bytes):
     """Payload with per-read settlement evidence; plain bytes are not evidence."""
 
     def __new__(cls, payload, accounting):
-        obj = super().__new__(cls, payload)
-        obj.accounting_state = accounting
-        return obj
+        obj = None
+        try:
+            obj = super().__new__(cls, payload)
+            obj.accounting_state = accounting
+            return obj
+        finally:
+            # A failed allocation/attribute write must not retain a full native
+            # response in this completed pre-handoff constructor traceback.
+            payload = obj = None
 
 
 class _AmbiguousRead(RemoteIOError):
@@ -339,6 +345,9 @@ class GuardedTransport:
         max_retry_wait_s: float = 5.0,
         capacity=None,
         offline_mode: bool = False,
+        worker=None,
+        metadata_mode: str | None = None,
+        metadata_origin: str | None = None,
     ):
         if not trusted_hosts or any(
             not h or h != h.lower() or ":" in h or "/" in h for h in trusted_hosts
@@ -392,6 +401,20 @@ class GuardedTransport:
         if not math.isfinite(max_retry_wait_s) or max_retry_wait_s < 0:
             raise ValueError("retry wait must be a finite nonnegative number")
         self.max_retry_wait_s = max_retry_wait_s
+        self.metadata_mode = metadata_mode or (
+            "legacy_requests" if self.offline_mode and worker is None else "native"
+        )
+        if self.metadata_mode not in {"native", "legacy_requests"}:
+            raise ValueError("metadata mode invalid")
+        self.metadata_origin = metadata_origin or self.credential_origin or None
+        if self.metadata_origin is not None:
+            self._host(self.metadata_origin)
+        self.metadata_worker = worker
+        self._metadata_rpc = None
+        import threading
+
+        self._metadata_init_lock = threading.Lock()
+        self._closed = False
         self.session = requests.Session()
         # Keep netrc credential discovery disabled. Environment proxies and the
         # existing system CA are selected explicitly for each production request.
@@ -417,10 +440,55 @@ class GuardedTransport:
             max_retry_wait_s=self.max_retry_wait_s,
             capacity=self.capacity,
             offline_mode=self.offline_mode,
+            worker=self.metadata_worker,
+            metadata_mode=self.metadata_mode,
+            metadata_origin=self.metadata_origin,
         )
 
-    def close(self) -> None:
-        self.session.close()
+    def signal_cancel(self, *, deadline=None) -> None:
+        with self._metadata_init_lock:
+            self._closed = True
+            native = self._metadata_rpc
+        if native is not None:
+            native.signal_cancel(deadline=deadline)
+
+    def close(self, *, deadline=None) -> None:
+        self.signal_cancel(deadline=deadline)
+        try:
+            if self._metadata_rpc is not None:
+                self._metadata_rpc.close(deadline=deadline)
+        finally:
+            self.session.close()
+
+    def _native_metadata(self):
+        if self._closed:
+            raise RemoteIOError("Closed metadata transport", code="worker_protocol",
+                                phase="metadata_send")
+        if self.metadata_worker is None:
+            raise RemoteIOError("Native metadata worker required",
+                                code="WORKER_CAPABILITY_UNAVAILABLE", phase="worker",
+                                lightweight=self.ledger is None)
+        with self._metadata_init_lock:
+            if self._metadata_rpc is None:
+                from .metadata_rpc import MetadataRPC
+
+                self._metadata_rpc = MetadataRPC(self, self.metadata_worker)
+            if self._closed:
+                self._metadata_rpc.signal_cancel()
+                raise RemoteIOError("Closed metadata transport", code="worker_protocol",
+                                    phase="metadata_send")
+        return self._metadata_rpc
+
+    def preflight_metadata(self):
+        if self.metadata_mode == "native":
+            from .rust_bridge import RustWorkerError
+
+            try:
+                self._native_metadata().preflight()
+            except RustWorkerError:
+                raise RemoteIOError("Native metadata capability unavailable",
+                                    code="WORKER_CAPABILITY_UNAVAILABLE", phase="worker",
+                                    lightweight=self.ledger is None) from None
 
     def __enter__(self) -> GuardedTransport:
         return self
@@ -1308,14 +1376,113 @@ class GuardedTransport:
 
     def read_metadata(self, url: str, **kwargs) -> bytes:
         try:
+            if self.metadata_mode == "native":
+                return self._read_metadata_native(url, **kwargs)
             return self._read_metadata(url, **kwargs)
         except RemoteIOError as error:
             if self.ledger is None:
                 error.lightweight = True
                 error.args = ("Metadata request rejected",)
-                error.recoverable = error.code in {"network_ambiguous", "http_status"}
+                if self.metadata_mode == "legacy_requests":
+                    error.recoverable = error.code in {"network_ambiguous", "http_status"}
+                else:
+                    error.recoverable = (error.recoverable
+                                         and not getattr(error, "finalization_secondary", ()))
                 error.delivery_safe = False
             raise
+
+    def _read_metadata_native(
+        self, url: str, *, max_bytes: int = MIB, _validated_tree_retry: bool = False
+    ) -> bytes:
+        from .metadata_rpc import OPERATION_TIMEOUT_S, network_policy, remaining
+
+        deadline = time.monotonic() + OPERATION_TIMEOUT_S
+        if type(max_bytes) is not int or not 0 <= max_bytes <= min(
+                MIB, self.capacity.metadata_max_bytes):
+            raise ValueError("metadata single-response cap exceeded")
+        if type(url) is not str or not 0 < len(url) <= 8192:
+            raise RemoteIOError("Metadata URL exceeds bounds", code="rejected",
+                                phase="metadata_send", accounting="CONFIRMED")
+        self._host(url)
+        native = self._native_metadata()
+        origin = self.metadata_origin or (urlsplit(url).scheme + "://" + urlsplit(url).netloc)
+        tree_url = url if _validated_tree_retry else None
+
+        def fail(code, phase, status=None, *, known=True):
+            return RemoteIOError("Metadata request rejected", code=code, phase=phase,
+                                 http_status=status, accounting="CONFIRMED" if known else "UNKNOWN",
+                                 lightweight=self.ledger is None)
+
+        def pause(delay):
+            if delay >= remaining(deadline):
+                raise fail("worker_timeout", "metadata_send")
+            if native._closed.wait(delay):
+                raise fail("worker_protocol", "metadata_send", known=False)
+            remaining(deadline)
+
+        with native.operation(deadline):
+            for index in range(MAX_ATTEMPTS):
+                self._host(url)
+                remaining(deadline)
+                proxy, tls = network_policy(url, offline=self.offline_mode)
+                exact_origin = urlsplit(url).scheme + "://" + urlsplit(url).netloc
+                authorized = exact_origin == self.credential_origin
+                ticket = {
+                    "payload_revision": 1,
+                    "profile": "loopback_test" if self.offline_mode else "modelscope_https_v1",
+                    "url": url, "origin": origin, "trusted_hosts": sorted(self.trusted_hosts),
+                    "token": self.token if authorized else None,
+                    "cookie": self.same_origin_cookie if authorized else None,
+                    "proxy_url": proxy, "tls_policy": tls, "max_body_bytes": max_bytes,
+                    "http_header_bytes": self.capacity.http_header_bytes, "remaining_ms": 1,
+                }
+                with native.attempt(ticket, deadline=deadline) as result:
+                    try:
+                        if result.code != "ok":
+                            if (result.code in {"origin_connect", "origin_timeout"}
+                                    and result.known and result.retry_safe and tree_url is None
+                                    and index + 1 < MAX_ATTEMPTS):
+                                pause(self._retry_delay(None, index))
+                                continue
+                            error = fail(result.code, result.phase, result.status,
+                                         known=result.known)
+                            error.recoverable = result.known and result.retry_safe
+                            raise error
+                        status = result.status
+                        if status == 200:
+                            if result.body is None or not result.known:
+                                raise fail("worker_protocol", "metadata_body", known=False)
+                            remaining(deadline)
+                            if self.ledger is None:
+                                return VerifiedMetadataBytes(result.body)
+                            return MetadataBytes(result.body, "CONFIRMED")
+                        if not result.known or not result.retry_safe:
+                            raise fail("worker_protocol", "metadata_headers", status, known=False)
+                        if status in (301, 302, 303, 307, 308):
+                            try:
+                                target = urljoin(url, result.headers["location"] or "")
+                                self._host(target)
+                            except (ValueError, RemoteIOError):
+                                raise fail("redirect_policy", "response_headers", status) from None
+                            url = target
+                            continue
+                        if (tree_url is not None and url == tree_url and status in {400, 403}
+                                and index + 1 < MAX_ATTEMPTS):
+                            continue
+                        if status in (429, 500, 502, 503, 504):
+                            if index + 1 < MAX_ATTEMPTS:
+                                try:
+                                    delay = self._retry_delay(result.headers["retry_after"], index)
+                                except RemoteIOError as error:
+                                    error.accounting_state = "CONFIRMED"
+                                    raise
+                                pause(delay)
+                                continue
+                            raise fail("http_status", "metadata_headers", status)
+                        raise fail("http_status", "metadata_headers", status)
+                    finally:
+                        result = None
+            raise fail("redirect_policy", "response_headers")
 
     def _read_metadata(
         self, url: str, *, max_bytes: int = MIB, _validated_tree_retry: bool = False

@@ -14,6 +14,9 @@ from pathlib import Path
 
 from .budget import Reservation
 from .production_resources import (
+    METADATA_BODY_CAP,
+    METADATA_RESPONSE_LINE_BYTES,
+    METADATA_RESPONSE_NODES,
     PROTOCOL_BOOTSTRAP_BYTES,
     PROTOCOL_MAX_DEPTH,
     PROTOCOL_MAX_NODES,
@@ -23,6 +26,12 @@ from .production_resources import (
 PROTOCOL_VERSION = 1
 LIGHTWEIGHT_PROTOCOL_VERSION = 2
 LIGHTWEIGHT_CAPABILITY = "production_download_lightweight_v1"
+METADATA_CAPABILITY = "metadata_attempt_v1"
+METADATA_LIMITS = {
+    "payload_revision": 1,
+    "max_body_bytes": METADATA_BODY_CAP,
+    "response_line_bytes": METADATA_RESPONSE_LINE_BYTES,
+}
 MAX_LINE_BYTES = 64 * 1024
 MAX_SCAN_RESPONSE_BYTES = 64 * 1024 * 1024
 MAX_SCAN_MEMBERS = 100_000
@@ -53,7 +62,7 @@ class RustWorkerError(RuntimeError):
         }.get(message, "worker_protocol")
 
 
-def _json_peak(raw, *, max_nodes=PROTOCOL_MAX_NODES):
+def _json_peak(raw, *, max_nodes=PROTOCOL_MAX_NODES, _run_skip_strings=False):
     """Lexically bound allocations BEFORE UTF-8 decoding or json.loads.
 
     No growing tokens or object graph. Syntax is finally checked by loads;
@@ -61,9 +70,11 @@ def _json_peak(raw, *, max_nodes=PROTOCOL_MAX_NODES):
     Counts keys as well as values, including duplicates discarded by loads.
     """
     length = len(raw)
-    # Only large legacy scan manifests use the run-skipping path. Ordinary
-    # control messages and small scans keep their existing scalar string walk.
-    legacy_strings = length > MAX_LINE_BYTES and max_nodes > PROTOCOL_MAX_NODES
+    # Large legacy scans and negotiated metadata envelopes use the same exact
+    # lexical walk with C-level ordinary-string skipping. Normal RPCs are unchanged.
+    legacy_strings = length > MAX_LINE_BYTES and (
+        max_nodes > PROTOCOL_MAX_NODES or _run_skip_strings
+    )
     i = nodes = string_bytes = depth = 0
     stack = bytearray(PROTOCOL_MAX_DEPTH)
     first = True
@@ -193,6 +204,9 @@ class RustWorker:
         timeout_s: float = _TIMEOUT_S,
         capacity=None,
         lightweight: bool = False,
+        metadata: bool = False,
+        deadline: float | None = None,
+        cancel_event=None,
     ) -> None:
         binary = Path(binary)
         if not binary.is_file():
@@ -206,6 +220,13 @@ class RustWorker:
         ):
             raise ValueError("worker timeout must be positive and finite")
         self.timeout_s = timeout_s
+        self.metadata = metadata
+        self._teardown_deadline = None
+        self._constructor_deadline = deadline
+        if metadata and not lightweight:
+            raise ValueError("metadata worker requires lightweight wire protocol")
+        if deadline is not None and (not math.isfinite(deadline) or deadline <= time.monotonic()):
+            raise RustWorkerError("worker timed out")
         from ..capacity import CapacityConfig
 
         if capacity is not None and not isinstance(capacity, CapacityConfig):
@@ -220,6 +241,7 @@ class RustWorker:
         self._line_bytes = capacity.rpc_line_bytes if capacity is not None else MAX_LINE_BYTES
         self._bootstrap_bytes = PROTOCOL_BOOTSTRAP_BYTES
         self.capabilities: tuple[str, ...] = ()
+        self.metadata_limits = None
         self.worker_version: str = ""
         self.protocol_resident_bytes = 0
         normalized_budget = None if lightweight else _normalize_budget(job_budget)
@@ -248,6 +270,8 @@ class RustWorker:
             self._stderr_reader = threading.Thread(target=self._drain_stderr, daemon=True)
             self._reader.start()
             self._stderr_reader.start()
+            if cancel_event is not None and cancel_event.is_set():
+                self.signal_cancel()
             self._handshake(normalized_budget)
         except BaseException as primary:
             try:
@@ -297,6 +321,9 @@ class RustWorker:
                             break
                         except queue.Full:
                             continue
+                    # Queue ownership has transferred. Do not retain a large
+                    # metadata line in this idle reader's next blocking read.
+                    raw = None
         except (OSError, ValueError):
             if not self._stop.is_set():
                 self._stdout_error = "worker pipe failure"
@@ -348,9 +375,9 @@ class RustWorker:
             finally:
                 self._writing.clear()
 
-    def _receive(self, *, max_line_bytes=None) -> dict:
+    def _receive(self, *, max_line_bytes=None, deadline=None, max_nodes=None) -> dict:
         max_line_bytes = self._line_bytes if max_line_bytes is None else max_line_bytes
-        deadline = time.monotonic() + self.timeout_s
+        deadline = time.monotonic() + self.timeout_s if deadline is None else deadline
         while True:
             if self._stop.is_set():
                 raise RustWorkerError("worker is closed")
@@ -377,7 +404,14 @@ class RustWorker:
             if max_line_bytes == MAX_SCAN_RESPONSE_BYTES
             else PROTOCOL_MAX_NODES
         )
-        peak = _json_peak(raw, max_nodes=node_limit)
+        if max_nodes is not None:
+            node_limit = max_nodes
+        peak = _json_peak(
+            raw, max_nodes=node_limit,
+            _run_skip_strings=(getattr(self, "metadata", False)
+                               and max_line_bytes == METADATA_RESPONSE_LINE_BYTES
+                               and max_nodes == METADATA_RESPONSE_NODES),
+        )
         if peak > 8 * max_line_bytes + PROTOCOL_NODE_BYTES * node_limit:
             raise RustWorkerError("worker json allocation exceeded")
         try:
@@ -392,6 +426,39 @@ class RustWorker:
             raise RustWorkerError("worker response line too long")
         return message
 
+    def _exchange_deadline(self, line, *, max_line_bytes, deadline, max_nodes=None):
+        """One watchdog spans pipe send, receive and bounded JSON decoding."""
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RustWorkerError("worker timed out")
+        expired = threading.Event()
+
+        def expire():
+            expired.set()
+            self.signal_cancel()
+
+        timer = threading.Timer(remaining, expire)
+        timer.daemon = True
+        timer.start()
+        try:
+            self._send(line)
+            result = self._receive(
+                max_line_bytes=max_line_bytes, deadline=deadline, max_nodes=max_nodes
+            )
+            if expired.is_set() or time.monotonic() >= deadline:
+                raise RustWorkerError("worker timed out")
+            return result
+        except Exception:
+            if expired.is_set() or time.monotonic() >= deadline:
+                raise RustWorkerError("worker timed out") from None
+            raise
+        finally:
+            timer.cancel()
+            timer.join(timeout=max(0.0, (self._teardown_deadline or (time.monotonic() + 5.0))
+                                   - time.monotonic()))
+            if timer.is_alive():
+                raise RustWorkerError("worker watchdog failed to exit")
+
     def _handshake(self, job_budget: dict | None) -> None:
         hello = {"type": "hello", "protocol_version": self.protocol_version}
         if not self.lightweight:
@@ -405,8 +472,17 @@ class RustWorker:
         line = (json.dumps(hello) + "\n").encode("utf-8")
         if len(line) > self._bootstrap_bytes:
             raise RustWorkerError("worker request line too long")
-        self._send(line)
-        message = self._receive(max_line_bytes=self._bootstrap_bytes)
+        if self.metadata:
+            deadline = min(
+                time.monotonic() + self.timeout_s,
+                self._constructor_deadline or float("inf"),
+            )
+            message = self._exchange_deadline(
+                line, max_line_bytes=self._bootstrap_bytes, deadline=deadline
+            )
+        else:
+            self._send(line)
+            message = self._receive(max_line_bytes=self._bootstrap_bytes)
         if (
             message.get("type") != "ready"
             or message.get("protocol_version") != self.protocol_version
@@ -421,6 +497,9 @@ class RustWorker:
             self.cancel()
             raise RustWorkerError("worker handshake failed")
         self.capabilities = tuple(capabilities)
+        self.metadata_limits = message.get("metadata_limits")
+        if self.metadata:
+            self.require_metadata()
         if self.lightweight and (
             LIGHTWEIGHT_CAPABILITY not in self.capabilities
             or message.get("execution_limits") != hello["execution_limits"]
@@ -446,6 +525,37 @@ class RustWorker:
             raise RustWorkerError("worker protocol memory negotiation failed")
         self.protocol_resident_bytes = resident if type(resident) is int else 0
         self._response_line_bytes = self._line_bytes
+
+    def require_metadata(self):
+        if (METADATA_CAPABILITY not in self.capabilities
+                or type(self.metadata_limits) is not dict
+                or self.metadata_limits != METADATA_LIMITS
+                or any(type(v) is not int for v in self.metadata_limits.values())):
+            raise RustWorkerError("worker metadata capability negotiation failed")
+
+    def metadata_attempt(self, payload, *, deadline):
+        if not self.metadata or not self.lightweight:
+            raise RustWorkerError("worker metadata channel unavailable")
+        self.require_metadata()
+        request_id = uuid.uuid4().hex
+        request = {
+            "type": "request", "request_id": request_id, "operation": "metadata_attempt",
+            "payload": {"metadata": payload},
+        }
+        self._response_line_bytes = METADATA_RESPONSE_LINE_BYTES
+        try:
+            line = (json.dumps(request) + "\n").encode("utf-8")
+            message = self._exchange_deadline(
+                line, max_line_bytes=METADATA_RESPONSE_LINE_BYTES, deadline=deadline,
+                max_nodes=METADATA_RESPONSE_NODES,
+            )
+        finally:
+            self._response_line_bytes = self._line_bytes
+        if (set(message) != {"type", "request_id", "ok", "result"}
+                or message.get("type") != "response" or message.get("request_id") != request_id
+                or message.get("ok") is not True or type(message.get("result")) is not dict):
+            raise RustWorkerError("worker returned invalid json")
+        return message["result"]
 
     def request(
         self, operation: str, *, budget: dict | None = None, payload: dict | None = None
@@ -540,13 +650,41 @@ class RustWorker:
     def pid(self) -> int | None:
         return self._proc.pid if self._proc is not None else None
 
-    def cancel(self) -> None:
-        self._shutdown(kill=True)
+    def signal_cancel(self, *, deadline=None) -> None:
+        """Signal before joins, including while another owner is in a pipe write."""
+        if self.metadata and deadline is None:
+            deadline = time.monotonic() + 5.0
+        if deadline is not None:
+            self._teardown_deadline = min(self._teardown_deadline or float("inf"), deadline)
+        self._alive = False
+        self._stop.set()
+        proc = self._proc
+        if proc is not None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
 
-    def close(self) -> None:
-        self._shutdown(kill=False)
+    def cancel(self, *, deadline=None) -> None:
+        self.signal_cancel(deadline=deadline)
+        self._shutdown(kill=True, deadline=deadline)
 
-    def _shutdown(self, *, kill: bool) -> None:
+    def close(self, *, deadline=None) -> None:
+        self._shutdown(kill=False, deadline=deadline)
+
+    def _shutdown(self, *, kill: bool, deadline=None) -> None:
+        if self.metadata:
+            if self._teardown_deadline is None:
+                self._teardown_deadline = time.monotonic() + 5.0
+            deadline = min(deadline or float("inf"), self._teardown_deadline)
+        elif deadline is not None:
+            self._teardown_deadline = min(self._teardown_deadline or float("inf"), deadline)
+        def wait_limit():
+            shared = self._teardown_deadline
+            effective = deadline if shared is None else min(deadline or float("inf"), shared)
+            return (_SHUTDOWN_TIMEOUT_S if effective is None
+                    else max(0.0, effective - time.monotonic()))
+
         with self._lifecycle_lock:
             proc = self._proc
             if proc is None:
@@ -559,24 +697,24 @@ class RustWorker:
                     proc.kill()
                 except OSError:
                     pass
-                proc.wait(timeout=_SHUTDOWN_TIMEOUT_S)
+                proc.wait(timeout=wait_limit())
             if proc.stdin is not None:
                 try:
                     proc.stdin.close()
                 except (OSError, ValueError):
                     pass
             try:
-                proc.wait(timeout=_SHUTDOWN_TIMEOUT_S)
+                proc.wait(timeout=wait_limit())
             except subprocess.TimeoutExpired:
                 proc.kill()
-                proc.wait(timeout=_SHUTDOWN_TIMEOUT_S)
+                proc.wait(timeout=wait_limit())
             readers = [
                 r
                 for r in (self._reader, self._stderr_reader)
                 if r is not None and r.ident is not None
             ]
             for reader in readers:
-                reader.join(timeout=_SHUTDOWN_TIMEOUT_S)
+                reader.join(timeout=wait_limit())
             if any(reader.is_alive() for reader in readers):
                 raise RustWorkerError("worker pipe reader failed to exit")
             for pipe in (proc.stdin, proc.stdout, proc.stderr):

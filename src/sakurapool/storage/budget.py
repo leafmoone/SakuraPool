@@ -7,6 +7,7 @@ power-loss promise; unknown or damaged accounting is never reset.
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import stat
 import struct
@@ -90,6 +91,10 @@ class BudgetExceeded(RuntimeError):
 
 class BudgetCorrupt(RuntimeError):
     """Unknown, missing, short or inconsistent ledger: never reset."""
+
+
+class BudgetDeadlineExceeded(BudgetExceeded):
+    """An explicitly bounded caller could not acquire ledger ownership in time."""
 
 
 def _workspace_operation(method):
@@ -321,6 +326,7 @@ class BudgetLedger:
         )
         self.ledger_working_bytes = self.effective_headroom
         self._mutex = threading.RLock()
+        self._deadline_local = threading.local()
         self._lock_depth = 0
         prefix = "workspace-budget" if workspace is not None else "p4-budget"
         self.lock_path = root / (prefix + ".lock")
@@ -389,9 +395,43 @@ class BudgetLedger:
             view = view[size:]
 
     @contextmanager
+    def lock_deadline(self, deadline):
+        """Optional thread-local lock bound; no change to ordinary callers or disk format.
+
+        Nested scopes may tighten but never extend an existing deadline. File
+        reads, scans, writes and fsync remain operating-system primitives.
+        """
+        if (isinstance(deadline, bool) or not isinstance(deadline, (int, float))
+                or not math.isfinite(deadline)):
+            raise ValueError("ledger deadline must be finite")
+        previous = getattr(self._deadline_local, "deadline", None)
+        deadline = deadline if previous is None else min(previous, deadline)
+        if deadline <= time.monotonic():
+            raise BudgetDeadlineExceeded("budget lock deadline exceeded")
+        self._deadline_local.deadline = deadline
+        try:
+            yield
+        finally:
+            self._deadline_local.deadline = previous
+
+    @staticmethod
+    def _lock_remaining(deadline):
+        value = deadline - time.monotonic()
+        if value <= 0:
+            raise BudgetDeadlineExceeded("budget lock deadline exceeded")
+        return value
+
+    @contextmanager
     def _locked(self):
-        with self._mutex:
-            if self.workspace is not None and self._lock_depth:
+        deadline = getattr(self._deadline_local, "deadline", None)
+        if deadline is None:
+            self._mutex.acquire()
+        elif not self._mutex.acquire(timeout=self._lock_remaining(deadline)):
+            raise BudgetDeadlineExceeded("budget lock deadline exceeded")
+        try:
+            if deadline is not None:
+                self._lock_remaining(deadline)
+            if self._lock_depth and (self.workspace is not None or deadline is not None):
                 yield None
                 return
             if self.workspace is not None:
@@ -405,16 +445,24 @@ class BudgetLedger:
                 if os.name == "nt":
                     import msvcrt
 
-                    deadline = time.monotonic() + 30
+                    file_deadline = time.monotonic() + 30
+                    if deadline is not None:
+                        file_deadline = min(file_deadline, deadline)
                     while True:
                         try:
                             msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
                             break
                         except OSError:
-                            if time.monotonic() >= deadline:
+                            if deadline is not None:
+                                left = self._lock_remaining(file_deadline)
+                                time.sleep(min(0.05, left))
+                                continue
+                            if time.monotonic() >= file_deadline:
                                 raise BudgetCorrupt("budget interprocess lock timeout") from None
                             time.sleep(0.05)
                     try:
+                        if deadline is not None:
+                            self._lock_remaining(deadline)
                         lock.seek(0)
                         if lock.read(1) != b"L":
                             raise BudgetCorrupt("unknown budget lock marker")
@@ -427,8 +475,19 @@ class BudgetLedger:
                 else:
                     import fcntl
 
-                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                    if deadline is None:
+                        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                    else:
+                        while True:
+                            self._lock_remaining(deadline)
+                            try:
+                                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                                break
+                            except (BlockingIOError, InterruptedError):
+                                time.sleep(min(0.05, self._lock_remaining(deadline)))
                     try:
+                        if deadline is not None:
+                            self._lock_remaining(deadline)
                         lock.seek(0)
                         if lock.read(1) != b"L":
                             raise BudgetCorrupt("unknown budget lock marker")
@@ -437,6 +496,8 @@ class BudgetLedger:
                     finally:
                         self._lock_depth = 0
                         fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._mutex.release()
 
     def _encode(self, generation: int, used: dict, leases: dict, proofs: dict) -> bytes:
         if (

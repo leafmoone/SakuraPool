@@ -523,6 +523,9 @@ def run_task(
                 connect_profile(connection_profile, root=root, capacity=task.capacity)
             )
             _check_task_transport(task, transport)
+        metadata_preflight = getattr(transport, "preflight_metadata", None)
+        if metadata_preflight is not None:
+            metadata_preflight()
         reconcile(task, publication)
         with task.transaction() as db:
             if resume:

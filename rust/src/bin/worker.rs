@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::io::{self, BufRead, Write};
 
-const CAPABILITIES: [&str; 8] = [
+const CAPABILITIES: [&str; 9] = [
     "hash_file",
     "fetch_range",
     "scan_tar",
@@ -16,6 +16,7 @@ const CAPABILITIES: [&str; 8] = [
     "production_transfer_v2",
     "production_http_status_v1",
     "production_download_lightweight_v1",
+    "metadata_attempt_v1",
 ];
 const MAX_SESSION_REQUESTS: usize = 256;
 const MAX_REQUEST_ID_BYTES: usize = 64;
@@ -92,6 +93,7 @@ enum Outbound {
         #[serde(skip_serializing_if = "Option::is_none")]
         stream_capacity: Option<StreamCapacity>,
         protocol_resident_bytes: u64,
+        metadata_limits: &'static sakurapool_rust::metadata::Limits,
         #[serde(skip_serializing_if = "Option::is_none")]
         execution_limits: Option<StreamCapacity>,
     },
@@ -217,12 +219,14 @@ fn main() -> io::Result<()> {
             capabilities: &CAPABILITIES,
             stream_capacity: hello.stream_capacity,
             protocol_resident_bytes: resident,
+            metadata_limits: &sakurapool_rust::metadata::LIMITS,
             execution_limits: hello.execution_limits,
         },
         MAX_LINE_BYTES,
     )?;
     let mut seen_requests: BTreeSet<String> = BTreeSet::new();
     let mut execution = sakurapool_rust::production::ExecutionContext::default();
+    let mut metadata = sakurapool_rust::metadata::Context::default();
     loop {
         let line = match read_line_bounded(&mut reader, line_limit)? {
             Ok(line) => line,
@@ -291,7 +295,7 @@ fn main() -> io::Result<()> {
             continue;
         }
         let outcome = if lightweight {
-            dispatch(&request, &mut execution, stream_capacity.as_ref(), true)
+            dispatch(&request, &mut execution, &mut metadata, stream_capacity.as_ref(), true)
         } else if request.budget.is_none() {
             Err("budget_required")
         } else if budget
@@ -327,7 +331,16 @@ fn main() -> io::Result<()> {
                 }
                 budget.commit_attempt();
             }
-            let outcome = dispatch(&request, &mut execution, stream_capacity.as_ref(), false);
+            let outcome = dispatch(&request, &mut execution, &mut metadata, stream_capacity.as_ref(), false);
+            if request.operation == "metadata_attempt" {
+                let result = outcome.as_ref().ok();
+                let known = result.and_then(|v| v.get("accounting_complete"))
+                    .and_then(|v| v.as_bool()) == Some(true);
+                let body = result.and_then(|v| v.get("observed_bytes"))
+                    .and_then(|v| v.as_u64());
+                budget.commit_body(if known { body.unwrap_or(request_budget.body) }
+                    else { request_budget.body });
+            }
             if let Some(accounting) = outcome.as_ref().ok().and_then(|v| v.get("accounting")) {
                 let charge = if accounting.get("complete").and_then(|v| v.as_bool()) == Some(true) {
                     accounting
@@ -357,7 +370,9 @@ fn main() -> io::Result<()> {
             &mut stdout,
             &request_id,
             outcome,
-            if legacy_scan {
+            if request.operation == "metadata_attempt" {
+                sakurapool_rust::metadata::RESPONSE_LINE_CAP
+            } else if legacy_scan {
                 64 * 1024 * 1024
             } else {
                 line_limit
@@ -542,9 +557,36 @@ fn parse_inbound(line: Vec<u8>) -> Result<Inbound, &'static str> {
 fn dispatch(
     request: &Request,
     execution: &mut sakurapool_rust::production::ExecutionContext,
+    metadata: &mut sakurapool_rust::metadata::Context,
     capacity: Option<&StreamCapacity>,
     lightweight: bool,
 ) -> Result<serde_json::Value, &'static str> {
+    if request.operation == "metadata_attempt" {
+        if request.payload.as_object().is_none_or(|v| v.len() != 1)
+            || (lightweight && request.budget.is_some())
+        {
+            return Err("metadata_request_invalid");
+        }
+        let ticket: sakurapool_rust::metadata::Ticket = serde_json::from_value(
+            request.payload.get("metadata").ok_or("metadata_request_invalid")?.clone(),
+        ).map_err(|_| "metadata_request_invalid")?;
+        if !capacity.is_some_and(|c| c.http_header_bytes == ticket.http_header_bytes) {
+            return Err("capacity_mismatch");
+        }
+        if !lightweight {
+            let budget = request.budget.as_ref().ok_or("budget_required")?;
+            if budget.body < ticket.max_body_bytes.saturating_add(1)
+                || budget.attempts < 1 || budget.disk != 0
+                || budget.inflight < sakurapool_rust::metadata::response_memory(
+                    ticket.max_body_bytes, ticket.http_header_bytes,
+                )?
+            {
+                return Err("metadata_budget");
+            }
+        }
+        return serde_json::to_value(sakurapool_rust::metadata::run(ticket, metadata))
+            .map_err(|_| "metadata_response_invalid");
+    }
     if lightweight && (request.budget.is_some() || request.payload.get("production").is_none()) {
         return Err("lightweight_request_invalid");
     }

@@ -91,11 +91,15 @@ authorities clear that pool. Redirect checks and disabled
 automatic redirect following remain in place; local synthetic loopback transport
 stays local even when proxies are configured.
 
-Python uses `REQUESTS_CA_BUNDLE` or `CURL_CA_BUNDLE` when configured, otherwise an
-available system CA file/directory, then Requests' default. Rust uses native
-system roots (`rustls-tls-native-roots`); native-root settings such as
-`SSL_CERT_FILE` apply. Keep the clients' trust settings consistent when using a
-custom CA bundle. HTTPS verification remains enabled. As with other applications
+Native metadata uses Python's effective per-URL proxy selection, including
+`NO_PROXY`, then disables automatic proxy discovery in its dedicated Rust client.
+It uses native system roots by default (`rustls-tls-native-roots`, including
+`SSL_CERT_FILE`). An explicit `REQUESTS_CA_BUNDLE`, or otherwise `CURL_CA_BUNDLE`,
+selects a PEM file of at most 2 MiB that replaces native roots for metadata;
+CA directories, invalid bundles and unsupported proxy schemes fail explicitly.
+The Rust image-transfer client continues to use native roots. Explicit legacy
+Requests metadata retains its system CA file/directory fallback. Keep these
+clients' trust settings consistent. HTTPS verification remains enabled. As with other applications
 using system trust, a trusted TLS-inspecting proxy can inspect traffic; never
 put tokens, cookies or signed URLs in logs.
 
@@ -111,11 +115,34 @@ A provider that truncates or silently clamps pages may reach the bounded walk
 limit; that is an incomplete lookup, never evidence that the object is absent.
 Oversized metadata responses fail rather than increasing the byte limit.
 
-Python metadata requests use a 10-second connection timeout and a 60-second
-socket-inactivity timeout. These are not an absolute metadata-operation deadline:
-a slowly progressing header or body can take longer. The native transfer deadline
-described below starts with the Rust RPC and does not cover this Python
-control-plane work. Byte and pagination bounds still apply.
+Production metadata uses a separate native worker advertising `metadata_attempt_v1`.
+Each `read_metadata` call has one 125-second monotonic budget across ownership
+and ledger waits, worker startup/rotation, handshake, pipe send/receive, up to
+three HTTP attempts, response validation and retry waits. Each HTTP attempt has a whole-request deadline of at
+most 60 seconds and a connection timeout of at most 10 seconds, clamped by the
+time left. Production cancellation signals both data and metadata children
+before bounded joins; they share one 5-second teardown grace. OS process creation and filesystem primitives are
+not hard-real-time guarantees. This is a per-read bound, not a 125-second bound
+for a repository lookup that can include an identity read and fifty page reads.
+
+Successful metadata bodies stay in memory and anonymous IPC, using strict base64
+inside a separately validated 2 MiB response envelope; ordinary RPC lines remain
+at their configured capacity. Metadata never creates body sidecars. Header-only
+decisions read zero application body bytes. Partial bodies or missing/invalid
+worker acknowledgements are not replayed. Each control instance owns a separate
+serial worker with its own 256-request rotation; it does not change image-worker
+generations or conditional proofs. Accounted administration reserves the modeled
+worker/response memory. Lightweight downloads keep the same fixed buffer bounds
+and add one process per active control, without aggregate RAM admission.
+
+Online `sakura remote inspect` requires `--worker /absolute/path/to/sakurapool-worker`.
+The explicit `--legacy-requests` compatibility option (API:
+`metadata_mode="legacy_requests"`) retains the former 10-second connect and
+60-second socket-inactivity timeouts, without an absolute deadline. Missing or
+old native capability never automatically selects it. Task startup checks the
+metadata capability and limits before reconciliation and new item claims. Local
+creation, inspection, queries and export, plus explicit offline fixtures, remain
+usable without Rust. Byte and pagination bounds apply in every mode.
 
 ### Downloading on Linux
 

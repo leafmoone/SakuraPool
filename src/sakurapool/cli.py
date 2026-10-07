@@ -245,6 +245,11 @@ def main(argv: list[str] | None = None) -> int:
     inspect = remote_sub.add_parser("inspect", help="guarded metadata inspection")
     inspect.add_argument("--config", type=Path, required=True)
     inspect.add_argument("--output", type=Path, required=True)
+    metadata_reader = inspect.add_mutually_exclusive_group()
+    metadata_reader.add_argument("--worker", type=Path,
+                                 help="native metadata worker with absolute request deadline")
+    metadata_reader.add_argument("--legacy-requests", action="store_true",
+                                 help="explicit compatibility mode without an absolute deadline")
     inspect.add_argument(
         "--offline-fixture",
         action="store_true",
@@ -445,7 +450,8 @@ def main(argv: list[str] | None = None) -> int:
                         offline_fixture=args.offline_fixture,
                     )
                 else:
-                    result = inspect(args.config, args.output, offline_fixture=args.offline_fixture)
+                    result = inspect(args.config, args.output, offline_fixture=args.offline_fixture,
+                                     worker=args.worker, legacy_requests=args.legacy_requests)
             except Exception as exc:
                 from .storage.transport import RemoteIOError
 

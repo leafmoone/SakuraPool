@@ -77,13 +77,18 @@ def _profile(path: Path, *, offline_fixture: bool,
     return data, BudgetLedger(root, _offline_test=offline_fixture)
 
 
-def _transport(ledger: BudgetLedger, config: dict) -> GuardedTransport:
+def _transport(ledger: BudgetLedger, config: dict, *, worker=None,
+               legacy_requests=False) -> GuardedTransport:
+    options = {"worker": worker, "metadata_origin": config["endpoint"]}
+    if legacy_requests:
+        options["metadata_mode"] = "legacy_requests"
     if ledger.offline_mode:
         return GuardedTransport(ledger, trusted_hosts=frozenset({"127.0.0.1"}),
-                                allow_loopback_http=True)
+                                allow_loopback_http=True, **options)
     token = os.environ.get("MODELSCOPE_API_TOKEN") or None
     return GuardedTransport(ledger, trusted_hosts=frozenset({"modelscope.cn"}),
-                            token=token, credential_origin=(config["endpoint"] if token else None))
+                            token=token, credential_origin=(config["endpoint"] if token else None),
+                            **options)
 
 
 def _fresh_output(output: Path, ledger: BudgetLedger) -> Path:
@@ -105,8 +110,12 @@ def _plan_disk_reservation(cluster: int) -> int:
     return 2 * ((_MAX_PLAN + cluster - 1) // cluster * cluster) + 2 * cluster
 
 
-def inspect(config_path: Path, output: Path, *, offline_fixture: bool = False) -> dict:
+def inspect(config_path: Path, output: Path, *, offline_fixture: bool = False,
+            worker=None, legacy_requests=False) -> dict:
     """Metadata-only discovery; never selects a scan or claims source/tags."""
+    if (worker is not None and legacy_requests
+            or not offline_fixture and worker is None and not legacy_requests):
+        raise ValueError("online inspect requires --worker or explicit --legacy-requests")
     config, ledger = _profile(config_path, offline_fixture=offline_fixture)
     output = _fresh_output(output, ledger)
     # Charge allocation, not EOF: temporary + published name are conservatively
@@ -114,14 +123,20 @@ def inspect(config_path: Path, output: Path, *, offline_fixture: bool = False) -
     # two more clusters for bounded CLI status/log and an empty file. Root
     # growth elsewhere still counts via the shared ledger's allocation scan.
     cluster = _cluster_bytes(ledger.root)
-    lease = ledger.reserve(Reservation(disk=_plan_disk_reservation(cluster)))
+    transport = _transport(ledger, config, worker=worker, legacy_requests=legacy_requests)
+    try:
+        transport.preflight_metadata()
+        lease = ledger.reserve(Reservation(disk=_plan_disk_reservation(cluster)))
+    except BaseException:
+        transport.close()
+        raise
     tmp: Path | None = None
     owned: tuple[int, int] | None = None
     tmp_created = False
     published = False
     settled = False
     try:
-        with _transport(ledger, config) as transport:
+        with transport:
             provider = ModelScopeDataset(transport, config["endpoint"],
                                          config["repo_id"])
             revisions = provider.revisions()

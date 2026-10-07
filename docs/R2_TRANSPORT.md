@@ -63,11 +63,43 @@ filesystem calls or pipe writes are not a hard real-time cancellation guarantee.
 Range, negative-proof and whole-object scan operations share this deadline; it
 is not a promise that an arbitrarily large object can complete within it.
 
-Python provider-metadata lookups precede or accompany these operations through
-Requests. Their 10-second connection and 60-second socket-inactivity timeouts
-do not impose a total wall-clock deadline on slow headers or a trickling body.
-The 125/130-second Rust RPC/watchdog contract does not cover those metadata
-requests; their response-byte and pagination limits remain independent bounds.
+Provider metadata uses a separate `metadata_attempt_v1` worker, with one native
+GET per RPC and Python retaining the shared three-attempt redirect/status policy.
+Each `read_metadata` has a 125-second monotonic budget including ownership and
+ledger waits, startup, handshake, pipe send/receive, processing and backoff; each
+HTTP attempt is at
+most 60 seconds and connect is at most 10 seconds, clamped to the time remaining.
+Cancellation signals both metadata and data children before joins and permits
+one shared 5-second teardown grace. OS process creation/filesystem primitives
+are not hard-real-time guarantees. A multi-page repository lookup has several
+such reads; it has no single 125-second deadline.
+
+The metadata body cap is `min(1 MiB, capacity.metadata_max_bytes)`, plus one
+reserved overflow probe byte. Strict base64 payloads use a separate 2 MiB
+response envelope; ordinary request/control lines retain their configured cap.
+The transport does not spool raw response bodies. Native worker residency and
+response-copy memory are separately admitted in accounted administration, with
+mirrored Python/Rust formulas. These are working-set models, not process-RSS
+ceilings or provider-JSON graph guarantees.
+One HTTP-attempt lease reserves body and metadata independently of these memory
+leases. Known header-only outcomes settle zero without reading/draining a body;
+known EOF/overflow consumes observed bytes. Partial reads and malformed/missing
+acknowledgements retain unresolved network reservations even after verified
+child exit permits memory release. Only finalized, acknowledged pre-body
+transients can gain task retry eligibility.
+
+Native metadata also applies its deadline to ledger thread/process-lock waits.
+This optional thread-local scope leaves ordinary ledger behavior and slot formats
+unchanged. Settlement that cannot acquire ownership within the shared cleanup
+grace retains unresolved leases and reports uncertainty.
+
+Metadata uses effective per-URL environment proxies, including `NO_PROXY`, with
+native automatic proxy discovery disabled. Explicit `REQUESTS_CA_BUNDLE` or
+`CURL_CA_BUNDLE` PEM files replace native roots and are capped at 2 MiB;
+unsupported CA directories/proxy schemes fail closed. System/native roots are
+the default. Online standalone inspect requires `--worker`; only the explicit
+`--legacy-requests` mode uses Requests' former inactivity timeouts with no
+absolute-deadline guarantee. No missing-capability fallback is automatic.
 
 POSIX publication and owned-stage cleanup synchronize the affected directories
 before recording completion; directory-sync failures fail closed. Windows has
