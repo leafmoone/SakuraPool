@@ -12,7 +12,11 @@ interpreter is Python 3.13. PyArrow 18.1.0 / NumPy 2.2.6 do not provide Windows
 CPython 3.14 wheels. A newer version number alone does not establish compatibility.
 The Python wheel contains the Python package, not a prebuilt Rust executable.
 Build the worker from this repository or the source distribution with the committed
-Cargo.lock/toolchain. Rust needs a working platform linker (GNU on the verified host).
+Cargo.lock. This release's worker build/hello was verified only on Windows with
+Rust 1.98.1 GNU and MSYS2 UCRT64. `rust/rust-toolchain.toml` pins
+`1.98.1-x86_64-pc-windows-gnu`; it is not a native Linux/macOS toolchain pin.
+Choose the toolchain explicitly below: rustup selects directory pins from the
+launch directory and its parents, not from Cargo's `--manifest-path`.
 
 ```console
 git clone --branch main https://github.com/leafmoone/SakuraPool.git
@@ -22,28 +26,42 @@ python -m venv .venv
 python -m pip install '.[remote]'
 ```
 
-PowerShell worker build (project-local output, no inherited shared Cargo target):
+PowerShell worker build from the repository root (the verified Windows GNU
+configuration; project-local output, no inherited shared Cargo target). Install
+the pinned toolchain first if it is not already present; MSYS2 UCRT64 must provide
+the native compiler/linker tools, including `gcc` and `dlltool`.
 
 ```powershell
+rustup toolchain install 1.98.1-x86_64-pc-windows-gnu --profile minimal
 Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue
-# GNU Windows toolchain: add your installed MinGW/MSYS2 UCRT64 compiler bin.
-# Example if installed at the conventional location:
+# Example if MSYS2 UCRT64 is installed at the conventional location:
 $env:PATH = "C:\msys64\ucrt64\bin;" + $env:PATH
-cargo build --manifest-path rust/Cargo.toml --locked --release --bin sakurapool-worker --target-dir rust/target
+cargo +1.98.1-x86_64-pc-windows-gnu build --manifest-path rust/Cargo.toml --locked --release --bin sakurapool-worker --target-dir rust/target
 $worker = (Resolve-Path rust/target/release/sakurapool-worker.exe).Path
 sakura --version
 ```
 
-On POSIX use:
+POSIX native-host build guidance below is **not verified by this release**.
+From the repository root, install Rust 1.98.1 for your actual native host and
+select it explicitly as `cargo +1.98.1-<native-host-triple>`. Replace the placeholder
+with your Linux/macOS host triple; do not enter `rust/` and rely on its Windows
+host override. The host needs its native linker, compiler and build dependencies;
+a cross-compilation `--target` flag is not a substitute for a native-host toolchain.
 
 ```console
-env -u CARGO_TARGET_DIR cargo build --manifest-path rust/Cargo.toml --locked --release --bin sakurapool-worker --target-dir rust/target
+# Replace <native-host-triple> before running these commands.
+toolchain='1.98.1-<native-host-triple>'
+rustup toolchain install "$toolchain" --profile minimal
+env -u CARGO_TARGET_DIR cargo "+$toolchain" build --manifest-path rust/Cargo.toml --locked --release --bin sakurapool-worker --target-dir rust/target
 ```
 
-The executable is `rust/target/release/sakurapool-worker`. Keep its absolute path for the private
+On POSIX the executable path would be `rust/target/release/sakurapool-worker`;
+on Windows it has the `.exe` suffix. Keep its absolute path for the private
 connection profile below. Source distributions carry the Rust sources/lockfile;
-compiling the worker does not require image data or ModelScope credentials. A
-prepopulated Cargo dependency cache permits the same command with `--offline`.
+compiling the worker does not require image data or ModelScope credentials.
+After the matching host toolchain and native build tools are installed, a
+prepopulated Cargo dependency cache permits adding `--offline` to the build command.
+`--offline` does not install a missing toolchain, linker or dependency cache.
 
 ## Public source indexes and explicit installation
 
