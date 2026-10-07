@@ -1,4 +1,4 @@
-# Local partition builder (candidate; review required)
+# Local partition builder
 
 This workflow is separate from P4 remote retrieval. It consumes already-downloaded
 local TARs; it neither downloads a repository nor deletes local inputs.
@@ -58,14 +58,12 @@ paths. Physical duplicate source/post IDs remain separate records; resolving an
 ambiguous logical ID must not silently pick one. The runtime is the unified
 publication, not a giant merged durable Parquet.
 
-## Review gate
+## Operational boundaries
 
-Canaries are not production indices. Seven-source representative measurements
-are estimates, not measured full-repository sizes. Known full sample counts remain
-UNKNOWN unless supported by authorized evidence. Do not scan the repository just
-to manufacture a denominator.
+Canary or representative measurements do not establish complete repository counts.
+Report only the actual validated input scope; unvalidated coverage remains UNKNOWN.
 
-This index machine delivers a candidate branch only. A full build requires
-external review, integration by the primary developer, an approved SHA and fresh
-wheel/worker rebuild. No automatic dev/main merge, full build, R2 or P5 is part of
-INDEX-BUILDER-PREP.
+`build-partition` processes the explicit local partition manifest. It does not
+download a repository, schedule a repository-wide build, delete local inputs, or
+change Git branches. Prepare matching source/wheel and worker before starting an
+administrator-controlled build.
