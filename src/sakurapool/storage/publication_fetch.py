@@ -179,6 +179,7 @@ def _owned_range(transport, bound, offset, size, state):
                 state["body_error_code"] = state["code"]
                 raise
             finally:
+                del payload
                 state["code"] = "publication_range"
     except BaseException as error:
         if body_primary is not None and error is not body_primary:
@@ -356,7 +357,7 @@ def _fetch_publication_sample(
     if obj is not None and isinstance(transport, RustProductionTransport):
         try:
             # Only the next chunk is admitted: a complete image need not fit a generation.
-            lengths = [min(plan.image_bytes, plan.chunk_bytes)]
+            lengths = [plan.first_length]
             if transport.verified_object(obj, lengths=lengths) != obj:
                 raise RemoteIOError("publication verified object changed")
         except RemoteIOError:
@@ -438,68 +439,74 @@ def _fetch_publication_sample(
         sync_directory(output)
         if attempt_hook is not None:
             attempt_hook("STAGED", {"name": stage.name, "identity": list(stage_identity)})
-        image_digest = hashlib.sha256()
-        # A single exclusive writer; hash is accumulated inside each payload lease.
-        with (stage / ("image" + suffix)).open("xb") as f:
-            created["image" + suffix] = _file_identity(f)
-            sync_directory(stage)
-            if attempt_hook is not None:
-                attempt_hook(
-                    "CREATED",
-                    {"name": "image" + suffix, "identity": list(created["image" + suffix])},
-                )
-            for chunk_index, (offset, length) in enumerate(plan.chunks()):
-                state.update(member_kind="image", chunk_index=chunk_index)
-                with _owned_range(transport, bound, offset, length, state) as payload:
-                    if len(payload) != length:
-                        raise RemoteIOError("image exact extent")
-                    image_digest.update(payload)
-                    if offset + length == plan.image_offset + image_size:
-                        if image_digest.digest() != pub.expected_image_sha(rid):
-                            state["code"] = "publication_image_sha"
-                            raise RemoteIOError("image SHA mismatch; no delivery")
-                    state["code"] = "publication_write"
-                    f.write(payload)
-                del payload
-            state["code"] = "publication_write"
-            f.flush()
-            os.fsync(f.fileno())
-        receipts["image" + suffix] = {
-            "sha256": image_digest.hexdigest(),
-            "bytes": image_size,
-            "identity": list(created["image" + suffix]),
-        }
-        if metadata and loc["flags"] & 1:
-            meta_digest = hashlib.sha256()
-            state["code"] = "publication_write"
-            with (stage / "metadata.json").open("xb") as f:
-                created["metadata.json"] = _file_identity(f)
+        if plan.coalesced_range is not None:
+            receipts = _write_coalesced_members(
+                plan, pub, rid, transport, bound, stage, suffix, created, state,
+                attempt_hook, capacity)
+        else:
+            image_digest = hashlib.sha256()
+            # A single exclusive writer; hash is accumulated inside each payload lease.
+            with (stage / ("image" + suffix)).open("xb") as f:
+                created["image" + suffix] = _file_identity(f)
                 sync_directory(stage)
                 if attempt_hook is not None:
                     attempt_hook(
                         "CREATED",
-                        {"name": "metadata.json", "identity": list(created["metadata.json"])},
+                        {"name": "image" + suffix, "identity": list(created["image" + suffix])},
                     )
-                for chunk_index, (offset, length) in enumerate(plan.chunks(metadata=True)):
-                    state.update(member_kind="metadata", chunk_index=chunk_index)
+                for chunk_index, (offset, length) in enumerate(plan.chunks()):
+                    state.update(member_kind="image", chunk_index=chunk_index)
                     with _owned_range(transport, bound, offset, length, state) as payload:
                         if len(payload) != length:
-                            raise RemoteIOError("metadata exact extent")
-                        meta_digest.update(payload)
+                            raise RemoteIOError("image exact extent")
+                        image_digest.update(payload)
+                        if offset + length == plan.image_offset + image_size:
+                            if image_digest.digest() != pub.expected_image_sha(rid):
+                                state["code"] = "publication_image_sha"
+                                raise RemoteIOError("image SHA mismatch; no delivery")
                         state["code"] = "publication_write"
                         f.write(payload)
                     del payload
                 state["code"] = "publication_write"
                 f.flush()
                 os.fsync(f.fileno())
-            state["code"] = "publication_metadata"
-            validate_file(stage / "metadata.json", meta_size, max_bytes=capacity.metadata_max_bytes)
-            receipts["metadata.json"] = {
-                "sha256": meta_digest.hexdigest(),
-                "bytes": meta_size,
-                "identity": list(created["metadata.json"]),
-                "verification": "BOUNDED_JSON_NO_PUBLICATION_SHA",
+            receipts["image" + suffix] = {
+                "sha256": image_digest.hexdigest(),
+                "bytes": image_size,
+                "identity": list(created["image" + suffix]),
             }
+            if metadata and loc["flags"] & 1:
+                meta_digest = hashlib.sha256()
+                state["code"] = "publication_write"
+                with (stage / "metadata.json").open("xb") as f:
+                    created["metadata.json"] = _file_identity(f)
+                    sync_directory(stage)
+                    if attempt_hook is not None:
+                        attempt_hook(
+                            "CREATED",
+                            {"name": "metadata.json", "identity": list(created["metadata.json"])},
+                        )
+                    for chunk_index, (offset, length) in enumerate(plan.chunks(metadata=True)):
+                        state.update(member_kind="metadata", chunk_index=chunk_index)
+                        with _owned_range(transport, bound, offset, length, state) as payload:
+                            if len(payload) != length:
+                                raise RemoteIOError("metadata exact extent")
+                            meta_digest.update(payload)
+                            state["code"] = "publication_write"
+                            f.write(payload)
+                        del payload
+                    state["code"] = "publication_write"
+                    f.flush()
+                    os.fsync(f.fileno())
+                state["code"] = "publication_metadata"
+                validate_file(stage / "metadata.json", meta_size,
+                              max_bytes=capacity.metadata_max_bytes)
+                receipts["metadata.json"] = {
+                    "sha256": meta_digest.hexdigest(),
+                    "bytes": meta_size,
+                    "identity": list(created["metadata.json"]),
+                    "verification": "BOUNDED_JSON_NO_PUBLICATION_SHA",
+                }
         state["code"] = "publication_publish"
         receipt = {
             "layout": FLAT_POLICY,
@@ -550,6 +557,75 @@ def _fetch_publication_sample(
             chunk_index=state.get("chunk_index"),
         ).public_diagnostic()
         raise
+
+
+def _write_coalesced_members(
+    plan, pub, rid, transport, bound, stage, suffix, created, state, attempt_hook, capacity
+):
+    """Write exact members inside one owned physical span; never retain its body."""
+    offset, length = plan.coalesced_range
+    image_name = "image" + suffix
+    image_digest, meta_digest = hashlib.sha256(), hashlib.sha256()
+    with (stage / image_name).open("xb") as image_file:
+        created[image_name] = _file_identity(image_file)
+        sync_directory(stage)
+        if attempt_hook is not None:
+            attempt_hook("CREATED", {"name": image_name, "identity": list(created[image_name])})
+        state.update(member_kind="image", chunk_index=0)
+        with _owned_range(transport, bound, offset, length, state) as payload:
+            whole = image_view = metadata_view = None
+            try:
+                if len(payload) != length:
+                    raise RemoteIOError("coalesced exact extent")
+                whole = memoryview(payload)
+                image_start = plan.image_offset - offset
+                image_view = whole[image_start:image_start + plan.image_bytes]
+                image_digest.update(image_view)
+                if image_digest.digest() != pub.expected_image_sha(rid):
+                    state["code"] = "publication_image_sha"
+                    raise RemoteIOError("image SHA mismatch; no delivery")
+                state["code"] = "publication_write"
+                image_file.write(image_view)
+                image_file.flush()
+                os.fsync(image_file.fileno())
+                state.update(member_kind="metadata", chunk_index=0)
+                with (stage / "metadata.json").open("xb") as meta_file:
+                    created["metadata.json"] = _file_identity(meta_file)
+                    sync_directory(stage)
+                    if attempt_hook is not None:
+                        attempt_hook("CREATED", {"name": "metadata.json",
+                                                "identity": list(created["metadata.json"])})
+                    meta_start = plan.metadata_offset - offset
+                    metadata_view = whole[meta_start:meta_start + plan.metadata_bytes]
+                    meta_digest.update(metadata_view)
+                    meta_file.write(metadata_view)
+                    meta_file.flush()
+                    os.fsync(meta_file.fileno())
+            finally:
+                if metadata_view is not None:
+                    metadata_view.release()
+                if image_view is not None:
+                    image_view.release()
+                if whole is not None:
+                    whole.release()
+                del payload
+        state["code"] = "publication_write"
+    state["code"] = "publication_metadata"
+    validate_file(stage / "metadata.json", plan.metadata_bytes,
+                  max_bytes=capacity.metadata_max_bytes)
+    return {
+        image_name: {
+            "sha256": image_digest.hexdigest(),
+            "bytes": plan.image_bytes,
+            "identity": list(created[image_name]),
+        },
+        "metadata.json": {
+            "sha256": meta_digest.hexdigest(),
+            "bytes": plan.metadata_bytes,
+            "identity": list(created["metadata.json"]),
+            "verification": "BOUNDED_JSON_NO_PUBLICATION_SHA",
+        },
+    }
 
 
 def _content_sha(path):

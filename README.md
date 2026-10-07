@@ -344,6 +344,23 @@ The deadline includes the bounded Origin retries and CDN hop. Whole-object scans
 use the same bound, so large-object completion is not guaranteed.
 No change implies image decoding or conversion.
 
+When archive-member metadata output is requested, a complete image and its
+nonempty JSON member can share one data Range automatically. Their indexed
+extents must be disjoint, in either physical order, and the entire span must fit
+the configured Range chunk capacity (8 MiB by default). The gap must be at most
+64 KiB and no more than one sixteenth of the combined member bytes. Otherwise
+the existing separate, chunked reads apply; a failed combined request never
+falls back to separate reads. Image-only requests are unchanged.
+
+The combined request also reads the bounded gap bytes, so its full span counts
+toward per-request buffers and transport checks. Only the exact image and JSON
+slices are saved. Image bytes must match the publication SHA before writing;
+JSON retains bounded validation and a receipt digest, without a publication JSON
+SHA claim. Both files are synchronized before the unchanged PREPARED/publication
+boundary. Next-request scheduling and generation hints use the full physical
+span. This can reduce metadata-enabled data requests, but does not promise a
+particular throughput gain or alter provider-control metadata RPCs.
+
 Resume never reselects records. A published receipt must match task/operation,
 file/directory identities and indexed image SHA before `DONE/VERIFIED`; valid
 published output is reused, not redownloaded. Crashed `IN_PROGRESS` can become

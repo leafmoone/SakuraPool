@@ -28,10 +28,11 @@ def _safe_diagnostic(error):
 
 
 
-def _warm_free_lane(free, lanes, prepared, capacity):
+def _warm_free_lane(free, lanes, prepared, capacity, *, metadata=False):
     """Return a warm idle lane hint without authorizing a fetch."""
     # Match the data plane's next-chunk admission, not an entire multi-chunk image.
-    lengths = [min(prepared.location["image_size"], capacity.range_chunk_bytes)]
+    lengths = [prepared.plan(metadata=True, capacity=capacity).first_length] if metadata else [
+        min(prepared.location["image_size"], capacity.range_chunk_bytes)]
     for index in free:
         predict = getattr(lanes[index][0], "predict_warm", None)
         if callable(predict) and predict(prepared.transport_identity, lengths):
@@ -39,8 +40,8 @@ def _warm_free_lane(free, lanes, prepared, capacity):
     return None
 
 
-def _select_free_lane(free, lanes, prepared, capacity):
-    index = _warm_free_lane(free, lanes, prepared, capacity)
+def _select_free_lane(free, lanes, prepared, capacity, *, metadata=False):
+    index = _warm_free_lane(free, lanes, prepared, capacity, metadata=metadata)
     return free[0] if index is None else index
 
 
@@ -220,7 +221,7 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
                 blocked = True
                 break
             candidate, prepared, position = selected
-            index = _warm_free_lane(free, lanes, prepared, task.capacity)
+            index = _warm_free_lane(free, lanes, prepared, task.capacity, metadata=metadata)
             bypass = False
             if index is None and free and warm_bypass_credit:
                 # A bounded number of warm dispatches may bypass the oldest eligible item.
@@ -228,7 +229,8 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
                     later_prepared = prepare(later)
                     if later_prepared.transport_identity in busy:
                         continue
-                    warm = _warm_free_lane(free, lanes, later_prepared, task.capacity)
+                    warm = _warm_free_lane(free, lanes, later_prepared, task.capacity,
+                                           metadata=metadata)
                     if warm is not None:
                         candidate, prepared, index = later, later_prepared, warm
                         bypass = True
@@ -239,7 +241,7 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
                 lanes.append((lane, OrderedDict()))
                 free.append(len(lanes) - 1)
             if index is None:
-                index = _select_free_lane(free, lanes, prepared, task.capacity)
+                index = _select_free_lane(free, lanes, prepared, task.capacity, metadata=metadata)
             preflight(task, publication, candidate, lanes[index][0], prepared=prepared)
             item = task.claim(expected=candidate, window=window)
             if item is None:

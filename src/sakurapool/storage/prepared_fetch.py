@@ -6,7 +6,11 @@ from threading import get_ident
 from types import MappingProxyType, SimpleNamespace
 
 from ..capacity import UINT64_MAX, CapacityConfig
-from .production_resources import SESSION_ATTEMPTS_PER_TRANSFER, chunked_body_budget
+from .production_resources import (
+    SESSION_ATTEMPTS_PER_TRANSFER,
+    chunked_body_budget,
+    network_body_budget,
+)
 from .publication import PublicationCorrupt
 
 _FACTORY = object()
@@ -21,6 +25,7 @@ class StreamPlan:
     metadata_offset: int
     metadata_bytes: int
     chunk_bytes: int
+    coalesced_range: tuple[int, int] | None = None
 
     @property
     def image_chunks(self):
@@ -32,7 +37,7 @@ class StreamPlan:
 
     @property
     def chunk_count(self):
-        return self.image_chunks + self.metadata_chunks
+        return 1 if self.coalesced_range is not None else self.image_chunks + self.metadata_chunks
 
     @property
     def saved_bytes(self):
@@ -40,10 +45,21 @@ class StreamPlan:
 
     @property
     def max_chunk(self):
+        if self.coalesced_range is not None:
+            return self.coalesced_range[1]
         return min(self.chunk_bytes, max(self.image_bytes, self.metadata_bytes))
 
     @property
+    def first_length(self):
+        """Only the next physical request; not whole-record generation admission."""
+        if self.coalesced_range is not None:
+            return self.coalesced_range[1]
+        return min(self.chunk_bytes, self.image_bytes or self.metadata_bytes)
+
+    @property
     def generation_body(self):
+        if self.coalesced_range is not None:
+            return network_body_budget(self.coalesced_range[1])
         return chunked_body_budget(self.image_bytes, self.metadata_bytes, self.chunk_bytes)
 
     @property
@@ -52,6 +68,9 @@ class StreamPlan:
 
     def lengths(self):
         """Yield actual Range lengths without constructing a chunk-sized list."""
+        if self.coalesced_range is not None:
+            yield self.coalesced_range[1]
+            return
         for metadata in (False, True):
             for _, length in self.chunks(metadata=metadata):
                 yield length
@@ -84,8 +103,17 @@ def stream_plan(location, object_size, *, metadata=False, capacity=None):
     meta = meta if metadata and location["flags"] & 1 else 0
     if image + meta > UINT64_MAX:
         raise PublicationCorrupt("stream saved byte integer bound")
+    coalesced = None
+    image_offset, meta_offset = location["image_offset"], location["metadata_offset"]
+    image_end, meta_end = image_offset + image, meta_offset + meta
+    if meta and (image_end <= meta_offset or meta_end <= image_offset):
+        start = min(image_offset, meta_offset)
+        span = max(image_end, meta_end) - start
+        gap = span - image - meta
+        if span <= capacity.range_chunk_bytes and gap <= 65536 and gap * 16 <= image + meta:
+            coalesced = start, span
     return StreamPlan(location["image_offset"], image, location["metadata_offset"],
-                      meta, capacity.range_chunk_bytes)
+                      meta, capacity.range_chunk_bytes, coalesced)
 
 
 @dataclass(frozen=True)
