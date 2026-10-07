@@ -48,13 +48,14 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
     ready = task.db.execute("SELECT count(*) FROM items WHERE state='READY'").fetchone()[0]
     # This is available work, not an input maximum or a memory-admission estimate.
     lane_count = min(workers, ready)
-    window = 2 * lane_count
+    window = 16 * lane_count
     owner = get_ident()
     calls = queue.Queue(maxsize=max(1, 2 * lane_count))
     completions = queue.Queue(maxsize=max(1, lane_count))
     active, lanes, free = {}, [], []
     first_error = None
     stop = False
+    blocked = False
     extensions = task.image_extensions
     output = task.directory / "output"
 
@@ -114,12 +115,13 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
         call.reply.put(error)
 
     def complete():
-        nonlocal first_error, stop
+        nonlocal first_error, stop, blocked
         while True:
             try:
                 index, item, error = completions.get_nowait()
             except queue.Empty:
                 return
+            blocked = False
             active.pop(index)
             free.append(index)
             if error is None:
@@ -172,25 +174,39 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
                 stop = True
 
     def schedule(executor):
-        nonlocal stop
+        nonlocal stop, blocked
+        if blocked:
+            return
+        # Immutable owner-created descriptors are reused only in this scheduling pass.
+        prepared_cache = {}
         while not stop and (free or len(lanes) < lane_count):
             candidates = task.candidates(limit=window)
             if not candidates:
                 stop = True
                 break
+            # Trim before preparing a shifted window; resident lookahead stays <= 16L.
+            keys = {(row["seq"], row["rid"], row["record_id"]) for row in candidates}
+            prepared_cache = {key: value for key, value in prepared_cache.items() if key in keys}
             busy = {value[1].transport_identity for value in active.values()}
             selected = None
             for candidate in candidates:
-                prepared = PreparedFetch._prepare(
-                    publication,
-                    candidate["record_id"],
-                    capacity=task.capacity,
-                    image_extensions=extensions,
-                )
+                key = (candidate["seq"], candidate["rid"], candidate["record_id"])
+                prepared = prepared_cache.get(key)
+                if prepared is None:
+                    prepared = PreparedFetch._prepare(
+                        publication,
+                        candidate["record_id"],
+                        capacity=task.capacity,
+                        image_extensions=extensions,
+                    )
+                    prepared_cache[key] = prepared
                 if prepared.transport_identity not in busy:
                     selected = candidate, prepared
                     break
             if selected is None:
+                # Only completion can free a busy TAR in this immutable, single-runner task.
+                # The outer loop still drains events and polls pause/cancel requests.
+                blocked = True
                 break
             candidate, prepared = selected
             if not free:

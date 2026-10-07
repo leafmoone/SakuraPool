@@ -407,8 +407,11 @@ throughput growth is not guaranteed.
 
 Let L be the smaller of requested workers and currently ready records. Lanes are
 created lazily for independent usable work, not eagerly for the full input. Active
-operations are bounded by L, candidate/claim lookahead and event envelopes by 2L,
-and completion envelopes by L. SQL lookahead is clipped to actual READY rows before
+operations are bounded by L, candidate/claim lookahead by 16L, event envelopes
+by 2L, and completion envelopes by L. Prepared descriptors are cached within a
+scheduling pass and trimmed to the current lookahead window. When that window
+contains only busy TARs, scanning waits for a completion; pause/cancel polling
+and event acknowledgements continue. SQL lookahead is clipped to actual READY rows before
 binding LIMIT, so very large positive Python integers do not overflow SQLite or
 impose a hidden input maximum. There is no fixed 12-record candidate ceiling.
 Simultaneous requests to the same TAR remain gated. For the earliest eligible
