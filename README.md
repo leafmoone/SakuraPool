@@ -417,7 +417,7 @@ automatic worker increase or replacement memory ceiling is introduced. Choosing
 large concurrency can exhaust real machine resources; successful execution or
 throughput growth is not guaranteed.
 
-Let L be the smaller of requested workers and currently ready records. Lanes are
+Let L be the smaller of requested workers and the ready-record count at runner start. Lanes are
 created lazily for independent usable work, not eagerly for the full input. Active
 operations are bounded by L, candidate/claim lookahead by 16L, event envelopes
 by 2L, and completion envelopes by L. Prepared descriptors are cached within a
@@ -426,12 +426,17 @@ contains only busy TARs, scanning waits for a completion; pause/cancel polling
 and event acknowledgements continue. SQL lookahead is clipped to actual READY rows before
 binding LIMIT, so very large positive Python integers do not overflow SQLite or
 impose a hidden input maximum. There is no fixed 12-record candidate ceiling.
-Simultaneous requests to the same TAR remain gated. For the earliest eligible
-record, the scheduler prefers a free lane with a matching live object binding;
-otherwise it uses free-lane FIFO order. This is a scheduling hint for the next
-chunk, not authorization: data-plane binding and conditional proofs are still
-validated. Per-request chunk/header/RPC, proof-cache, finite retry, integrity and
-no-overwrite boundaries are unchanged.
+Simultaneous requests to the same TAR remain gated. Within the bounded lookahead,
+the oldest eligible record is preferred when a free lane has its live binding.
+Otherwise a later eligible record with a matching warm free lane may run first,
+but at most L consecutive successful dispatches may bypass the oldest eligible
+record. The next dispatch then serves that oldest record, even on a cold lane;
+serving the oldest resets the allowance. Blocked scans and rejected claims do not
+change it. Without a usable warm candidate, eligible-record and free-lane FIFO
+order are used. Frozen selection, sequence numbers and output names never change.
+These next-chunk predictions are scheduling hints, not authorization: data-plane
+binding and conditional proofs are still validated. Per-request chunk/header/RPC,
+proof-cache, finite retry, integrity and no-overwrite boundaries are unchanged.
 
 ## Workspace and implementation boundaries
 

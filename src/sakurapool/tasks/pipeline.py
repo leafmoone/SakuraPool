@@ -28,15 +28,20 @@ def _safe_diagnostic(error):
 
 
 
-def _select_free_lane(free, lanes, prepared, capacity):
-    """Prefer an already warm idle lane; prediction never authorizes a fetch."""
+def _warm_free_lane(free, lanes, prepared, capacity):
+    """Return a warm idle lane hint without authorizing a fetch."""
     # Match the data plane's next-chunk admission, not an entire multi-chunk image.
     lengths = [min(prepared.location["image_size"], capacity.range_chunk_bytes)]
     for index in free:
         predict = getattr(lanes[index][0], "predict_warm", None)
         if callable(predict) and predict(prepared.transport_identity, lengths):
             return index
-    return free[0]
+    return None
+
+
+def _select_free_lane(free, lanes, prepared, capacity):
+    index = _warm_free_lane(free, lanes, prepared, capacity)
+    return free[0] if index is None else index
 
 
 def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=None, control=None):
@@ -56,6 +61,7 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
     first_error = None
     stop = False
     blocked = False
+    warm_bypass_credit = lane_count
     extensions = task.image_extensions
     output = task.directory / "output"
 
@@ -174,11 +180,25 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
                 stop = True
 
     def schedule(executor):
-        nonlocal stop, blocked
+        nonlocal stop, blocked, warm_bypass_credit
         if blocked:
             return
         # Immutable owner-created descriptors are reused only in this scheduling pass.
         prepared_cache = {}
+
+        def prepare(candidate):
+            key = (candidate["seq"], candidate["rid"], candidate["record_id"])
+            value = prepared_cache.get(key)
+            if value is None:
+                value = PreparedFetch._prepare(
+                    publication,
+                    candidate["record_id"],
+                    capacity=task.capacity,
+                    image_extensions=extensions,
+                )
+                prepared_cache[key] = value
+            return value
+
         while not stop and (free or len(lanes) < lane_count):
             candidates = task.candidates(limit=window)
             if not candidates:
@@ -189,37 +209,44 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
             prepared_cache = {key: value for key, value in prepared_cache.items() if key in keys}
             busy = {value[1].transport_identity for value in active.values()}
             selected = None
-            for candidate in candidates:
-                key = (candidate["seq"], candidate["rid"], candidate["record_id"])
-                prepared = prepared_cache.get(key)
-                if prepared is None:
-                    prepared = PreparedFetch._prepare(
-                        publication,
-                        candidate["record_id"],
-                        capacity=task.capacity,
-                        image_extensions=extensions,
-                    )
-                    prepared_cache[key] = prepared
+            for position, candidate in enumerate(candidates):
+                prepared = prepare(candidate)
                 if prepared.transport_identity not in busy:
-                    selected = candidate, prepared
+                    selected = candidate, prepared, position
                     break
             if selected is None:
                 # Only completion can free a busy TAR in this immutable, single-runner task.
                 # The outer loop still drains events and polls pause/cancel requests.
                 blocked = True
                 break
-            candidate, prepared = selected
+            candidate, prepared, position = selected
+            index = _warm_free_lane(free, lanes, prepared, task.capacity)
+            bypass = False
+            if index is None and free and warm_bypass_credit:
+                # A bounded number of warm dispatches may bypass the oldest eligible item.
+                for later in candidates[position + 1:]:
+                    later_prepared = prepare(later)
+                    if later_prepared.transport_identity in busy:
+                        continue
+                    warm = _warm_free_lane(free, lanes, later_prepared, task.capacity)
+                    if warm is not None:
+                        candidate, prepared, index = later, later_prepared, warm
+                        bypass = True
+                        break
             if not free:
                 # Never precreate W processes for a small task or busy-TAR backlog.
                 lane = transport.clone() if hasattr(transport, "clone") else transport
                 lanes.append((lane, OrderedDict()))
                 free.append(len(lanes) - 1)
-            index = _select_free_lane(free, lanes, prepared, task.capacity)
+            if index is None:
+                index = _select_free_lane(free, lanes, prepared, task.capacity)
             preflight(task, publication, candidate, lanes[index][0], prepared=prepared)
             item = task.claim(expected=candidate, window=window)
             if item is None:
                 stop = True
                 break
+            # Failed/no-op claims never consume fairness credit.
+            warm_bypass_credit = warm_bypass_credit - 1 if bypass else lane_count
             if fault_hook:
                 fault_hook("CLAIMED", item)
             free.remove(index)
