@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import tarfile
 from pathlib import Path
@@ -185,6 +186,10 @@ def main(argv: list[str] | None = None) -> int:
     for option in ("publication", "record-id", "profile", "output"):
         publication_fetch.add_argument("--" + option, required=True)
     publication_fetch.add_argument("--metadata", action="store_true")
+    publication_fetch.add_argument("--image-extensions", help="comma-separated registered suffixes")
+    publication_fetch.add_argument("--filename-template", default="{tag}_{index}")
+    publication_fetch.add_argument("--filename-prefix")
+    publication_fetch.add_argument("--filename-index", type=int, default=1)
     publication_fetch.add_argument("--workspace")
     validate = subparsers.add_parser("validate", help="validate a query JSON document")
     validate.add_argument("query", type=Path)
@@ -310,15 +315,32 @@ def main(argv: list[str] | None = None) -> int:
                     workspace.check()
                     from .storage.retrieval import _real_output_root
 
-                    _real_output_root(Path(args.output).absolute(), workspace.ledger())
+                    _real_output_root(Path(args.output).absolute(), physical_root=workspace.root)
                 with load_publication(
                     args.root if args.publication_command != "fetch" else args.publication,
                     full_verify=args.publication_command == "fetch" or getattr(args, "full", False),
                 ) as pub:
                     if args.publication_command == "fetch":
+                        from .download_naming import FilenameConfig
+                        from .storage.flat_delivery import DeliveryMapping
                         from .storage.publication_fetch import fetch_publication_sample
 
-                        if workspace is not None:
+                        if args.filename_index < 1:
+                            raise ValueError("FILENAME_INDEX_INVALID")
+                        naming = FilenameConfig.resolve(template=args.filename_template,
+                                                        prefix=args.filename_prefix)
+                        loc = pub.runtime.location(pub.runtime.resolve_record(args.record_id).rid)
+                        from .image_formats import image_filename
+
+                        suffix = image_filename(pub.runtime.image_format(loc["format_id"]),
+                                                args.image_extensions).removeprefix("image")
+                        mapping = DeliveryMapping(naming.stem(args.filename_index - 1), suffix,
+                                                  bool(args.metadata and loc["flags"] & 1))
+                        mapping.check_paths(Path(args.output).absolute())
+                        if any(os.path.lexists(Path(args.output) / name) for name in mapping.names):
+                            raise ValueError("OUTPUT_CONFLICT")
+
+                        if args.publication_command == "fetch":
                             from .tasks.cli import bounded_json
                             from .tasks.profile import (
                                 connect_profile,
@@ -331,8 +353,7 @@ def main(argv: list[str] | None = None) -> int:
                                 profile = read_profile(args.profile)
                             else:
                                 # Legacy production profile remains a connection description;
-                                # workspace accounting/capacity are explicit,
-                                # never a fresh P4 ledger.
+                                # Only connection scope is retained; no download ledger.
                                 from .storage.production import ProviderObject
 
                                 if (
@@ -367,21 +388,26 @@ def main(argv: list[str] | None = None) -> int:
                                     else {"env": "MODELSCOPE_API_TOKEN"},
                                 }
                                 # Legacy optional env token remains optional.
-                                import os
-
                                 if "token_file" not in profile_data and not os.environ.get(
                                     "MODELSCOPE_API_TOKEN"
                                 ):
                                     profile.pop("credential_ref")
                             validate_allowlist(profile, pub)
-                            transport = connect_profile(
-                                profile, workspace.ledger(), capacity=workspace
+                            root = (
+                                workspace.root
+                                if workspace is not None
+                                else Path(args.output).absolute()
                             )
-                            scope = None
-                        else:
-                            from .storage.production_cli import load_profile
-
-                            _config, scope, transport = load_profile(Path(args.profile))
+                            transport = connect_profile(
+                                profile,
+                                root=root,
+                                capacity=workspace.capacity if workspace else None,
+                            )
+                            scope = (
+                                obj
+                                if profile_data.get("format") != "sakurapool-task-connection-v1"
+                                else None
+                            )
                         with transport:
                             result = {
                                 "output": str(
@@ -391,7 +417,9 @@ def main(argv: list[str] | None = None) -> int:
                                         transport,
                                         args.output,
                                         metadata=args.metadata,
+                                        image_extensions=args.image_extensions,
                                         scope=scope,
+                                        delivery_mapping=mapping,
                                     )
                                 )
                             }

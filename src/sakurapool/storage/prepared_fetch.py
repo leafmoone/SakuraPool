@@ -113,7 +113,7 @@ class PreparedFetch:
         return endpoint, repo_id, repo_type, revision, path, int.from_bytes(size, "big")
 
     @classmethod
-    def _prepare(cls, pub, record_id, *, capacity=None):
+    def _prepare(cls, pub, record_id, *, capacity=None, image_extensions=None):
         from .publication import Publication
 
         if not isinstance(pub, Publication) or pub._closed or not pub.full_verified:
@@ -124,7 +124,13 @@ class PreparedFetch:
         loc = {name: raw_loc[name] for name in ("object_idx", "image_offset", "image_size",
                "metadata_offset", "metadata_size", "format_id", "flags")}
         image_format = rt.image_format(loc["format_id"])
-        if len(record_id) != 32 or image_format not in ("jpg", "jpeg", "png", "webp", "avif"):
+        from ..image_formats import image_filename
+
+        try:
+            image_filename(image_format, image_extensions)
+        except ValueError:
+            raise PublicationCorrupt("prepared extent or format invalid") from None
+        if len(record_id) != 32:
             raise PublicationCorrupt("prepared extent or format invalid")
         row = pub.catalog.execute(
             "SELECT r.endpoint,r.repo_id,r.repo_type,o.revision_candidate,o.object_path,"

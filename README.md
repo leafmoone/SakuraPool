@@ -1,22 +1,334 @@
 # SakuraPool
 
-SakuraPool builds reusable P2 TAR indexes, compiles read-only P3 query snapshots,
-and distributes runtime-first publication v2 for verified selective Range retrieval.
-Local, download and remote builders and explicit budgeted Rust production profiles
-are available; credentials and live binding proofs are never distributed.
-No image decoding, model execution or production throughput claim.
+SakuraPool builds committed TAR indexes, compiles read-only query runtimes, and
+uses source-separated publications for verified selective image/JSON retrieval.
+It does not decode images or run models. Ordinary use needs a complete local
+publication, not original TAR downloads or a new indexing run.
 
-Bounded publication construction includes a serial Python reader:
+## Deploy the product
+
+Use Python 3.10+ with the pinned dependencies; the current verified Windows
+interpreter is Python 3.13. PyArrow 18.1.0 / NumPy 2.2.6 do not provide Windows
+CPython 3.14 wheels. A newer version number alone does not establish compatibility.
+The Python wheel contains the Python package, not a prebuilt Rust executable.
+Build the worker from this repository or the source distribution with the committed
+Cargo.lock/toolchain. Rust needs a working platform linker (GNU on the verified host).
+
+```console
+git clone --branch main https://github.com/leafmoone/SakuraPool.git
+cd SakuraPool
+python -m venv .venv
+# Activate .venv using your shell, then:
+python -m pip install '.[remote]'
+```
+
+PowerShell worker build (project-local output, no inherited shared Cargo target):
+
+```powershell
+Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+# GNU Windows toolchain: add your installed MinGW/MSYS2 UCRT64 compiler bin.
+# Example if installed at the conventional location:
+$env:PATH = "C:\msys64\ucrt64\bin;" + $env:PATH
+cargo build --manifest-path rust/Cargo.toml --locked --release --bin sakurapool-worker --target-dir rust/target
+$worker = (Resolve-Path rust/target/release/sakurapool-worker.exe).Path
+sakura --version
+```
+
+On POSIX use:
+
+```console
+env -u CARGO_TARGET_DIR cargo build --manifest-path rust/Cargo.toml --locked --release --bin sakurapool-worker --target-dir rust/target
+```
+
+The executable is `rust/target/release/sakurapool-worker`. Keep its absolute path for the private
+connection profile below. Source distributions carry the Rust sources/lockfile;
+compiling the worker does not require image data or ModelScope credentials. A
+prepopulated Cargo dependency cache permits the same command with `--offline`.
+
+## Public source indexes and explicit installation
+
+Public index repository: [leafmoone/SakuraPool](https://modelscope.cn/datasets/leafmoone/SakuraPool).
+Pin release **`8d0aab1697b57288caf13b4c18c08fb2fa401518`**. It covers **715 committed
+partitions / 22,792 TAR objects / 26,430,011 retained records**, verified from the
+COMMIT/Parquet contracts and exact fixed provider path/size/SHA metadata, not an
+estimated 22M/30M/40M or a claim of unique image content.
+
+| Source | Partitions | TAR objects | Records | Local index bytes |
+|---|---:|---:|---:|---:|
+| anime_pictures | 32 | 1,000 | 642,954 | 169,066,240 |
+| bangumi | 94 | 3,000 | 4,168,774 | 836,745,004 |
+| danbooru | 361 | 11,552 | 11,132,809 | 2,978,602,701 |
+| gamecg | 8 | 240 | 5,177,447 | 1,212,210,257 |
+| konachan | 32 | 1,000 | 318,760 | 80,221,647 |
+| yande | 94 | 3,000 | 1,124,564 | 245,637,771 |
+| zerochan | 94 | 3,000 | 3,864,703 | 935,541,500 |
+
+Each source has an independent runtime and publication, with 12 required files.
+Download only the chosen source, preserve every relative path, and do not mix
+sources/snapshots. `catalog.json` is the public file/source catalog. The release
+combines 612 partitions from `leafmoone/sakurapool-index` at
+`f94469c4b5c8b5d082c5c34f116a2286a633968b` and 103 disjoint partitions from
+`leafmoone/sakurapool-index-checkpoint-20261003t111628z` at
+`ec49db9baff7c1dc10457e5012e6b8f3be1ae64a`.
+
+Index acquisition is explicit; SakuraPool has no automatic discovery/installer.
+The following standalone example uses the verified public dataset file API and
+no credential. Change `source` to another table entry and use a fresh destination;
+it downloads index files only, not images. Install `.[remote]` for `requests`.
+
+```python
+from pathlib import Path, PurePosixPath
+import requests
+
+repo = "leafmoone/SakuraPool"
+revision = "8d0aab1697b57288caf13b4c18c08fb2fa401518"
+source = "konachan"
+root = Path("local-index")
+root.mkdir(exist_ok=False)
+url = f"https://modelscope.cn/api/v1/datasets/{repo}/repo"
+with requests.Session() as session:
+    session.trust_env = False  # Do not inherit .netrc/proxy credentials.
+    response = session.get(url, params={"Revision": revision, "FilePath": "catalog.json"},
+                           timeout=(10, 60))
+    response.raise_for_status()
+    catalog = response.json()
+    entry = next(item for item in catalog["sources"] if item["source"] == source)
+    for item in entry["files"]:
+        relative = PurePosixPath(entry["path"]) / item["path"]
+        if relative.is_absolute() or ".." in relative.parts or "\\" in str(relative):
+            raise ValueError("invalid catalog path")
+        target = root / str(relative)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        size = 0
+        with session.get(url, params={"Revision": revision, "FilePath": str(relative)},
+                         stream=True, timeout=(10, 60)) as response:
+            response.raise_for_status()
+            with target.open("xb") as output:
+                for chunk in response.iter_content(1024 * 1024):
+                    size += len(chunk)
+                    if size > item["bytes"]:
+                        raise ValueError("index file exceeds declared size")
+                    output.write(chunk)
+        if size != item["bytes"]:
+            raise ValueError("index file is truncated")
+print(root / entry["path"])
+```
+
+Then fully verify the downloaded publication; its root is the selected source
+folder, **not** `local-index` itself:
+
+```console
+sakura publication verify local-index/sources/konachan --full
+```
+
+Public index access does **not** grant access or rights to the original images.
+Image locators remain `leafmoone/webdataset_danbooru_v3` at
+`73306f1dc5459238710f477b376c36da997d020c`. That repository is marked private;
+original-repository authorization and credentials are required. Anonymous detail
+metadata is readable, but it is not proof of anonymous image access. Apache-2.0
+covers the distributed index metadata, not original-image or third-party rights.
+No image TAR or private checkpoint management file is mirrored in the public index.
+
+### Query one source and create an image-download task
+
+Save `{"sources":["konachan"]}` as `source-query.json`. A source query is a query
+JSON field, not a `task create --source` option. Task creation is local/offline:
+
+```console
+sakura task create --publication local-index/sources/konachan --query source-query.json --selection first --limit 3 --task-dir TASK
+sakura task inspect TASK
+```
+
+For later retrieval, save a **private** `TASK_PROFILE.json` with your built worker
+path and a credential reference (do not put the token itself in this JSON):
+
+```json
+{
+  "format": "sakurapool-task-connection-v1",
+  "origin": "https://modelscope.cn",
+  "repositories": ["leafmoone/webdataset_danbooru_v3"],
+  "worker": "/absolute/path/to/sakurapool-worker",
+  "credential_ref": {"env": "MODELSCOPE_API_TOKEN"}
+}
+```
+
+On Windows the worker path must be your real absolute `.exe` path, escaped for
+JSON. Set `MODELSCOPE_API_TOKEN` privately to a credential with original-repository
+access, then explicitly start the image task:
+
+```console
+sakura task run TASK --profile TASK_PROFILE.json --workers 1
+sakura task export TASK --manifest TASK/manifest.jsonl
+```
+
+This example selects three images; creation/inspection do not download them.
+`publication fetch` downloads selected image records, not index packages. Larger
+worker counts are explicit choices, not automatic tuning or throughput promises.
+
+## Lightweight downloads (current contract)
+
+New downloads use **TaskDB v4**, frozen flat-output naming, and **workspace manifest v2**. The production
+path does not instantiate `BudgetLedger`, read/write budget slots, recursively
+scan disk for quota admission, or persist request/body/metadata/saved-byte
+consumption. There is no cumulative request, bandwidth, saved-count, disk-output,
+or task-output quota. `--max-output-bytes` and workspace policy updates have been
+removed from the download CLI. Historical ledger files are never reset or settled.
+
+Only light task state is durable: frozen query/selection/seed, publication and
+plan identity, current operation/phase, owned temporary-file identity, verified
+file receipt, bounded retry lifecycle, and a sanitized failure diagnostic. An
+item failure and its diagnostic commit together with task `FAILED`. Use
+`task inspect TASK --failure-seq SEQ` to read it without changing the task.
+Diagnostics contain fixed codes/phases, HTTP status and member/chunk location;
+never exception messages, URLs, paths, tokens, headers or cumulative consumption.
+
+New workers negotiate protocol **2** with same-instance capability
+`production_download_lightweight_v1` and exact technical execution-limit echo.
+An old worker or mismatched capability/limits fails before provider requests.
+Build a matching worker with an explicit project target directory and update a
+connection description deliberately; old profiles/binaries are not auto-rewritten.
+Protocol 1 remains for historical indexing/administration operations, not a
+hidden legacy download switch. Request-ID deduplication remains bounded at 256;
+rotation clears conditional proofs and revalidates them before further Range IO.
+
+The following remain technical safety/format boundaries, not consumption quotas:
+per-request chunk/header/RPC buffers, selection heap and
+SQLite/JSON parser bounds, exact indexed extents and image SHA, bounded metadata
+validation, trusted origin/redirect policy, conditional positive/negative proof,
+finite Origin retry (at most 3) plus CDN hop, owned temporary files and atomic
+no-overwrite **per-file** publication. An image plus JSON is not pair-atomic:
+only the verified receipt/DONE state and exported manifest mark a complete delivery.
+Large images may stream over several configured chunks.
+No change implies image decoding or conversion.
+
+Resume never reselects records. A published receipt must match task/operation,
+file/directory identities and indexed image SHA before `DONE/VERIFIED`; valid
+published output is reused, not redownloaded. Crashed `IN_PROGRESS` can become
+`READY` only after claimed-before-network or exact owned-temp cleanup evidence.
+Unknown/replaced output and ambiguous protocol failures remain `BLOCKED`, not
+blindly retried. Classified transient, unpublished failures require explicit
+resume; at most two recovery retries survive process restarts. This is not an
+end-to-end exactly-once or Windows directory power-loss guarantee.
+
+Existing TaskDB v3 record-directory archives retain **read-only DB inspection and
+receipt-verified export compatibility**. Export creates a new manifest in that task
+domain: it is not a zero-write operation on the entire domain. All v3 execution,
+resume, pause/cancel and settings updates now explicitly fail
+`LEGACY_TASK_MIGRATION_REQUIRED` before credentials or writable SQLite. This is an
+explicit format4 execution-contract switch, not automatic migration. Completed v3
+images/record directories and already generated manifests are not renamed or changed.
+
+Existing TaskDB v1/v2 archives allow **read-only inspection only**. Export writes
+an artifact, so legacy export is explicitly rejected as well: every action except
+inspect fails `LEGACY_TASK_MIGRATION_REQUIRED` before publication loading, output
+creation, writable SQLite/journal or credential handling. This does not authorize
+export to an external path, copying or migration. Migration is not automatic:
+confirmed deliveries need revalidation, uncertain items need isolation, and old
+UNKNOWN/pending accounting must remain archived. No migration or production
+resume is authorized by these implementation changes.
+
+## Flat filenames and recoverable publication
+
+New task outputs are directly under `output`, without record-ID directories. Task
+creation accepts `--filename-template` (default `{tag}_{index}`) and optional
+`--filename-prefix` replacing the tag label. The only supported fields are `{tag}`
+and `{index}`; index must occur exactly once, without format specs, conversions or
+attribute lookup. `index` is frozen selection `seq + 1`, never completion order.
+For a `1girl` query the outputs are `output/1girl_1.jpg`, `output/1girl_2.png`, etc.;
+requested and available metadata uses the same stem, such as `1girl_1.json`.
+Suffixes come from the actual indexed format; templates cannot specify extensions.
+
+Positive all/any tags and any-of branches are deterministically sorted/deduplicated
+and joined with underscores (qualified tags include namespace). Negative tags do
+not affect naming; no positive tag means `image`. Generated labels are NFC-normalized
+and Windows-forbidden characters become underscores. Explicit prefixes/template
+literals reject unsafe characters, controls, separators/traversal, reserved Windows
+names and terminal spaces/dots. Length limits are 240 UTF-8 bytes /180 UTF-16 units
+per basename and 240 UTF-16 units for the absolute output path. Long labels fail
+rather than silently truncate; choose an explicit short prefix. NFC-casefold stem
+uniqueness is checked at task freeze, independent of extension. All targets use
+no-overwrite publication. Filename policy/config and per-item stems are part of the
+frozen header/plan; format settings updates cannot rename them.
+
+```text
+sakura task create --workspace WORKSPACE --publication PUB --query QUERY.json --selection first --limit 3 --metadata --filename-template "{tag}_{index}" --filename-prefix batch --task-dir WORKSPACE/tasks/TASK
+sakura task run WORKSPACE/tasks/TASK --profile PROFILE.json --workers 6
+```
+
+The same publisher is used by direct `publication fetch` (default `image_1`, explicit
+`--filename-index`, template/prefix options) and `PublicationSession.fetch`, whose
+caller must supply `filename_index`. Direct/session callers select stable indexes;
+there is no automatic completion-order counter.
+
+A private identity-owned stage holds verified/fsynced bytes. PREPARED commits the
+exact source-to-final member map, root/stage/file identities and hashes;
+PUBLISH_INTENT commits before any no-replace rename. Per-member SQL acknowledgements
+and final verification precede PUBLISHED/DONE. A task restart can finish an interrupted
+pair only from that durable intent plus exact original file identity. Matching
+names/content alone cannot authorize adoption, deletion or overwrite. Missing,
+replaced, ambiguous or moved-back acknowledged files remain BLOCKED and preserved.
+The shared output directory may contain other records/user files; recovery checks
+only the operation's mapping and private stage, not exclusive ownership of output.
+
+There may be a visible image before its JSON. Direct/session calls without TaskDB
+preserve partial data on failure and do not promise automatic restart/adoption.
+Unsupported no-replace platforms fail closed; there is no fallback to overwriting
+rename and no Windows power-loss/exactly-once promise. No consumption ledger is added.
+
+## Raw image delivery settings
+
+Publication/task downloads support registered `.jpg`, `.jpeg`, `.png`, `.webp`,
+`.avif`, and `.gif` formats. The default remains the first five; GIF is opt-in.
+`publication fetch` and `task create` accept `--image-extensions` as comma-separated
+suffixes. Bytes are verified and delivered unchanged; no decoding or conversion
+is performed. Unknown formats and unsafe filenames are rejected. Index adapter
+`image_extensions` controls scanning and does not automatically enable download
+formats.
+
+New v4 tasks can explicitly expand their format selection without reselecting records:
+
+```text
+sakura task inspect /workspace/tasks/task
+sakura task update /workspace/tasks/task --expected-settings-version 0 --image-extensions .jpg,.jpeg,.png,.webp,.avif,.gif
+```
+
+Use the actual `settings_version` from inspect. New tasks start at version zero
+with the original five defaults. Updates use compare-and-swap, reject format
+removal and active runners/items, and commit the latest format/version in one
+transaction. Frozen selection/seed/plan and verified deliveries are unchanged.
+There is no output ceiling, ledger lease or consumption audit to update.
+
+
+The serial Python publication reader is:
 `from sakurapool.storage.publication_session import PublicationSession`.
 A session fully verifies once, serves multiple record fetches and closes its bounded
-binding cache. It owns the publication handle, not the caller's transport/ledger.
+binding cache. It owns the publication handle, not the caller's transport.
 PublicationSession itself is serial and same-thread: no cross-thread SQLite use.
 The task coordinator separately supports bounded concurrent lanes; this is not a
 concurrent scheduler inside a shared PublicationSession.
-Explicit user workspaces provide resource/capacity policy. Default task workers=1;
-2/4 are explicit upper bounds, with actual concurrency limited by object distribution
-and resource admission. Budget/ledger v2 migration is not implemented. Earlier P3/P4 CLI examples below are historical/admin
-interfaces, not the default task workflow.
+Default task workers=1; `--workers` and the API accept
+any strictly positive integer, without an enumeration or configured maximum.
+Actual concurrency depends on ready work, object distribution and available OS
+resources. Earlier P3/P4 CLI examples below are historical/admin interfaces,
+not the default task workflow.
+
+### Speed and concurrency limits
+
+The previous 1/2/4/6 choices and estimated 512 MiB aggregate-memory admission are
+removed by explicit user contract change. Zero, negative and non-integer workers
+(including API booleans) are invalid; default remains 1. No machine-RAM detection,
+automatic worker increase or replacement memory ceiling is introduced. Choosing
+large concurrency can exhaust real machine resources; successful execution or
+throughput growth is not guaranteed.
+
+Let L be the smaller of requested workers and currently ready records. Lanes are
+created lazily for independent usable work, not eagerly for the full input. Active
+operations are bounded by L, candidate/claim lookahead and event envelopes by 2L,
+and completion envelopes by L. SQL lookahead is clipped to actual READY rows before
+binding LIMIT, so very large positive Python integers do not overflow SQLite or
+impose a hidden input maximum. There is no fixed 12-record candidate ceiling.
+Simultaneous requests to the same TAR remain gated, and per-request chunk/header/RPC,
+proof-cache, finite retry, integrity and no-overwrite boundaries are unchanged.
 
 ## Workspace and implementation boundaries
 
@@ -27,19 +339,19 @@ sakura doctor --workspace WORKSPACE --profile PROFILE.json
 sakura task create --workspace WORKSPACE --publication PUB --query QUERY.json --selection first --limit 3 --metadata --task-dir WORKSPACE/tasks/TASK
 ```
 
-The immutable capacity/layout belongs to workspace manifest v1; workspace ledger
-v3 and TaskDB v2 retain physical-domain, identity and lineage binding. ResourcePolicy
-is mutable with a durable epoch (`--expected-epoch` is explicit CAS; omission is
-last-writer-wins). New cumulative quotas default to JSON null, not legacy P4 limits;
-disk/inflight remain bounded. No legacy ledger or UNKNOWN task migration is provided.
+New workspace manifest v2 freezes physical-domain identity and technical capacity;
+TaskDB v4 binds the workspace, exact frozen plan and filename mapping. `workspace init --config`
+accepts only `capacity`, not a download resource policy. `workspace inspect` reads
+legacy workspace identity without opening its ledger. Legacy-task migration is
+explicitly separate and is not implemented automatically.
 
 Metadata is validated as a JSON object without materializing its object graph: strict
 UTF-8, no BOM, NaN or Infinity, depth at most 128 and at most 1,000,000 nodes.
 These are validator implementation boundaries, not adjustable metadata byte capacity.
 Duplicate keys and escaped unpaired surrogates remain accepted. Flagged empty metadata
 is invalid. This is intentionally narrower than every input accepted by `json.loads`.
-The fixed validator working reservation is 8,320 bytes; parse failure does not erase
-operation UNKNOWN or release a lease whose ownership has escaped.
+The fixed validator working-set allowance is 8,320 bytes; validation failure
+prevents publication and preserves unrecognized temporary files.
 
 RPC capacity is negotiated, with a separate 64 KiB bootstrap and bounded queue/parser.
 The pinned reqwest/hyper HTTP/1 implementation has a 417,792-byte incomplete-head
@@ -48,13 +360,12 @@ threshold and an independent 100-field limit. Configured decoded header bytes ab
 canonical HTTP/1.1 206 status line; extra wire whitespace or a longer reason phrase
 can hit the underlying parser boundary earlier. It is not a universal response guarantee.
 
-Ledger and protocol admission model live working allocations and deduct ledger
-headroom once from available inflight. Python object sizes vary by interpreter;
-headroom is not a universal fixed number. The protocol header factor covers conservative
-pinned hyper 1.11.1 / bytes 1.12.1 growth/copy scenarios, not a formal allocator or RSS
-upper bound. Native/unrelated process memory and allocator caches are outside this model.
-Public ledger calls return small values and clear operation frames while locked;
-arbitrary external retention of private `_read_pair` results is outside the model.
+Download lanes have no estimated aggregate-memory admission or worker-count
+maximum. This does not remove the independent per-request protocol/parser/header
+and chunk capacities described above, nor image/metadata integrity checks. There
+is no promise that a chosen worker count fits physical RAM; actual OS resource
+failures remain possible. Historical protocol allocation factors are not a new
+aggregate download ceiling.
 
 ## Task API (recoverable task workflow)
 
@@ -77,8 +388,8 @@ sakura task export TASK --manifest OUTPUT.jsonl
 
 Creation/inspection are local: no HTTP or token reading. Task/output/export paths
 must be contained in their validated workspace physical domain; publication can be read
-outside it. Omit `--workspace` only for an existing workspace-bound task (automatic
-identity discovery) or the unchanged legacy P4 workflow. TaskDB uses DELETE journal and FULL synchronization with short explicit
+outside it. Workspace-bound tasks support automatic identity discovery; standalone
+new tasks are also lightweight. TaskDB uses DELETE journal and FULL synchronization with short explicit
 transactions, plus a real single-runner OS file lock. One serial session fully
 verifies the publication once per runner process. Pause/cancel CLI returns a
 **requested** state: the bounded current item finishes before another is claimed.
@@ -94,30 +405,27 @@ Optional `credential_ref` is `{"env":"MODELSCOPE_API_TOKEN"}` or a bounded
 `{"file":"ABSOLUTE_TOKEN_FILE"}` reference, not an embedded credential.
 Object paths/revisions/digests come from the pinned publication, not this profile.
 
-Successful durable per-attempt delivery/settlement receipts recover without
-re-downloading or incrementing saved counts. An output with unknown settlement
-is preserved and blocked, not retried or refunded. Lease absence and global
-counter differences are not proof. There is no end-to-end exactly-once claim.
-Exports stream only verified confirmed deliveries with source/plan identity,
+Successful durable delivery receipts recover without redownloading. Unknown
+output is preserved and blocked; neither filename existence nor absence of a
+historic lease proves success. There is no end-to-end exactly-once claim.
+New v4 tasks and receipt-verified v3 archives can export; legacy v1/v2 export
+requires migration and is currently rejected without writing. Exports stream only
+receipt-verified deliveries with source/plan identity,
 relative task paths and delivery hashes, without image copies or archives.
 The manifest must be directly inside TASK (for example TASK/subset.jsonl), so
-its `output/<record_id>/...` paths resolve relative to the manifest's directory;
+its relative `output/...` paths resolve relative to the manifest's directory;
 a different export base is explicitly rejected.
-Legacy root, saved/body/attempt caps and binary ledger format remain unchanged;
-RESOURCE_BLOCKED does not mean a user's authorized real request was exhausted.
-Local resource diagnostics state effective limits, actual remaining and required
-admission. Network body/attempt estimates before listing are **lower bounds**;
-each later request still needs the legacy ledger's own reservation. No exact
-per-task network consumption is inferred from global counters.
+Legacy binary ledger formats remain archives/admin compatibility and are not
+used by new downloads. No exact per-task network consumption is recorded or
+inferred from historical global counters.
 
-Explicit current task bounds: 100,000 frozen entries, 10,000 in-memory sample
+Default technical task capacities (configurable, not consumption quotas): 100,000 frozen entries, 10,000 in-memory sample
 heap entries, 512-record identity batches, 32 MiB TaskDB, 33 MiB journal allowance,
 64 KiB plan header and 32 MiB exported manifest. SQLite temp work uses memory;
-the maximum DB page count is derived from its actual page size. Task admission
-also reserves growth/journal overhead under the legacy physical-root budget.
-Windows file/SQLite fsync is used; portable Windows directory power-loss durability
-is not claimed. Larger than 8 MiB members remain unsupported. Bounded task
-concurrency is available; general workspace/ledger v2 migration is not implemented.
+the maximum DB page count is derived from its actual page size. Windows file/
+SQLite fsync is used; portable Windows directory power-loss durability is not
+claimed. Configure image capacity for larger images while keeping bounded chunks.
+Bounded task concurrency is available; automatic legacy migration is not implemented.
 Production-scale validation is tracked separately.
 
 ## Publication v2 (runtime-first distribution)
@@ -148,44 +456,51 @@ all hashes and cross-checks catalog identities. Fetch requires a full-verified
 publication, fresh exact provider lookup, then its own positive/negative
 conditional binding before Rust Range reads. Neither live ETag/proof nor signed
 URL is persisted. Publication storage may be outside the network work root;
-fetch outputs and accounting remain governed by the existing production ledger.
+fetch outputs use the same ledger-free streaming and integrity path as tasks.
 
-Image mismatch prevents delivery. A ledger settlement failure *after* atomic
-rename may leave verified output visible with conservative pending accounting;
-this is an error, not successful settlement, and the output is never overwritten.
+Image mismatch prevents delivery. A crash after atomic rename may leave visible
+output with an unfinished task operation; recovery verifies its durable receipt
+before reuse, and no output is overwritten.
 Synthetic million-record measurements are not a production capacity guarantee.
 
 ## Project workflow and boundaries
 
-The administrator flow is remote TAR indexing →
+The explicit administrator flow is remote TAR indexing →
 durable index → runtime compile/verify → versioned index publication. The user
 flow is install/verify a published index → query → locate image/JSON → Range
 retrieval → a small local dataset. Earlier P3 descriptions of remote scanning,
 publication and retrieval as future work are historical; current explicit interfaces
-are described above and do not imply a complete production index is available.
+are described above. The separately published fixed index scope is listed at the top.
 
 Ordinary users do not need complete local TARs; LocalTarScanner is for local
-inputs, testing and validation. No ready-to-import index currently exists; do not
-search for old hfutils/CheeseChaser indexes as a prerequisite. Large-repository
-index construction is an explicit administrator operation, not an implicit fetch step.
+inputs, testing and validation. Use the published complete source folders above;
+do not search for old hfutils/CheeseChaser indexes as a prerequisite. New large
+image scans/builds require separate authorization; naming an image repository does
+not grant access, scanning or write permission.
 
-The explicit Rust production transport and administrator pipeline interfaces are
-documented in [R2 transport](docs/R2_TRANSPORT.md), including configuration, gates and
-whole-TAR spool/memory limits. Ordinary fetch requires a verified local package
-and must not implicitly scan.
+The explicit Rust administrator pipeline has download-then-scan and
+remote-stream-scan modes; see [R2 transport](docs/R2_TRANSPORT.md) for configuration
+and whole-TAR spool/memory limits, and [local partition builder](docs/local-partition-builder.md)
+for already-local TARs. These indexing/administration interfaces are separate from
+ordinary lightweight retrieval; ordinary fetch requires a verified local publication
+and never implicitly scans original archives.
 
 ## Installation and CLI
 
 Python 3.10 or newer is required by the code and dependency minimums; there is no
-project-imposed upper version bound.
+project-imposed upper version bound or mandatory Python 3.12 certification policy.
 Use the newest stable interpreter that actually installs and passes verification
 with the pinned dependencies, not simply the highest version number. On Windows
 x86-64, the current PyArrow 18.1.0 / NumPy 2.2.6 pins provide CPython 3.13 wheels
-but not 3.14 wheels. Use a compatible interpreter rather than silently upgrading
-those pins, transplanting Arrow, or using `--no-deps`.
+but not 3.14 wheels. Removing the metadata upper bound does not certify 3.14 or
+permit silently upgrading those pins, transplanting Arrow, or using `--no-deps`.
+
+Verification subprocesses use the invoking interpreter (`sys.executable`)
+rather than a retired virtual-environment path. Development tests live on `dev`;
+product-only `main` and release distributions intentionally exclude tests/reports/plans.
 
 ```console
-python -m pip install .
+python -m pip install '.[remote]'
 sakura --version
 sakura config validate --config examples/index-config.json
 sakura index scan --config examples/index-config.json --dataset synthetic --input /local/tars --output /local/index
@@ -239,7 +554,8 @@ uint64 extent without opening or decoding images. P2 local objects use
 **Migration impact:** version 1 outputs must not be reused. Build a new output directory;
 there is no in-place migration. Object IDs, record IDs, table columns, error codes,
 summary counts, and crash hooks changed. Existing P1 query APIs remain unchanged but
-are not automatically a query engine for the four domain tables.
+are not automatically a query engine for the four domain tables. Historical P2 reports
+describe the obsolete v1 protocol, not current certification.
 
 ## Four Arrow tables
 
@@ -305,7 +621,7 @@ objects_skipped. created_at and timings are nondeterministic; logical rows/IDs/c
 are deterministic. Memory still scales with the largest shard (headers and rows are
 materialized); batched Parquet writing is not a bounded-memory streaming claim.
 
-## Storage format
+## Durable format compatibility
 
 The current on-disk contract is `FORMAT_VERSION=4`, builder `sakurapool-p2-v4`.
 `storage_id` is a stable configured profile identifier (default `local`), independent of
@@ -314,6 +630,7 @@ object_size, object_version, and validator. `archive_format=tar` is separate fro
 `repo_type=local`. Version 3 outputs are incompatible and must not be reused; build a
 new output directory. Future ModelScope validation MUST NOT use remote full-object SHA
 rereads as the normal validation path; use fixed revisions and object validators.
+P4 MUST NOT use remote full-object SHA rereads as the normal ModelScope validation path.
 
 ## P3 runtime
 

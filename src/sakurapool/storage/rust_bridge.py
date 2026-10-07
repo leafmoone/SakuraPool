@@ -20,6 +20,8 @@ from .production_resources import (
 )
 
 PROTOCOL_VERSION = 1
+LIGHTWEIGHT_PROTOCOL_VERSION = 2
+LIGHTWEIGHT_CAPABILITY = "production_download_lightweight_v1"
 MAX_LINE_BYTES = 64 * 1024
 MAX_SCAN_RESPONSE_BYTES = 64 * 1024 * 1024
 MAX_SCAN_MEMBERS = 100_000
@@ -152,6 +154,7 @@ class RustWorker:
         job_budget: dict | None = None,
         timeout_s: float = _TIMEOUT_S,
         capacity=None,
+        lightweight: bool = False,
     ) -> None:
         binary = Path(binary)
         if not binary.is_file():
@@ -162,13 +165,19 @@ class RustWorker:
 
         if capacity is not None and not isinstance(capacity, CapacityConfig):
             raise ValueError("typed capacity required")
-        self.capacity = capacity
+        self.lightweight = lightweight
+        if lightweight and job_budget is not None:
+            raise ValueError("lightweight worker does not accept budget")
+        self.protocol_version = LIGHTWEIGHT_PROTOCOL_VERSION if lightweight else PROTOCOL_VERSION
+        self.capacity = capacity = (
+            CapacityConfig() if lightweight and capacity is None else capacity
+        )
         self._line_bytes = capacity.rpc_line_bytes if capacity is not None else MAX_LINE_BYTES
         self._bootstrap_bytes = PROTOCOL_BOOTSTRAP_BYTES
         self.capabilities: tuple[str, ...] = ()
         self.worker_version: str = ""
         self.protocol_resident_bytes = 0
-        normalized_budget = _normalize_budget(job_budget)
+        normalized_budget = None if lightweight else _normalize_budget(job_budget)
         self._proc = None
         self._reader = self._stderr_reader = None
         self._lines: queue.Queue[bytes] = queue.Queue(maxsize=_STDOUT_QUEUE_LINES)
@@ -338,10 +347,12 @@ class RustWorker:
             raise RustWorkerError("worker response line too long")
         return message
 
-    def _handshake(self, job_budget: dict) -> None:
-        hello = {"type": "hello", "protocol_version": PROTOCOL_VERSION, "budget": job_budget}
+    def _handshake(self, job_budget: dict | None) -> None:
+        hello = {"type": "hello", "protocol_version": self.protocol_version}
+        if not self.lightweight:
+            hello["budget"] = job_budget
         if self.capacity is not None:
-            hello["stream_capacity"] = {
+            hello["execution_limits" if self.lightweight else "stream_capacity"] = {
                 "range_chunk_bytes": self.capacity.range_chunk_bytes,
                 "http_header_bytes": self.capacity.http_header_bytes,
                 "rpc_line_bytes": self.capacity.rpc_line_bytes,
@@ -351,7 +362,10 @@ class RustWorker:
             raise RustWorkerError("worker request line too long")
         self._send(line)
         message = self._receive(max_line_bytes=self._bootstrap_bytes)
-        if message.get("type") != "ready" or message.get("protocol_version") != PROTOCOL_VERSION:
+        if (
+            message.get("type") != "ready"
+            or message.get("protocol_version") != self.protocol_version
+        ):
             self.cancel()
             raise RustWorkerError("worker handshake failed")
         self.worker_version = str(message.get("worker_version", ""))
@@ -362,9 +376,18 @@ class RustWorker:
             self.cancel()
             raise RustWorkerError("worker handshake failed")
         self.capabilities = tuple(capabilities)
-        if self.capacity is not None and (
-            "production_transfer_v2" not in self.capabilities
-            or message.get("stream_capacity") != hello["stream_capacity"]
+        if self.lightweight and (
+            LIGHTWEIGHT_CAPABILITY not in self.capabilities
+            or message.get("execution_limits") != hello["execution_limits"]
+        ):
+            raise RustWorkerError("worker lightweight capability negotiation failed")
+        if (
+            not self.lightweight
+            and self.capacity is not None
+            and (
+                "production_transfer_v2" not in self.capabilities
+                or message.get("stream_capacity") != hello["stream_capacity"]
+            )
         ):
             self.cancel()
             raise RustWorkerError("worker capacity negotiation failed")
@@ -394,10 +417,14 @@ class RustWorker:
             "type": "request",
             "request_id": uuid.uuid4().hex,
             "operation": operation,
-            "budget": _normalize_budget(budget),
+            **({} if self.lightweight else {"budget": _normalize_budget(budget)}),
             "payload": payload if payload is not None else {},
         }
         response_limit = MAX_SCAN_RESPONSE_BYTES if scan else self._line_bytes
+        if self.lightweight:
+            if budget is not None or payload is None or "production" not in payload:
+                raise RustWorkerError("lightweight request invalid")
+            response_limit = self._line_bytes
         self._response_line_bytes = response_limit
         try:
             self._send((json.dumps(request) + "\n").encode("utf-8"))

@@ -1,4 +1,4 @@
-"""Serial publication session bound to one ledger and capacity."""
+"""Serial lightweight publication session bound to one transport and capacity."""
 
 from threading import get_ident
 
@@ -8,10 +8,21 @@ from .publication_fetch import fetch_publication_sample
 
 
 class PublicationSession:
-    def __init__(self, root, transport, *, control=None, scope=None, capacity=None):
+    def __init__(
+        self, root, transport, *, control=None, scope=None, capacity=None, image_extensions=None,
+        filename_template="{tag}_{index}", filename_prefix=None
+    ):
+        from ..download_naming import FilenameConfig
+        from ..image_formats import image_extensions as validate_extensions
+
+        self.filename_config = FilenameConfig.resolve(
+            template=filename_template, prefix=filename_prefix
+        )
+        self.image_extensions = validate_extensions(image_extensions)
         self._owner = get_ident()
         self.transport = transport
-        self.ledger = transport.ledger
+        if getattr(transport, "ledger", None) is not None:
+            raise ValueError("download consumption ledger unsupported")
         self.capacity = (
             capacity if capacity is not None else getattr(transport, "capacity", CapacityConfig())
         )
@@ -24,7 +35,7 @@ class PublicationSession:
         self.control, self.scope = control, scope
         self.publication = load_publication(root, full_verify=True)
         self._publication = self.publication
-        self._transport, self._ledger = transport, transport.ledger
+        self._transport = transport
         self._identity = (self.publication.content_digest, self.publication.runtime.snapshot_id)
         self._closed = False
 
@@ -33,15 +44,14 @@ class PublicationSession:
             self._closed
             or get_ident() != self._owner
             or self.transport is not self._transport
-            or self.ledger is not self._ledger
             or self.publication is not self._publication
-            or self.transport.ledger is not self._ledger
+            or getattr(self.transport, "ledger", None) is not None
             or self._identity
             != (self.publication.content_digest, self.publication.runtime.snapshot_id)
         ):
-            raise PublicationCorrupt("serial session lifecycle/ledger mismatch")
+            raise PublicationCorrupt("serial session lifecycle/transport mismatch")
 
-    def fetch(self, record_id, output, *, metadata=False, attempt_hook=None):
+    def fetch(self, record_id, output, *, filename_index, metadata=False, attempt_hook=None):
         self._check()
         return fetch_publication_sample(
             self.publication,
@@ -53,6 +63,10 @@ class PublicationSession:
             scope=self.scope,
             attempt_hook=attempt_hook,
             capacity=self.capacity,
+            image_extensions=self.image_extensions,
+            filename_template=self.filename_config.template,
+            filename_prefix=self.filename_config.prefix,
+            filename_index=filename_index,
         )
 
     def close(self):

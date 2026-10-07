@@ -1,13 +1,13 @@
 //! Bounded NDJSON worker. Bootstrap is fixed; later lines use negotiated capacity.
 use sakurapool_rust::{
     http_request, scan_http_tar, scan_tar_file, BudgetLimits, ByteRange, HttpOp, HttpPolicy,
-    JobBudget, ScanLimits, StreamingSha256, MAX_LINE_BYTES, PROTOCOL_VERSION,
+    JobBudget, ScanLimits, StreamingSha256, MAX_LINE_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::io::{self, BufRead, Write};
 
-const CAPABILITIES: [&str; 7] = [
+const CAPABILITIES: [&str; 8] = [
     "hash_file",
     "fetch_range",
     "scan_tar",
@@ -15,6 +15,7 @@ const CAPABILITIES: [&str; 7] = [
     "bounded_session_v1",
     "production_transfer_v2",
     "production_http_status_v1",
+    "production_download_lightweight_v1",
 ];
 const MAX_SESSION_REQUESTS: usize = 256;
 const MAX_REQUEST_ID_BYTES: usize = 64;
@@ -25,9 +26,12 @@ struct Hello {
     #[serde(rename = "type")]
     kind: String,
     protocol_version: u32,
-    budget: BudgetLimits,
+    #[serde(default)]
+    budget: Option<BudgetLimits>,
     #[serde(default)]
     stream_capacity: Option<StreamCapacity>,
+    #[serde(default)]
+    execution_limits: Option<StreamCapacity>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -43,7 +47,8 @@ struct Request {
     kind: String,
     request_id: String,
     operation: String,
-    budget: BudgetLimits,
+    #[serde(default)]
+    budget: Option<BudgetLimits>,
     payload: serde_json::Value,
 }
 #[derive(Deserialize)]
@@ -87,6 +92,8 @@ enum Outbound {
         #[serde(skip_serializing_if = "Option::is_none")]
         stream_capacity: Option<StreamCapacity>,
         protocol_resident_bytes: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        execution_limits: Option<StreamCapacity>,
     },
     Response {
         request_id: String,
@@ -155,7 +162,15 @@ fn main() -> io::Result<()> {
             return Ok(());
         }
     };
-    if hello.kind != "hello" || hello.protocol_version != PROTOCOL_VERSION {
+    let lightweight = hello.protocol_version == 2;
+    if hello.kind != "hello"
+        || !matches!(hello.protocol_version, 1 | 2)
+        || (lightweight
+            && (hello.budget.is_some()
+                || hello.stream_capacity.is_some()
+                || hello.execution_limits.is_none()))
+        || (!lightweight && (hello.budget.is_none() || hello.execution_limits.is_some()))
+    {
         emit(
             &mut stdout,
             &Outbound::ProtocolError {
@@ -165,7 +180,11 @@ fn main() -> io::Result<()> {
         )?;
         return Ok(());
     }
-    if hello.stream_capacity.as_ref().is_some_and(|c| {
+    let capacity = hello
+        .execution_limits
+        .as_ref()
+        .or(hello.stream_capacity.as_ref());
+    if capacity.is_some_and(|c| {
         c.range_chunk_bytes == 0
             || c.range_chunk_bytes > isize::MAX as u64
             || c.http_header_bytes == 0
@@ -182,28 +201,23 @@ fn main() -> io::Result<()> {
         )?;
         return Ok(());
     }
-    let line_limit = hello
-        .stream_capacity
-        .as_ref()
-        .map_or(MAX_LINE_BYTES, |c| c.rpc_line_bytes);
-    let header_limit = hello
-        .stream_capacity
-        .as_ref()
-        .map_or(sakurapool_rust::HTTP_MAX_HEADER_BYTES, |c| {
-            c.http_header_bytes
-        });
+    let line_limit = capacity.map_or(MAX_LINE_BYTES, |c| c.rpc_line_bytes);
+    let header_limit = capacity.map_or(sakurapool_rust::HTTP_MAX_HEADER_BYTES, |c| {
+        c.http_header_bytes
+    });
     let resident = sakurapool_rust::production::protocolmemory(line_limit, header_limit)
         .map_err(io::Error::other)?;
-    let stream_capacity = hello.stream_capacity.clone();
-    let mut budget = JobBudget::new(hello.budget);
+    let stream_capacity = capacity.cloned();
+    let mut budget = hello.budget.map(JobBudget::new);
     emit(
         &mut stdout,
         &Outbound::Ready {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: hello.protocol_version,
             worker_version: env!("CARGO_PKG_VERSION"),
             capabilities: &CAPABILITIES,
             stream_capacity: hello.stream_capacity,
             protocol_resident_bytes: resident,
+            execution_limits: hello.execution_limits,
         },
         MAX_LINE_BYTES,
     )?;
@@ -247,11 +261,18 @@ fn main() -> io::Result<()> {
         };
         let request_id = request.request_id.clone();
         if request_id.is_empty() || request_id.len() > MAX_REQUEST_ID_BYTES {
-            respond(&mut stdout, "", Err("request_id_invalid"), line_limit);
+            respond_mode(
+                lightweight,
+                &mut stdout,
+                "",
+                Err("request_id_invalid"),
+                line_limit,
+            );
             continue;
         }
         if seen_requests.len() >= MAX_SESSION_REQUESTS {
-            respond(
+            respond_mode(
+                lightweight,
                 &mut stdout,
                 &request_id,
                 Err("session_exhausted"),
@@ -260,7 +281,8 @@ fn main() -> io::Result<()> {
             break;
         }
         if request.kind != "request" || !seen_requests.insert(request_id.clone()) {
-            respond(
+            respond_mode(
+                lightweight,
                 &mut stdout,
                 &request_id,
                 Err("duplicate_request"),
@@ -268,9 +290,20 @@ fn main() -> io::Result<()> {
             );
             continue;
         }
-        let outcome = if budget.admit(&request.budget).is_err() {
+        let outcome = if lightweight {
+            dispatch(&request, &mut execution, stream_capacity.as_ref(), true)
+        } else if request.budget.is_none() {
+            Err("budget_required")
+        } else if budget
+            .as_ref()
+            .unwrap()
+            .admit(request.budget.as_ref().unwrap())
+            .is_err()
+        {
             Err("budget_exceeded")
         } else {
+            let budget = budget.as_mut().unwrap();
+            let request_budget = request.budget.as_ref().unwrap();
             budget.commit_attempt();
             if request.payload.get("production").is_some() {
                 if let Some(p) = request.payload.get("production") {
@@ -294,15 +327,15 @@ fn main() -> io::Result<()> {
                 }
                 budget.commit_attempt();
             }
-            let outcome = dispatch(&request, &mut execution, stream_capacity.as_ref());
+            let outcome = dispatch(&request, &mut execution, stream_capacity.as_ref(), false);
             if let Some(accounting) = outcome.as_ref().ok().and_then(|v| v.get("accounting")) {
                 let charge = if accounting.get("complete").and_then(|v| v.as_bool()) == Some(true) {
                     accounting
                         .get("body")
                         .and_then(|v| v.as_u64())
-                        .unwrap_or(request.budget.body)
+                        .unwrap_or(request_budget.body)
                 } else {
-                    request.budget.body
+                    request_budget.body
                 };
                 budget.commit_body(charge);
             }
@@ -319,7 +352,8 @@ fn main() -> io::Result<()> {
         };
         let legacy_scan = matches!(request.operation.as_str(), "scan_tar" | "scan_http_tar")
             && request.payload.get("production").is_none();
-        respond(
+        respond_mode(
+            lightweight,
             &mut stdout,
             &request_id,
             outcome,
@@ -492,6 +526,9 @@ fn parse_inbound(line: Vec<u8>) -> Result<Inbound, &'static str> {
     lexical_bounds(text)?;
     let tagged: serde_json::Value = serde_json::from_str(text).map_err(|_| "invalid_json")?;
     match tagged.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+        "hello" | "request" if tagged.get("budget").is_some_and(|v| !v.is_object()) => {
+            Err("protocol_violation")
+        }
         "hello" => serde_json::from_value::<Hello>(tagged)
             .map(Inbound::Hello)
             .map_err(|_| "protocol_violation"),
@@ -506,13 +543,26 @@ fn dispatch(
     request: &Request,
     execution: &mut sakurapool_rust::production::ExecutionContext,
     capacity: Option<&StreamCapacity>,
+    lightweight: bool,
 ) -> Result<serde_json::Value, &'static str> {
+    if lightweight && (request.budget.is_some() || request.payload.get("production").is_none()) {
+        return Err("lightweight_request_invalid");
+    }
     if let Some(payload) = request.payload.get("production") {
         if !matches!(request.operation.as_str(), "fetch_range" | "scan_http_tar") {
             return Err("production_operation");
         }
         let transfer: sakurapool_rust::production::Transfer =
             serde_json::from_value(payload.clone()).map_err(|_| "bad_production_payload")?;
+        if lightweight
+            && !capacity.is_some_and(|c| {
+                transfer.payload_revision == 2
+                    && transfer.range_chunk_bytes == c.range_chunk_bytes
+                    && transfer.http_header_bytes == c.http_header_bytes
+            })
+        {
+            return Err("capacity_mismatch");
+        }
         let bytes = if transfer.mode == "range" {
             transfer.length
         } else {
@@ -526,19 +576,43 @@ fn dispatch(
                 rpc,
                 transfer.http_header_bytes,
             )?;
-        let required_body = sakurapool_rust::production::network_body_budget(
-            bytes, transfer.mode == "range" && transfer.condition == "wrong",
-        )?;
-        if request.budget.body < required_body
-            || request.budget.attempts < 2
-            || request.budget.disk < required_disk
-            || request.budget.inflight < required_memory
-            || ((request.operation == "fetch_range") != (transfer.mode == "range"))
-        {
-            return Err("production_budget");
+        if !lightweight {
+            let required_body = sakurapool_rust::production::network_body_budget(
+                bytes,
+                transfer.mode == "range" && transfer.condition == "wrong",
+            )?;
+            let budget = request.budget.as_ref().ok_or("budget_required")?;
+            if budget.body < required_body
+                || budget.attempts < 2
+                || budget.disk < required_disk
+                || budget.inflight < required_memory
+                || ((request.operation == "fetch_range") != (transfer.mode == "range"))
+            {
+                return Err("production_budget");
+            }
+        } else if (request.operation == "fetch_range") != (transfer.mode == "range") {
+            return Err("production_operation");
         }
         let outcome = sakurapool_rust::production::run_with_context(transfer, execution);
         let mut value = outcome.result;
+        if lightweight {
+            let phase = match outcome.accounting.phase {
+                "origin" | "cdn" | "body" | "scan" => outcome.accounting.phase,
+                _ => "worker",
+            };
+            let code = outcome.error.map_or("ok", safe_lightweight_code);
+            value["diagnostic"] = serde_json::json!({
+                "code": code, "phase": phase,
+                "recoverable": matches!(code, "origin_status" | "cdn_status" | "origin_timeout" | "origin_connect" | "cdn_timeout" | "cdn_connect"),
+                "delivery_safe": outcome.error.is_none() && outcome.accounting.complete,
+                "http_status": outcome.accounting.http_status,
+            });
+            value["technical"] = serde_json::json!({"eof_observed": outcome.accounting.complete});
+            if outcome.error.is_some() {
+                value["production_error"] = serde_json::json!(code);
+            }
+            return Ok(value);
+        }
         value["diagnostic"] = outcome.accounting.diagnostic();
         value["observation"] = outcome.accounting.observation();
         value["accounting"] = serde_json::to_value(outcome.accounting).map_err(|_| "accounting")?;
@@ -627,6 +701,50 @@ fn dispatch(
         _ => Err("unknown_operation"),
     }
 }
+fn safe_lightweight_code(code: &str) -> &'static str {
+    match code {
+        "location_invalid" => "location_invalid",
+        "location_encoding" => "location_encoding",
+        "validator_missing" => "validator_missing",
+        "validator_mismatch" => "validator_mismatch",
+        "cdn_status" => "cdn_status",
+        "origin_status" => "origin_status",
+        "body_framing" | "duplicate_header" | "header_invalid" | "length_missing" => "body_framing",
+        "content_range" => "content_range",
+        "body_length" => "body_length",
+        "body_io" => "body_io",
+        "scan_failed" => "scan_failed",
+        "metadata_limit" => "metadata_limit",
+        "origin_timeout" => "origin_timeout",
+        "origin_connect" => "origin_connect",
+        "cdn_timeout" => "cdn_timeout",
+        "cdn_connect" => "cdn_connect",
+        "network_ambiguous" => "network_ambiguous",
+        _ => "rejected",
+    }
+}
+fn respond_mode(
+    lightweight: bool,
+    stdout: &mut impl Write,
+    request_id: &str,
+    outcome: Result<serde_json::Value, &'static str>,
+    limit: usize,
+) {
+    let outcome = if lightweight {
+        outcome.or_else(|_| {
+            Ok(serde_json::json!({
+                "production_error": "rejected",
+                "diagnostic": {"code":"rejected", "phase":"worker", "recoverable":false,
+                    "delivery_safe":false, "http_status":null},
+                "technical": {"eof_observed":false},
+            }))
+        })
+    } else {
+        outcome
+    };
+    respond(stdout, request_id, outcome, limit);
+}
+
 fn respond(
     stdout: &mut impl Write,
     request_id: &str,
