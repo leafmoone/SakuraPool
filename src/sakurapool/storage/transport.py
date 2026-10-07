@@ -11,8 +11,10 @@ import hashlib
 import ipaddress
 import json
 import math
+import os
 import random
 import re
+import ssl
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass as _dataclass
@@ -472,8 +474,8 @@ class GuardedTransport:
             raise ValueError("retry wait must be a finite nonnegative number")
         self.max_retry_wait_s = max_retry_wait_s
         self.session = requests.Session()
-        # No netrc credential injection or environment-driven proxy switch.
-        # A required proxy must be reviewed/configured explicitly, not guessed.
+        # Keep netrc credential discovery disabled. Environment proxies and the
+        # existing system CA are selected explicitly for each production request.
         self.session.trust_env = False
         no_retry = HTTPAdapter(max_retries=Retry(total=0, redirect=0))
         self.session.mount("https://", no_retry)
@@ -591,7 +593,8 @@ class GuardedTransport:
         self._attach_origin_cookie(url, request_headers)
         try:
             response = self.session.get(
-                url, headers=request_headers, stream=True, allow_redirects=False, timeout=(10, 60)
+                url, headers=request_headers, stream=True, allow_redirects=False, timeout=(10, 60),
+                **_network_options(url, offline=self.offline_mode),
             )
         except Exception:
             response = None
@@ -744,8 +747,8 @@ class GuardedTransport:
                 phase="two_hop_redirect",
                 http_status=302,
             ) from None
-        # Fresh credential-free session: no token, no cookies, no environment
-        # proxies, no retries, no redirect following.
+        # Fresh credential-free session: no token, cookies or netrc discovery;
+        # normal environment proxies, no retries and no redirect following.
         session2 = requests.Session()
         session2.trust_env = False
         session2.mount("https://", HTTPAdapter(max_retries=Retry(total=0, redirect=0)))
@@ -767,6 +770,7 @@ class GuardedTransport:
                     stream=True,
                     allow_redirects=False,
                     timeout=(10, 60),
+                    **_network_options(target, offline=self.offline_mode),
                 )
             except Exception:
                 raise _AmbiguousRead(
@@ -1454,3 +1458,19 @@ class GuardedTransport:
         if self.ledger is None:
             return VerifiedMetadataBytes(body)
         return MetadataBytes(body, "UNKNOWN" if operation["unknown"] else "CONFIRMED")
+
+
+def _network_options(url: str, *, offline: bool = False) -> dict:
+    """Use ordinary environment proxy/CA settings without enabling netrc auth.
+
+    TLS verification stays enabled. Local synthetic transport remains offline.
+    requests' per-URL helper preserves HTTP(S)_PROXY, ALL_PROXY and NO_PROXY.
+    """
+    if offline:
+        return {"proxies": {}, "verify": True}
+    defaults = ssl.get_default_verify_paths()
+    ca = (os.environ.get("REQUESTS_CA_BUNDLE") or os.environ.get("CURL_CA_BUNDLE")
+          or defaults.cafile or defaults.capath or True)
+    return {"proxies": requests.utils.get_environ_proxies(url), "verify": ca}
+
+

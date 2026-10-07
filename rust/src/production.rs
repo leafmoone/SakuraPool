@@ -346,7 +346,7 @@ fn origin(t: &Transfer) -> Result<Url, &'static str> {
         .append_pair("FilePath", &o.object_path);
     Ok(u)
 }
-fn client() -> Result<Client, &'static str> {
+fn client(loopback: bool) -> Result<Client, &'static str> {
     let mut headers = HeaderMap::new();
     headers.insert(
         reqwest::header::ACCEPT,
@@ -354,10 +354,12 @@ fn client() -> Result<Client, &'static str> {
     );
     // Pinned reqwest does not expose hyper's HTTP/1 allocation knobs. The shared
     // admission model charges its 417792-byte parser ceiling even for tiny limits.
-    Client::builder()
+    let builder = Client::builder();
+    // Production honors normal environment proxies. Synthetic loopback stays local.
+    let builder = if loopback { builder.no_proxy() } else { builder };
+    builder
         .user_agent("SakuraMoon/1")
         .default_headers(headers)
-        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
         .http1_only()
@@ -565,14 +567,15 @@ pub struct ExecutionContext {
     origin_client: Option<Client>,
     origin_identity: Option<String>,
     cdn_client: Option<Client>,
+    cdn_scheme: Option<String>,
     cdn_hosts: std::collections::BTreeSet<String>,
     // Injectable only through the local Rust API; production defaults to real sleep.
     retry_sleep: Option<fn(Duration)>,
 }
 impl ExecutionContext {
-    fn origin_client(&mut self, identity: &str) -> Result<Client, &'static str> {
+    fn origin_client(&mut self, identity: &str, loopback: bool) -> Result<Client, &'static str> {
         if self.origin_identity.as_deref() != Some(identity) {
-            self.origin_client = Some(client()?);
+            self.origin_client = Some(client(loopback)?);
             self.origin_identity = Some(identity.to_owned());
         }
         self.origin_client.clone().ok_or("client_failed")
@@ -587,8 +590,9 @@ impl ExecutionContext {
             self.cdn_client = None;
             self.cdn_hosts.clear();
         }
-        if self.cdn_client.is_none() {
-            self.cdn_client = Some(client()?);
+        if self.cdn_client.is_none() || self.cdn_scheme.as_deref() != Some(target.scheme()) {
+            self.cdn_client = Some(client(target.scheme() == "http")?);
+            self.cdn_scheme = Some(target.scheme().to_owned());
         }
         self.cdn_hosts.insert(authority);
         self.cdn_client.clone().ok_or("client_failed")
@@ -617,7 +621,7 @@ fn transfer(
             t.json_limit,
         )?)
     };
-    let origin_client = context.origin_client(&t.object.origin)?;
+    let origin_client = context.origin_client(&t.object.origin, url.scheme() == "http")?;
     let mut req = origin_client.get(url).header("accept-encoding", "identity");
     let range = format!("bytes={}-{}", t.start, t.start + t.length.saturating_sub(1));
     if t.mode == "range" {
