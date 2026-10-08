@@ -494,9 +494,12 @@ def run_task(
     fault_hook=None,
     connection_profile=None,
     workers=1,
+    workers_per_tar=1,
 ):
     if type(workers) is not int or workers < 1:
         raise TaskError("WORKERS_INVALID", "preflight")
+    if type(workers_per_tar) is not int or workers_per_tar < 1:
+        raise TaskError("WORKERS_PER_TAR_INVALID", "preflight")
     if transport is None and connection_profile is None:
         raise TaskError("PROFILE_REQUIRED", "preflight")
     with TaskDB(directory) as task, task.runner_lock(), ExitStack() as stack:
@@ -541,6 +544,7 @@ def run_task(
                 publication,
                 transport,
                 workers=workers,
+                workers_per_tar=workers_per_tar,
                 metadata=header["metadata"],
                 control=control,
                 fault_hook=fault_hook,

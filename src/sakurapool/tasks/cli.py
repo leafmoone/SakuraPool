@@ -48,6 +48,8 @@ def add_parser(subparsers):
         elif name in ("run", "resume"):
             command.add_argument("--profile", required=True)
             command.add_argument("--workers", type=_positive_workers, default=1)
+            command.add_argument("--workers-per-tar", type=_positive_workers, default=1,
+                                 help="maximum active operations per TAR (default: 1)")
         elif name == "export":
             command.add_argument("--manifest", required=True)
 
@@ -127,6 +129,7 @@ def command(args):
                 resume=action == "resume",
                 connection_profile=profile,
                 workers=args.workers,
+                workers_per_tar=getattr(args, "workers_per_tar", 1),
             )
         print(json.dumps(result, sort_keys=True))
         return 0

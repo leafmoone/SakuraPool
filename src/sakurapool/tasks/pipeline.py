@@ -2,7 +2,7 @@
 
 import queue
 import sys
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from threading import get_ident
@@ -45,15 +45,19 @@ def _select_free_lane(free, lanes, prepared, capacity, *, metadata=False):
     return free[0] if index is None else index
 
 
-def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=None, control=None):
-    """At most W active operations; create lanes only for available independent work."""
+def run_pipeline(task, publication, transport, *, workers, metadata, workers_per_tar=1,
+                 fault_hook=None, control=None):
+    """At most W active operations, with an explicit per-TAR lane bound."""
     from .runner import delivery_mapping, preflight, verify_delivery
 
     if type(workers) is not int or workers < 1:
         raise TaskError("WORKERS_INVALID", "preflight")
+    if type(workers_per_tar) is not int or workers_per_tar < 1:
+        raise TaskError("WORKERS_PER_TAR_INVALID", "preflight")
     ready = task.db.execute("SELECT count(*) FROM items WHERE state='READY'").fetchone()[0]
     # This is available work, not an input maximum or a memory-admission estimate.
     lane_count = min(workers, ready)
+    per_tar_limit = min(workers_per_tar, lane_count)
     window = 16 * lane_count
     owner = get_ident()
     calls = queue.Queue(maxsize=max(1, 2 * lane_count))
@@ -208,26 +212,37 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
             # Trim before preparing a shifted window; resident lookahead stays <= 16L.
             keys = {(row["seq"], row["rid"], row["record_id"]) for row in candidates}
             prepared_cache = {key: value for key, value in prepared_cache.items() if key in keys}
-            busy = {value[1].transport_identity for value in active.values()}
+            # Recompute from owner-held active work; never share a lane's authorization.
+            tar_active = Counter(value[1].transport_identity for value in active.values())
             selected = None
-            for position, candidate in enumerate(candidates):
-                prepared = prepare(candidate)
-                if prepared.transport_identity not in busy:
-                    selected = candidate, prepared, position
-                    break
+            admission_limit = per_tar_limit
+            if per_tar_limit > 1:
+                # Extra same-TAR slots are eligible only after visible independent TARs.
+                for position, candidate in enumerate(candidates):
+                    prepared = prepare(candidate)
+                    if tar_active[prepared.transport_identity] == 0:
+                        selected = candidate, prepared, position
+                        admission_limit = 1
+                        break
             if selected is None:
-                # Only completion can free a busy TAR in this immutable, single-runner task.
+                for position, candidate in enumerate(candidates):
+                    prepared = prepare(candidate)
+                    if tar_active[prepared.transport_identity] < per_tar_limit:
+                        selected = candidate, prepared, position
+                        break
+            if selected is None:
+                # Only completion can free a TAR slot in this immutable, single-runner task.
                 # The outer loop still drains events and polls pause/cancel requests.
                 blocked = True
                 break
             candidate, prepared, position = selected
-            index = _warm_free_lane(free, lanes, prepared, task.capacity, metadata=metadata)
             bypass = False
+            index = _warm_free_lane(free, lanes, prepared, task.capacity, metadata=metadata)
             if index is None and free and warm_bypass_credit:
                 # A bounded number of warm dispatches may bypass the oldest eligible item.
                 for later in candidates[position + 1:]:
                     later_prepared = prepare(later)
-                    if later_prepared.transport_identity in busy:
+                    if tar_active[later_prepared.transport_identity] >= admission_limit:
                         continue
                     warm = _warm_free_lane(free, lanes, later_prepared, task.capacity,
                                            metadata=metadata)
@@ -237,7 +252,13 @@ def run_pipeline(task, publication, transport, *, workers, metadata, fault_hook=
                         break
             if not free:
                 # Never precreate W processes for a small task or busy-TAR backlog.
-                lane = transport.clone() if hasattr(transport, "clone") else transport
+                has_clone = hasattr(transport, "clone")
+                lane = transport.clone() if has_clone else transport
+                if workers_per_tar > 1 and has_clone and (
+                    lane is transport or any(lane is existing for existing, _ in lanes)
+                ):
+                    # A borrowed alias is not a new owned lane and must not be closed here.
+                    raise TaskError("WORKER_CHANNEL_UNAVAILABLE", "preflight")
                 lanes.append((lane, OrderedDict()))
                 free.append(len(lanes) - 1)
             if index is None:

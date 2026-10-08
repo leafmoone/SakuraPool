@@ -484,6 +484,11 @@ The task coordinator separately supports bounded concurrent lanes; this is not a
 concurrent scheduler inside a shared PublicationSession.
 Default task workers=1; `--workers` and the API accept
 any strictly positive integer, without an enumeration or configured maximum.
+Task `run` and `resume` also accept `--workers-per-tar` (API: `workers_per_tar`),
+defaulting to 1. Increase it explicitly to allow bounded concurrent operations on
+the same TAR, for example:
+`sakura task run TASK --profile PROFILE.json --workers 6 --workers-per-tar 2`.
+Both options apply to the current run, not the frozen task plan.
 Actual concurrency depends on ready work, object distribution and available OS
 resources. Earlier P3/P4 CLI examples below are historical/admin interfaces,
 not the default task workflow.
@@ -503,9 +508,10 @@ removed by explicit user contract change. Zero, negative and non-integer workers
 automatic worker increase or replacement memory ceiling is introduced. Choosing
 large concurrency can exhaust real machine resources; successful execution or
 throughput growth is not guaranteed.
+The same strict positive-integer validation applies to `workers_per_tar`.
 
 Let L be the smaller of requested workers and the ready-record count at runner start. Lanes are
-created lazily for independent usable work, not eagerly for the full input. Active
+created lazily for eligible work, not eagerly for the full input. Active
 operations are bounded by L, candidate/claim lookahead by 16L, event envelopes
 by 2L, and completion envelopes by L. Prepared descriptors are cached within a
 scheduling pass and trimmed to the current lookahead window. When that window
@@ -513,7 +519,28 @@ contains only busy TARs, scanning waits for a completion; pause/cancel polling
 and event acknowledgements continue. SQL lookahead is clipped to actual READY rows before
 binding LIMIT, so very large positive Python integers do not overflow SQLite or
 impose a hidden input maximum. There is no fixed 12-record candidate ceiling.
-Simultaneous requests to the same TAR remain gated. Within the bounded lookahead,
+Each full TAR transport identity (endpoint, repository, repository type, revision,
+path and size) has at most min(workers_per_tar, L) active operations. The default
+retains one active operation per TAR. Opting in can help when few TARs and slow
+responses leave workers idle, but adds independent worker startup, metadata and
+conditional-proof work; fast responses may be slower. Native lanes retain their
+own transport, metadata channel, generation and bounded proof caches. No lane
+borrows another lane's authorization. With `workers_per_tar` above 1, a custom
+transport's `clone()` must return a fresh instance, never the caller's transport
+or another lane, even when the effective cap is 1. With `workers=1`, a transport
+without `clone()` can still be borrowed for the single lane and remains caller-owned.
+For opt-in same-TAR concurrency, each dispatch first admits visible TARs with no
+active operation. Only when none exist in the bounded lookahead may it add an
+operation to an already-active TAR, up to the per-TAR cap. This spreads available
+lanes across independent TARs before filling spare lanes with same-TAR work.
+Warm affinity cannot move a record from the second admission layer ahead of the
+first. An already-active TAR continues making progress; when its last active
+operation finishes, its next visible READY record can enter the first layer. No operation
+is preempted, and independent TARs beyond 16L are not searched for.
+In this opt-in mode, the fairness allowance below applies to the currently
+eligible admission layer; it does not promise a second lane while independent
+TAR work is visible. The default cap of 1 retains its original scheduling rule.
+Within the bounded lookahead and eligible layer,
 the oldest eligible record is preferred when a free lane has its live binding.
 Otherwise a later eligible record with a matching warm free lane may run first,
 but at most L consecutive successful dispatches may bypass the oldest eligible
