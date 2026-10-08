@@ -55,8 +55,13 @@ def file_proof(path, proof):
         opened = os.fstat(stream.fileno())
         if opened.st_nlink != 1 or [opened.st_dev, opened.st_ino] != proof["identity"]:
             raise ValueError("OUTPUT_REPLACED")
-        for chunk in iter(lambda: stream.read(1 << 20), b""):
-            digest.update(chunk)
+        buffer = bytearray(min(1 << 20, max(1, info.st_size)))
+        view = memoryview(buffer)
+        try:
+            while size := stream.readinto(buffer):
+                digest.update(view[:size])
+        finally:
+            view.release()
     after = plain_entry(path).stat()
     if (after.st_nlink != 1 or [after.st_dev, after.st_ino] != proof["identity"]
             or after.st_size != info.st_size or after.st_mtime_ns != info.st_mtime_ns):
