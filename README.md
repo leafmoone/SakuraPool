@@ -516,9 +516,9 @@ operations are bounded by L, candidate/claim lookahead by 16L, event envelopes
 by 2L, and completion envelopes by L. Prepared descriptors are cached within a
 scheduling pass and trimmed to the current lookahead window. When that window
 contains only busy TARs, scanning waits for a completion; pause/cancel polling
-and event acknowledgements continue. SQL lookahead is clipped to actual READY rows before
-binding LIMIT, so very large positive Python integers do not overflow SQLite or
-impose a hidden input maximum. There is no fixed 12-record candidate ceiling.
+and event acknowledgements continue. The SQL LIMIT binding is capped at SQLite's signed 64-bit maximum; the READY
+filter naturally limits returned rows. Very large positive Python integers therefore
+do not overflow SQLite or impose a hidden input maximum. There is no fixed 12-record candidate ceiling.
 Each full TAR transport identity (endpoint, repository, repository type, revision,
 path and size) has at most min(workers_per_tar, L) active operations. The default
 retains one active operation per TAR. Opting in can help when few TARs and slow
