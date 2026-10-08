@@ -723,8 +723,9 @@ but not 3.14 wheels. Removing the metadata upper bound does not certify 3.14 or
 permit silently upgrading those pins, transplanting Arrow, or using `--no-deps`.
 
 Verification subprocesses use the invoking interpreter (`sys.executable`)
-rather than a retired virtual-environment path. Development tests live on `dev`;
-product-only `main` and release distributions intentionally exclude tests/reports/plans.
+rather than a retired virtual-environment path. Development tests and validation
+working artifacts are excluded from version control; product branches and release
+distributions intentionally exclude tests, reports and plans.
 
 ```console
 python -m pip install '.[remote]'
