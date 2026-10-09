@@ -264,6 +264,8 @@ class RustProductionTransport:
         self._close_deadline = None
         self._worker_pool = _worker_pool
         self._clone_pool = None
+        self._retained_pool = None
+        self._retained_limit = None
         if _worker_pool is not None:
             from .worker_pool import WorkerPool
 
@@ -309,13 +311,24 @@ class RustProductionTransport:
             raise RemoteIOError("Transport already owns a task pool", lightweight=True)
         if not self.lightweight or CAPABILITY not in self._lane_worker.capabilities:
             return None
-        pool = WorkerPool(self, 2 * lanes)
+        if self._retained_limit is not None and lanes > self._retained_limit:
+            raise RemoteIOError("Session worker limit exceeded", lightweight=True)
+        pool = self._retained_pool
+        if pool is None:
+            pool = WorkerPool(self, 2 * (self._retained_limit or lanes))
+            if self._retained_limit is not None:
+                self._retained_pool = pool
+        else:
+            pool.resume()
         self._clone_pool = pool
         return pool
 
     def _end_task_pool(self, pool, *, deadline=None):
         try:
-            pool.close(deadline=deadline)
+            if pool is self._retained_pool:
+                pool.park()
+            else:
+                pool.close(deadline=deadline)
         finally:
             if self._clone_pool is pool:
                 self._clone_pool = None
@@ -803,8 +816,9 @@ class RustProductionTransport:
         if self._close_deadline is None:
             self._close_deadline = time.monotonic() + 5.0
         deadline = self._close_deadline
-        if self._clone_pool is not None:
-            self._clone_pool.signal_cancel(deadline=deadline)
+        pool = self._clone_pool or self._retained_pool
+        if pool is not None:
+            pool.signal_cancel(deadline=deadline)
         self._closed = True
         # Signal both children before waiting for a data-lane lock or any join.
         control = getattr(self, "_control", None)
@@ -824,7 +838,22 @@ class RustProductionTransport:
                 if worker is not None and getattr(worker, "_construction_ready", True):
                     worker.cancel(deadline=deadline)
                 return  # Active owner finalizes payload before releasing resident quota.
-            self._close_channel()
+            primary = None
+            try:
+                self._close_channel()
+            except BaseException as error:
+                primary = error
+            if pool is not None:
+                try:
+                    pool.close(deadline=deadline)
+                except BaseException as error:
+                    if primary is None:
+                        primary = error
+                    else:
+                        primary.finalization_secondary = (
+                            *getattr(primary, "finalization_secondary", ()), "worker_pool_close")
+            if primary is not None:
+                raise primary
         finally:
             self._lane_lock.release()
 

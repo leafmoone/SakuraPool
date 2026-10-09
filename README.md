@@ -438,15 +438,77 @@ plus `--profile`, `--workers` and `--workers-per-tar`:
 sakura task start --publication PUB --query QUERY.json --selection first --limit 100 --metadata --task-dir TASK --profile PROFILE.json --workers 8 --workers-per-tar 8
 ```
 
-On POSIX this uninterrupted operation fully verifies content once and owns the same
-open publication through task creation and execution. Inputs must remain immutable;
-file/handle identity and change signatures are checked before the runner connects.
-Keep the task directory outside the publication. There is no persisted verification
-token: standalone `create`, `run` and `resume` retain their full-verification behavior.
-Windows currently keeps both full verifications in `start` as well: its stat creation
-time cannot serve as a write/change guard. The other download optimizations apply
-independently of this startup fallback.
+This uninterrupted operation fully verifies content once when a live verification
+guard is available and owns the same open publication through creation/execution.
+Inputs must remain immutable; file/handle identity and change signatures are checked
+before the runner connects. POSIX uses live file/change signatures. Windows also
+requires read-only, non-inheritable handles denying write/delete sharing for the fixed
+publication inventory, with volume/file-ID and reparse checks. Unsupported APIs,
+filesystems or conflicting open handles retain the ordinary two full verifications.
+Windows handle logic has simulated lifecycle coverage; actual Windows execution
+has not been validated in this development environment. Keep task directories outside
+the publication. There is no persisted verification token: standalone `create`, `run`
+and `resume` retain their full-verification behavior.
 The Python equivalent is `tasks.runner.create_and_run_task`.
+
+### Foreground task session
+
+For repeated commands, explicitly keep one owner in the foreground:
+
+```text
+sakura task session --publication PUB --workspace WORKSPACE --profile PROFILE.json --workers 6 --workers-per-tar 6
+```
+
+Send one JSON command per line on stdin; stdout contains a bounded ready/result line:
+
+```json
+{"id":1,"action":"start","task":"batch1","query":{},"selection":{"mode":"first","limit":10},"metadata":true}
+{"id":2,"action":"run","task":"batch1"}
+{"id":3,"action":"exit"}
+```
+
+IDs are consecutive integers starting at 1. `start` accepts inline query/selection,
+metadata, image_extensions, filename_template and filename_prefix. `run` and `resume`
+accept only the task name; names are single safe components beneath the fixed workspace's
+`tasks` directory. `exit` or EOF releases the owner. Malformed commands or task/client
+failures stop the session. Frames are capped at 64 KiB, depth 16 and 4096 JSON nodes;
+unknown fields, duplicate keys and nonfinite numbers are rejected. Normal commands
+stay in the owner process, without spawning a new Python interpreter for every task.
+
+Ready/results identify the owner PID and verification mode (`posix_live`,
+`windows_pinned`, or `full_each_command`). A guarded session retains one fully verified
+publication and native process initialization. The publication, workspace, copied
+profile, worker identity, capacity and worker limits are fixed for its lifetime.
+Each task still acquires its own runner lock, freezes its selection and creates fresh
+claims, descriptor caches, channel generations and conditional proofs. Native HTTP
+contexts are reset on channel reopen. Compatible idle multiplex groups can stay alive;
+older protocol-2 workers still retain the root worker but recreate lane processes.
+If live pinning is unavailable, every command uses ordinary full verification and
+fresh transports. No closed-handle stat/hash token is trusted between processes.
+
+For explicit child command processes, `tasks.session.TaskSession.serve_child(target,
+args=())` supplies a `SessionClient` to a caller-provided top-level Python function:
+
+```python
+from sakurapool.tasks.profile import read_profile
+from sakurapool.tasks.session import TaskSession
+
+def download(client):
+    client.request("start", task="batch2", selection={"mode": "first", "limit": 10})
+
+if __name__ == "__main__":
+    with TaskSession("PUB", "WORKSPACE", read_profile("PROFILE.json")) as owner:
+        owner.serve_child(download)
+```
+
+The child sends bounded byte-framed JSON over its private inherited pipe; all index
+verification and task execution stay in the original PID/thread. Returning from the
+child function automatically detaches that client, leaving the owner available for a
+later child. `client.request("exit")` ends the whole session. Clients must submit the
+next command within 30 seconds; IPC transfers and shutdown are bounded, while downloads
+keep their existing per-operation deadlines. Owner death closes the capability pipe;
+children cannot independently reuse verification. This is explicit foreground reuse
+across owned child processes, not an attachable service for unrelated terminal commands.
 
 The same publisher is used by direct `publication fetch` (default `image_1`, explicit
 `--filename-index`, template/prefix options) and `PublicationSession.fetch`, whose
@@ -575,8 +637,9 @@ promising a steady-state throughput gain or altering proxy/TLS/timeout policy.
 When the configured native worker advertises `multiplex_channel_v1`, an owned
 lightweight task run groups up to eight independent execution or lazy metadata
 channels per native process using protocol 3. The original root protocol-2 worker
-remains separate. A run owns at most 2L channels; no pool crosses profiles, task runs,
-credentials or capacity settings. Each channel retains its own native HTTP contexts,
+remains separate. A run owns at most 2L channels; no live channels cross task runs, profiles,
+credentials or capacity settings. An explicit foreground session may retain entirely
+idle processes and reopen fresh channel generations within its fixed scope. Each channel retains its own native HTTP contexts,
 request identities, 256-request generation limit and conditional proofs. Grouping
 reduces processes and pipe handles; blocking HTTP clients still own threads, so it
 does not promise a proportional thread or private-memory reduction. An otherwise

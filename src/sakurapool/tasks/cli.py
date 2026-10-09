@@ -41,6 +41,11 @@ def add_parser(subparsers):
             create.add_argument("--workers", type=_positive_workers, default=6)
             create.add_argument("--workers-per-tar", type=_positive_workers, default=6,
                                 help="maximum active operations per TAR (default: 6)")
+    session = commands.add_parser("session", help="explicit foreground task owner")
+    for option in ("publication", "workspace", "profile"):
+        session.add_argument("--" + option, required=True)
+    session.add_argument("--workers", type=_positive_workers, default=6)
+    session.add_argument("--workers-per-tar", type=_positive_workers, default=6)
     update = commands.add_parser("update")
     update.add_argument("task_dir")
     update.add_argument("--workspace")
@@ -72,6 +77,15 @@ def bounded_json(path, cap=65536):
 def command(args):
     try:
         action = args.task_command
+        if action == "session":
+            import sys
+
+            from .profile import read_profile
+            from .session import TaskSession, command_loop
+
+            with TaskSession(args.publication, args.workspace, read_profile(args.profile),
+                             workers=args.workers, workers_per_tar=args.workers_per_tar) as session:
+                return command_loop(session, sys.stdin.buffer, sys.stdout)
         explicit = getattr(args, "workspace", None)
         if action in ("create", "start"):
             workspace = Workspace.open(explicit) if explicit is not None else None

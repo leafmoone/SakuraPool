@@ -85,6 +85,27 @@ class WorkerPool:
                 except BaseException:
                     group.signal(deadline=deadline)
 
+    def resume(self):
+        """Only a fixed foreground owner can reuse an entirely idle healthy group set."""
+        with self._lock:
+            if not self._closed.is_set() or self._failed.is_set():
+                raise _error()
+            for group in self._groups:
+                with group.lock:
+                    if group.dead.is_set() or any(c is not None for c in group.slots):
+                        raise _error()
+            self._closed.clear()
+
+    def park(self):
+        with self._lock:
+            if not self._closed.is_set() or self._failed.is_set():
+                raise _error()
+            for group in self._groups:
+                with group.lock:
+                    if (group.dead.is_set() or any(c is not None for c in group.slots)
+                            or not group._outbound.empty()):
+                        raise _error()
+
     def signal_cancel(self, *, deadline=None):
         deadline = min(deadline or float("inf"), time.monotonic() + 5)
         self._closed.set()

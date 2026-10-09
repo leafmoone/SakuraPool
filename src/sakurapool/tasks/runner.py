@@ -145,8 +145,8 @@ def _create_verified(pub, publication, directory, workspace, query, options,
 
 
 def _supports_live_verification():
-    # Windows stat().st_ctime is creation time, not a write/change guard.
-    return os.name == "posix"
+    # Windows additionally requires live deny-write/delete handle leases.
+    return os.name in ("posix", "nt")
 
 
 def create_and_run_task(
@@ -165,8 +165,15 @@ def create_and_run_task(
     root = plain_entry(publication, directory=True)
     if Path(directory).absolute().is_relative_to(root):
         raise TaskError("TASK_PUBLICATION_CONTAINMENT", "create")
-    if not _supports_live_verification():
-        # Retain two full loads until native deny-write handle pinning is supported.
+    session = None
+    if _supports_live_verification():
+        from .windows_pins import _PinUnavailable
+
+        try:
+            session = _VerifiedPublication(publication, options[0], load_publication)
+        except _PinUnavailable:
+            pass  # No safe leases: retain ordinary independent full verification.
+    if session is None:
         with create_task(publication, directory, workspace, query, selection,
                          metadata=metadata, image_extensions=image_extensions,
                          filename_template=filename_template, filename_prefix=filename_prefix):
@@ -174,7 +181,7 @@ def create_and_run_task(
         return run_task(directory, transport, control=control, fault_hook=fault_hook,
                         connection_profile=connection_profile, workers=workers,
                         workers_per_tar=workers_per_tar)
-    with _VerifiedPublication(publication, options[0], load_publication) as session:
+    with session:
         pub = session.check(options[0], publication)
         with _create_verified(pub, publication, directory, workspace, query, options,
                               metadata, filename_template, filename_prefix):
@@ -635,7 +642,7 @@ def _run_options(transport, connection_profile, workers, workers_per_tar):
 
 def _run_task(
     directory, transport=None, *, control=None, resume=False, fault_hook=None,
-    connection_profile=None, workers=6, workers_per_tar=6, _session=None,
+    connection_profile=None, workers=6, workers_per_tar=6, _session=None, _transport_owner=None,
 ):
     _run_options(transport, connection_profile, workers, workers_per_tar)
     with TaskDB(directory) as task, task.runner_lock(), ExitStack() as stack:
@@ -668,9 +675,10 @@ def _run_task(
             # Credentials and worker creation follow verification under the same lock.
             root = task.workspace.root if task.workspace is not None else task.directory
             _real_output_root(task.directory, physical_root=root)
-            transport = stack.enter_context(
-                connect_profile(connection_profile, root=root, capacity=task.capacity)
-            )
+            transport = (_transport_owner._connection(task, connection_profile)
+                         if _transport_owner is not None else stack.enter_context(
+                             connect_profile(connection_profile, root=root,
+                                             capacity=task.capacity)))
             _check_task_transport(task, transport)
         metadata_preflight = getattr(transport, "preflight_metadata", None)
         if metadata_preflight is not None:

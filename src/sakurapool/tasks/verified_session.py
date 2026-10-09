@@ -10,8 +10,8 @@ from ..storage.publication import bounded
 from .store import TaskError
 
 
-def _fingerprint(root):
-    """Fixed v2 inputs, including inode and change time, never an unbounded walk."""
+def _inventory(root):
+    """Fixed v2 files selected by the bounded manifest, never a directory walk."""
     manifest = bounded(root / "PUBLICATION.json")
     snapshot = manifest.get("snapshot_id") if type(manifest) is dict else None
     if type(snapshot) is not str or re.fullmatch("[0-9a-f]{64}", snapshot) is None:
@@ -22,6 +22,12 @@ def _fingerprint(root):
              "runtime/current.json", *(pinned + "/" + name for name in
              ("SNAPSHOT.json", "READY", "OWNER.json", "STAGE.txt", "catalog.sqlite",
               "bitmaps.sqlite", "locations.npy")))
+    return directories, files
+
+
+def _fingerprint(root):
+    """Fixed v2 inputs, including inode and change time, never an unbounded walk."""
+    directories, files = _inventory(root)
     result = []
     for relative in (*directories, *files):
         path = plain_entry(root / relative, directory=relative in directories)
@@ -36,20 +42,27 @@ def _fingerprint(root):
 
 
 class _VerifiedPublication:
-    """Not a reusable token: created and closed inside create_and_run_task only."""
+    """Live owner-only object, never serialized or accepted as a trust token."""
 
     def __init__(self, root, capacity, loader):
-        self.owner = get_ident()
+        self.owner = (os.getpid(), get_ident())
         self.root = plain_entry(root, directory=True)
         self.capacity = capacity
         self._closed = False
-        self._files = _fingerprint(self.root)
-        self.publication = loader(self.root, full_verify=True)
-        pub = self.publication
-        self._objects = (pub, pub.runtime, pub.catalog, pub.hashes,
-                         pub.runtime._catalog, pub.runtime._bitmaps, pub.runtime._locations)
-        self._identity = (pub.content_digest, pub.runtime.snapshot_id)
+        self._pins = None
+        self.publication = None
+        if os.name == "nt":
+            from .windows_pins import _WindowsPins
+
+            self._pins = _WindowsPins(self.root)
+        self.mode = "windows_pinned" if self._pins is not None else "posix_live"
         try:
+            self._files = _fingerprint(self.root)
+            self.publication = loader(self.root, full_verify=True)
+            pub = self.publication
+            self._objects = (pub, pub.runtime, pub.catalog, pub.hashes,
+                             pub.runtime._catalog, pub.runtime._bitmaps, pub.runtime._locations)
+            self._identity = (pub.content_digest, pub.runtime.snapshot_id)
             self.check(capacity, self.root)
         except BaseException as primary:
             self._close(primary)
@@ -58,7 +71,8 @@ class _VerifiedPublication:
     def check(self, capacity, root):
         try:
             pub = self.publication
-            if (self._closed or get_ident() != self.owner or capacity != self.capacity
+            if (self._closed or (os.getpid(), get_ident()) != self.owner
+                    or capacity != self.capacity
                     or Path(root).absolute() != self.root or pub._closed
                     or pub.full_verified is not True or pub.runtime._closed
                     or pub.root != self.root
@@ -69,6 +83,8 @@ class _VerifiedPublication:
                     or pub.hashes._mmap.closed or pub.runtime._locations._mmap.closed
                     or _fingerprint(self.root) != self._files):
                 raise ValueError("publication session changed")
+            if self._pins is not None:
+                self._pins.check()
             for db in (pub.catalog, pub.runtime._catalog, pub.runtime._bitmaps):
                 db.execute("SELECT 1").fetchone()
         except Exception:
@@ -80,11 +96,17 @@ class _VerifiedPublication:
 
     def _close(self, primary=None):
         self._closed = True
-        try:
-            self.publication.close()
-        except BaseException:
+        failure = None
+        for resource in (self.publication, self._pins):
+            if resource is not None:
+                try:
+                    resource.close()
+                except BaseException as error:
+                    if failure is None:
+                        failure = error
+        if failure is not None:
             if primary is None:
-                raise
+                raise failure
             primary.task_secondary = (
                 *getattr(primary, "task_secondary", ()), "PUBLICATION_CLOSE_FAILED")
 
