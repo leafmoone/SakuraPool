@@ -1,6 +1,18 @@
 """Safe raw-image delivery formats; selection never implies conversion."""
-DEFAULT_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".avif")
-SUPPORTED_IMAGE_EXTENSIONS = DEFAULT_IMAGE_EXTENSIONS + (".gif",)
+LEGACY_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".avif")
+SUPPORTED_IMAGE_EXTENSIONS = LEGACY_IMAGE_EXTENSIONS + (".gif",)
+DEFAULT_IMAGE_EXTENSIONS = SUPPORTED_IMAGE_EXTENSIONS
+
+
+class ImageFormatError(ValueError):
+    """A bounded format decision, never arbitrary publication text."""
+
+    def __init__(self, image_format):
+        known = (type(image_format) is str and len(image_format) <= 4
+                 and "." + image_format in SUPPORTED_IMAGE_EXTENSIONS)
+        self.image_format = image_format if known else "unsupported"
+        self.code = "IMAGE_FORMAT_DISABLED" if known else "IMAGE_FORMAT_UNSUPPORTED"
+        super().__init__(self.code)
 
 
 def image_extensions(value=None):
@@ -18,6 +30,8 @@ def image_extensions(value=None):
 
 
 def image_filename(image_format, extensions=None):
-    if type(image_format) is not str or "." + image_format not in image_extensions(extensions):
-        raise ValueError("image format not enabled")
+    enabled = image_extensions(extensions)
+    if (type(image_format) is not str or len(image_format) > 4
+            or "." + image_format not in enabled):
+        raise ImageFormatError(image_format)
     return "image." + image_format

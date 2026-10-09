@@ -14,6 +14,62 @@ from .store import TaskDB, TaskError
 RECONCILE_PAGE_ROWS = 64
 
 
+def _format_failure(counts, examples, phase):
+    code = "IMAGE_FORMAT_UNSUPPORTED" if "unsupported" in counts else "IMAGE_FORMAT_DISABLED"
+    error = TaskError(code, phase, recoverable=code == "IMAGE_FORMAT_DISABLED")
+    error.safe_details = {"affected_count": sum(counts.values()),
+                          "format_counts": counts, "records": examples}
+    return error
+
+
+def _format_record(seq, rid, record_id, image_format):
+    if (any(type(value) is not int or not 0 <= value < (1 << 63) for value in (seq, rid))
+            or type(record_id) is not str or len(record_id) != 32
+            or any(c not in "0123456789abcdef" for c in record_id)):
+        raise TaskError("TASK_IDENTITY_INVALID", "preflight")
+    return {"seq": seq, "rid": rid, "record_id": record_id, "image_format": image_format}
+
+
+def format_failure(error, candidate):
+    """Safe per-record fallback for preparation, including unknown catalog formats."""
+    from ..image_formats import ImageFormatError
+
+    if type(error) is not ImageFormatError:
+        raise TaskError("IMAGE_FORMAT_INVALID", "preflight")
+    record = _format_record(candidate["seq"], candidate["rid"], candidate["record_id"],
+                            error.image_format)
+    return _format_failure({error.image_format: 1}, [record], "preflight")
+
+
+def _check_selected_formats(runtime, records, extensions, capacity, *, phase):
+    """Bounded preflight; no network, selection mutation or failed-operation records."""
+    from ..image_formats import SUPPORTED_IMAGE_EXTENSIONS, ImageFormatError, image_filename
+
+    counts, examples, formats = {}, [], {}
+    for count, (seq, rid, record_id) in enumerate(records, 1):
+        if count > capacity.freeze_count:
+            raise TaskError("SELECTION_LIMIT", phase)
+        _format_record(seq, rid, record_id, "unsupported")
+        format_id = runtime.location(rid)["format_id"]
+        image_format = formats.get(format_id)
+        if image_format is None:
+            image_format = runtime.image_format(format_id)
+            if (type(image_format) is not str or len(image_format) > 4
+                    or "." + image_format not in SUPPORTED_IMAGE_EXTENSIONS):
+                image_format = "unsupported"
+            if len(formats) < 64:
+                formats[format_id] = image_format
+        try:
+            image_filename(image_format, extensions)
+        except ImageFormatError as error:
+            name = error.image_format
+            counts[name] = counts.get(name, 0) + 1
+            if len(examples) < 4:
+                examples.append(_format_record(seq, rid, record_id, name))
+    if counts:
+        raise _format_failure(counts, examples, phase)
+
+
 def _real_output_root(*args, **kwargs):
     # Keep offline task creation/inspection independent of remote transport extras.
     from ..storage.retrieval import _real_output_root as check_root
@@ -41,7 +97,20 @@ def create_task(
     selection = Selection() if selection is None else selection
     selection.validate(capacity)
     normalized = normalize_query(query)
+    from ..image_formats import SUPPORTED_IMAGE_EXTENSIONS
+    from ..image_formats import image_extensions as validate_extensions
+
+    try:
+        extensions = validate_extensions(image_extensions)
+    except ValueError:
+        raise TaskError("IMAGE_EXTENSIONS_INVALID", "create") from None
     with load_publication(publication, full_verify=True) as pub:
+        if extensions != SUPPORTED_IMAGE_EXTENSIONS:
+            # Deterministic bounded pass before creating any task files. Defaults
+            # admit every supported format; unknown formats retain a typed fallback.
+            records = ((seq, row.rid, row.record_id) for seq, row in enumerate(
+                selected_records(pub.runtime, query, selection, capacity)))
+            _check_selected_formats(pub.runtime, records, extensions, capacity, phase="create")
         header = {
             "publication_digest": pub.content_digest,
             "snapshot_id": pub.runtime.snapshot_id,
@@ -55,7 +124,7 @@ def create_task(
             header,
             selected_records(pub.runtime, query, selection, capacity),
             publication_path=publication,
-            image_extensions=image_extensions,
+            image_extensions=extensions,
             filename_template=filename_template,
             filename_prefix=filename_prefix,
         )
@@ -512,6 +581,13 @@ def run_task(
             load_publication(task.meta("publication_path"), full_verify=True)
         )
         header = check_publication_identity(task, publication)
+        from ..image_formats import SUPPORTED_IMAGE_EXTENSIONS
+
+        extensions = task.image_extensions
+        if extensions != SUPPORTED_IMAGE_EXTENSIONS:
+            _check_selected_formats(publication.runtime, task.db.execute(
+                "SELECT seq,rid,record_id FROM items ORDER BY seq"), extensions,
+                task.capacity, phase="preflight")
         if connection_profile is not None:
             from .profile import validate_allowlist
 

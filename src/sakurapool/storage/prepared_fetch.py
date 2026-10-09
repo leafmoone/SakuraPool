@@ -152,10 +152,12 @@ class PreparedFetch:
         loc = {name: raw_loc[name] for name in ("object_idx", "image_offset", "image_size",
                "metadata_offset", "metadata_size", "format_id", "flags")}
         image_format = rt.image_format(loc["format_id"])
-        from ..image_formats import image_filename
+        from ..image_formats import ImageFormatError, image_filename
 
         try:
             image_filename(image_format, image_extensions)
+        except ImageFormatError:
+            raise
         except ValueError:
             raise PublicationCorrupt("prepared extent or format invalid") from None
         if len(record_id) != 32:

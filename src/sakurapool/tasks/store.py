@@ -66,15 +66,33 @@ def _connect(path, *, readonly=False, capacity=None):
         raise
 
 
-def _check_files(path, capacity):
-    if plain_entry(path).stat().st_size > capacity.task_db_bytes:
+def _check_files(path, capacity, *, transient_journal=True):
+    main = plain_entry(path).stat()
+    if main.st_size > capacity.task_db_bytes:
         raise TaskError("TASK_DB_LIMIT", "taskdb")
     for suffix in ("-wal", "-shm", "-journal"):
         sidecar = Path(str(path) + suffix)
         if os.path.lexists(sidecar):
-            plain_entry(sidecar)
-            if suffix != "-journal" or sidecar.stat().st_size > capacity.task_journal_bytes:
-                raise TaskError("TASKDB_SIDECAR_CONFLICT")
+            try:
+                plain_entry(sidecar)
+                if suffix != "-journal" or sidecar.stat().st_size > capacity.task_journal_bytes:
+                    raise TaskError("TASKDB_SIDECAR_CONFLICT")
+            except FileNotFoundError as error:
+                if (not transient_journal or suffix != "-journal"
+                        or error.filename is None or Path(error.filename) != sidecar):
+                    raise
+                # DELETE commit may unlink this exact journal between the probes.
+                # Main DB/ancestors and replacement sidecars still fail closed.
+                current = plain_entry(path).stat()
+                if (current.st_dev, current.st_ino) != (main.st_dev, main.st_ino):
+                    raise TaskError("TASKDB_IDENTITY_CHANGED", "taskdb") from None
+                if current.st_size > capacity.task_db_bytes:
+                    raise TaskError("TASK_DB_LIMIT", "taskdb") from None
+                if os.path.lexists(sidecar):
+                    # One bounded retry; no generic missing-file/recovery exemption.
+                    plain_entry(sidecar)
+                    if sidecar.stat().st_size > capacity.task_journal_bytes:
+                        raise TaskError("TASKDB_SIDECAR_CONFLICT") from None
 
 
 def _file_signature(info):
@@ -83,7 +101,7 @@ def _file_signature(info):
 
 def _recovery_snapshot(path, capacity):
     """Bounded, optimistic snapshot; reject any replacement/change during the copy."""
-    _check_files(path, capacity)
+    _check_files(path, capacity, transient_journal=False)
     paths = (path, Path(str(path) + "-journal"))
     limits = (capacity.task_db_bytes, capacity.task_journal_bytes)
     infos = [plain_entry(p).stat() for p in paths]
@@ -101,7 +119,7 @@ def _recovery_snapshot(path, capacity):
             if _file_signature(os.fstat(stream.fileno())) != expected:
                 raise TaskError("TASKDB_RECOVERY_RACE", "recovery", recoverable=True)
         contents.append(data)
-    _check_files(path, capacity)
+    _check_files(path, capacity, transient_journal=False)
     if [_file_signature(plain_entry(p).stat()) for p in paths] != before:
         raise TaskError("TASKDB_RECOVERY_RACE", "recovery", recoverable=True)
     return contents, (before, [hashlib.sha256(data).digest() for data in contents])
@@ -517,10 +535,10 @@ class TaskDB:
 
     @property
     def image_extensions(self):
-        from ..image_formats import image_extensions
+        from ..image_formats import LEGACY_IMAGE_EXTENSIONS, image_extensions
 
         value = _bounded_meta(self.db, "image_extensions", 1024, missing=True)
-        return image_extensions(value)
+        return image_extensions(LEGACY_IMAGE_EXTENSIONS if value is None else value)
 
     @property
     def settings_version(self):

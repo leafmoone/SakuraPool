@@ -17,12 +17,13 @@ from pathlib import Path
 from typing import Iterable
 
 from ..fs_durability import publish_noreplace as _publish_directory
+from ..image_formats import SUPPORTED_IMAGE_EXTENSIONS
 from .budget import BudgetExceeded, BudgetLedger, Reservation
 from .transport import MAX_MEMBER, BoundObject, GuardedTransport, RemoteIOError
 
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 RECORD_ID = re.compile(r"[0-9a-f]{32}\Z")
-EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp", ".avif"})
+EXTENSIONS = frozenset(SUPPORTED_IMAGE_EXTENSIONS)
 MAX_MERGE = 16 * (1 << 20)
 MAX_GAP = 64 * (1 << 10)
 

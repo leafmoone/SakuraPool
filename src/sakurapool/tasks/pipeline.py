@@ -48,7 +48,8 @@ def _select_free_lane(free, lanes, prepared, capacity, *, metadata=False):
 def run_pipeline(task, publication, transport, *, workers, metadata, workers_per_tar=1,
                  fault_hook=None, control=None):
     """At most W active operations, with an explicit per-TAR lane bound."""
-    from .runner import delivery_mapping, preflight, verify_delivery
+    from ..image_formats import ImageFormatError
+    from .runner import delivery_mapping, format_failure, preflight, verify_delivery
 
     if type(workers) is not int or workers < 1:
         raise TaskError("WORKERS_INVALID", "preflight")
@@ -195,12 +196,15 @@ def run_pipeline(task, publication, transport, *, workers, metadata, workers_per
             key = (candidate["seq"], candidate["rid"], candidate["record_id"])
             value = prepared_cache.get(key)
             if value is None:
-                value = PreparedFetch._prepare(
-                    publication,
-                    candidate["record_id"],
-                    capacity=task.capacity,
-                    image_extensions=extensions,
-                )
+                try:
+                    value = PreparedFetch._prepare(
+                        publication,
+                        candidate["record_id"],
+                        capacity=task.capacity,
+                        image_extensions=extensions,
+                    )
+                except ImageFormatError as error:
+                    raise format_failure(error, candidate) from None
                 prepared_cache[key] = value
             return value
 

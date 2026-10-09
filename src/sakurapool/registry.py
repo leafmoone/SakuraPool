@@ -6,6 +6,8 @@ from typing import Any
 
 import pyarrow as pa
 
+from .image_formats import DEFAULT_IMAGE_EXTENSIONS
+
 
 @dataclass
 class Registry:
@@ -31,7 +33,7 @@ class DatasetAdapter:
     dataset: str
     source: str
     storage_id: str = "local"
-    image_extensions: tuple[str, ...] = (".jpg", ".jpeg", ".png", ".webp", ".avif")
+    image_extensions: tuple[str, ...] = DEFAULT_IMAGE_EXTENSIONS
     tags_field: str = "tags"
     text_field: str = "text"
     max_json_bytes: int = 16 * 1024 * 1024

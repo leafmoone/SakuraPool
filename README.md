@@ -454,12 +454,17 @@ rename and no Windows power-loss/exactly-once promise. No consumption ledger is 
 ## Raw image delivery settings
 
 Publication/task downloads support registered `.jpg`, `.jpeg`, `.png`, `.webp`,
-`.avif`, and `.gif` formats. The default remains the first five; GIF is opt-in.
+`.avif`, and `.gif` formats. New tasks and default adapter configurations enable
+all six, including GIF. Existing tasks retain their saved format settings; older
+tasks without saved settings retain the historical first-five policy.
 `publication fetch` and `task create` accept `--image-extensions` as comma-separated
 suffixes. Bytes are verified and delivered unchanged; no decoding or conversion
 is performed. Unknown formats and unsafe filenames are rejected. Index adapter
 `image_extensions` controls scanning and does not automatically enable download
-formats.
+formats. Explicitly restricted task settings are checked against the selected
+records before task creation or network startup. Rejections report bounded format
+counts and record identities rather than treating a disabled format as corruption;
+no records are silently filtered or converted.
 
 New v4 tasks can explicitly expand their format selection without reselecting records:
 
@@ -469,7 +474,7 @@ sakura task update /workspace/tasks/task --expected-settings-version 0 --image-e
 ```
 
 Use the actual `settings_version` from inspect. New tasks start at version zero
-with the original five defaults. Updates use compare-and-swap, reject format
+with all six defaults. Updates use compare-and-swap, reject format
 removal and active runners/items, and commit the latest format/version in one
 transaction. Frozen selection/seed/plan and verified deliveries are unchanged.
 There is no output ceiling, ledger lease or consumption audit to update.
@@ -816,7 +821,8 @@ full logical stem. `image_prefix="images/"` and `metadata_prefix="meta/"` allow
 Prefix removal is explicit and collisions are rejected. `metadata_required` defaults
 to true and can be false. `numeric_post_id` optionally requires decimal post stems.
 `tags_field`, `text_field`, `max_json_bytes`, `tag_namespace`, `tag_category`, and
-`image_extensions` are explicit options; defaults are `.jpg`, `.jpeg`, `.png`, `.webp`, and `.avif`. README.md/manifest.json, hidden paths,
+`image_extensions` are explicit options; defaults are `.jpg`, `.jpeg`, `.png`, `.webp`,
+`.avif`, and `.gif`. Saved explicit lists remain unchanged. README.md/manifest.json, hidden paths,
 directories, and unrecognized suffixes are ignored; `ignored_names` is configurable.
 
 Error vocabulary: invalid_post_id, missing_image, missing_metadata, metadata_invalid,
