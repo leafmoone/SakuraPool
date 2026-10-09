@@ -216,7 +216,9 @@ def _stage1(inventory: P2Inventory, staging: Path) -> None:
                 metadata_offset BLOB(8) NOT NULL DEFAULT x'0000000000000000',
                 metadata_size BLOB(8) NOT NULL DEFAULT x'0000000000000000',
                 has_metadata INTEGER NOT NULL DEFAULT 0,
-                image_format TEXT
+                image_format TEXT,
+                width INTEGER,
+                height INTEGER
             )
             """)
         db.execute("CREATE UNIQUE INDEX samples_record_unique ON samples(record_id)")
@@ -224,7 +226,7 @@ def _stage1(inventory: P2Inventory, staging: Path) -> None:
         insert_sql = (
             "INSERT INTO samples (dataset_id, object_id, sample_path, record_id, source,"
             " post_id, image_offset, image_size, metadata_offset, metadata_size,"
-            " has_metadata, image_format) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
+            " has_metadata, image_format, width, height) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
         sample_count = 0
         for obj in objects:
             # Inventory validation still checks the full schema and file hash.
@@ -232,14 +234,15 @@ def _stage1(inventory: P2Inventory, staging: Path) -> None:
             for batch in _read_batches(_fragment_path(obj, "samples"), columns=[
                 "dataset_id", "object_id", "sample_path", "record_id", "source",
                 "post_id", "offset_data", "size", "json_offset_data", "json_size",
-                "json_path", "image_format",
+                "json_path", "image_format", "width", "height",
             ]):
                 db.executemany(insert_sql, [
                     (s["dataset_id"], s["object_id"], s["sample_path"],
                      bytes.fromhex(s["record_id"]), s["source"], s["post_id"],
                      _u64(s["offset_data"]), _u64(s["size"]),
                      _u64(s["json_offset_data"]), _u64(s["json_size"]),
-                     1 if s["json_path"] is not None else 0, s["image_format"])
+                     1 if s["json_path"] is not None else 0, s["image_format"],
+                     s["width"], s["height"])
                     for s in batch
                 ])
                 sample_count += len(batch)
@@ -434,8 +437,11 @@ def _catalog(inventory: P2Inventory, staging: Path, snap_id: str) -> int:
                 record_id BLOB(16) NOT NULL UNIQUE,
                 source_id INTEGER NOT NULL,
                 dataset_id INTEGER NOT NULL,
-                post_id TEXT NOT NULL
+                post_id TEXT NOT NULL,
+                width INTEGER,
+                height INTEGER
             );
+            CREATE INDEX records_dimensions ON records(width, height);
             CREATE INDEX records_source_post ON records(source_id, post_id);
             CREATE INDEX records_dataset_post ON records(dataset_id, post_id);
             CREATE TABLE tags (
@@ -512,14 +518,14 @@ def _catalog(inventory: P2Inventory, staging: Path, snap_id: str) -> int:
             json.dumps(format_ids, sort_keys=True), encoding="utf-8")
 
         record_sql = (
-            "INSERT INTO records (rid, record_id, source_id, dataset_id, post_id) "
-            "VALUES (?,?,?,?,?)")
+            "INSERT INTO records (rid, record_id, source_id, dataset_id, post_id, width, height) "
+            "VALUES (?,?,?,?,?,?,?)")
         record_batch: list[tuple] = []
-        for rid, record_id, source, dataset, post_id in db.execute(
-                "SELECT r.rid, s.record_id, s.source, s.dataset_id, s.post_id "
+        for rid, record_id, source, dataset, post_id, width, height in db.execute(
+                "SELECT r.rid, s.record_id, s.source, s.dataset_id, s.post_id, s.width, s.height "
                 "FROM rids r JOIN samples s ON s.seq = r.seq ORDER BY r.rid"):
             record_batch.append(
-                (rid, record_id, source_ids[source], dataset_ids[dataset], post_id))
+                (rid, record_id, source_ids[source], dataset_ids[dataset], post_id, width, height))
             if len(record_batch) >= 10_000:
                 cat.executemany(record_sql, record_batch)
                 record_batch = []
@@ -1063,7 +1069,9 @@ def compile_runtime(
     """Compile committed P2 inputs into an immutable snapshot under output_root."""
     if chunk_size <= 0:
         _fail("chunk_size must be positive")
-    options = {"chunk_size": chunk_size}
+    # Additive catalog feature: keep legacy readers usable, but never reuse
+    # a dimension-less snapshot or staging directory for this compiler output.
+    options = {"chunk_size": chunk_size, "dimensions": 1}
     snap_id = snapshot_id(inventory.source_fingerprint, options,
                           RUNTIME_COMPILER, RUNTIME_FORMAT_VERSION)
     output_root = Path(output_root)

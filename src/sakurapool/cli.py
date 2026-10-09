@@ -40,6 +40,7 @@ def _spec_from_dict(data: dict[str, Any]) -> "RuntimeQuerySpec":
             raise ValueError("any_of branches must be objects")
         branches.append(_spec_from_dict(branch))
     known = {"sources", "datasets", "namespace", "all_tags", "any_tags", "none_tags", "any_of"}
+    known.update(("width_gt", "height_gt"))
     unknown = set(data) - known
     if unknown:
         raise ValueError(f"unknown spec keys: {sorted(unknown)}")
@@ -51,6 +52,8 @@ def _spec_from_dict(data: dict[str, Any]) -> "RuntimeQuerySpec":
         any_tags=_spec_tags(data.get("any_tags")),
         none_tags=_spec_tags(data.get("none_tags")),
         any_of=tuple(branches),
+        width_gt=data.get("width_gt"),
+        height_gt=data.get("height_gt"),
     )
 
 

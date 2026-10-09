@@ -23,7 +23,8 @@ class RuntimeQuerySpec:
 
     sources OR, datasets OR, then AND with all_tags AND, any_tags OR,
     none_tags excluded within their known namespace. any_of is a union of
-    branch specs evaluated with the same single-branch semantics.
+    branch specs evaluated with the same single-branch semantics. width_gt
+    and height_gt are strict pixel thresholds, ANDed with the other terms.
     """
 
     sources: tuple[str, ...] = ()
@@ -33,10 +34,17 @@ class RuntimeQuerySpec:
     any_tags: tuple[TagRef, ...] = ()
     none_tags: tuple[TagRef, ...] = ()
     any_of: tuple["RuntimeQuerySpec", ...] = ()
+    width_gt: int | None = None
+    height_gt: int | None = None
 
     def __post_init__(self) -> None:
+        for name in ("width_gt", "height_gt"):
+            value = getattr(self, name)
+            if value is not None and (type(value) is not int or not 0 <= value < 2**32):
+                raise ValueError(f"{name} must be an integer in [0, 2**32)")
         if self.any_of and (self.sources or self.datasets or self.all_tags
-                            or self.any_tags or self.none_tags):
+                            or self.any_tags or self.none_tags
+                            or self.width_gt is not None or self.height_gt is not None):
             raise ValueError(
                 "any_of branches carry the terms; top level takes only any_of")
 
@@ -236,6 +244,20 @@ def _stored_cardinality(snapshot: RuntimeSnapshot, kind: str,
 
 
 def _branch_result(snapshot: RuntimeSnapshot, spec: RuntimeQuerySpec) -> BitMap:
+    filters = [(name, value) for name, value in
+               (("width", spec.width_gt), ("height", spec.height_gt))
+               if value is not None]
+    if filters:
+        columns = {row[1] for row in snapshot._catalog.execute("PRAGMA table_info(records)")}
+        if not {name for name, _ in filters} <= columns:
+            raise ValueError("dimension filters require recompiling this runtime from its P2 index")
+
+    def dimensions() -> BitMap:
+        # Indexed catalog range scan; no image reads or per-record queries.
+        where = " AND ".join(f"{name} > ?" for name, _ in filters)
+        return BitMap(row[0] for row in snapshot._catalog.execute(
+            f"SELECT rid FROM records WHERE {where}", [value for _, value in filters]))
+
     terms: list[_Term] = []
     if spec.sources:
         source_ids = [snapshot._source_id(source)
@@ -271,7 +293,7 @@ def _branch_result(snapshot: RuntimeSnapshot, spec: RuntimeQuerySpec) -> BitMap:
             terms.append(_Term(stored_known, "namespace_minus", tag_ids,
                                namespace_id))
     if not terms:
-        return BitMap(range(snapshot.rid_count))
+        return dimensions() if filters else BitMap(range(snapshot.rid_count))
     # Plan by stored cardinality: OR terms use their pre-materialization
     # bound, so the smallest constraint is applied first and the AND can
     # short-circuit without loading the remaining blobs at all.
@@ -282,7 +304,7 @@ def _branch_result(snapshot: RuntimeSnapshot, spec: RuntimeQuerySpec) -> BitMap:
         result = bitmap if result is None else (result & bitmap)
         if result is not None and not result:
             return result
-    return result
+    return result & dimensions() if filters else result
 
 
 def evaluate_spec(snapshot: RuntimeSnapshot,

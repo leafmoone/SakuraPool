@@ -61,6 +61,9 @@ def normalize_query(spec):
         normalized = normalize_query(branch)
         branches[canonical(normalized)] = normalized
     return {
+        # Omit unset dimensions to preserve existing frozen-query digests.
+        **{name: getattr(spec, name) for name in ("width_gt", "height_gt")
+           if getattr(spec, name) is not None},
         "sources": names(spec.sources),
         "datasets": names(spec.datasets),
         "namespace": spec.namespace,

@@ -461,12 +461,14 @@ class RuntimeSnapshot:
         any_tags=(),
         none_tags=(),
         any_of=(),
+        width_gt=None,
+        height_gt=None,
     ):
         """Run a query. Accepts a RuntimeQuerySpec or keyword terms.
 
         Keyword form (the P3 keyword entry): any combination of
         sources=(), datasets=(), namespace=, all_tags=(), any_tags=(),
-        none_tags=(), any_of=() builds the spec. An explicitly named
+        none_tags=(), any_of=(), width_gt=, height_gt= builds the spec. An explicitly named
         namespace is validated even without tags.
         """
         from .query import RuntimeQuerySpec, evaluate_spec
@@ -481,6 +483,8 @@ class RuntimeSnapshot:
                 any_tags=tuple(any_tags),
                 none_tags=tuple(none_tags),
                 any_of=tuple(any_of),
+                width_gt=width_gt,
+                height_gt=height_gt,
             )
         self._validate_namespaces(spec)
         return evaluate_spec(self, spec)

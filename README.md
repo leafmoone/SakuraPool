@@ -931,6 +931,18 @@ metadata keeps `HAS_METADATA`). The snapshot fingerprint excludes the P2
 `created_at` timestamps by design, so re-timestamped identical inputs produce
 the same `snapshot_id`.
 
+To select images whose width **and** height are strictly greater than 1024 pixels,
+use `{"width_gt":1024,"height_gt":1024}` in the query JSON (`--spec` for runtime
+queries, `--query` for task creation), or
+`rt.query(width_gt=1024, height_gt=1024)`. Each optional threshold is a nonnegative
+integer below 2**32. Null/zero dimensions do not match; exactly 1024 does not match.
+These conditions AND with source/dataset/tag conditions. For `any_of`, put them
+inside each relevant branch. Dimensions are read from the local P2 index, without
+fetching images. Recompile existing runtimes from their P2 inputs before using
+these filters; old snapshots still support unfiltered queries, and a dimension
+query on an old snapshot reports that recompilation is required. For task creation,
+rebuild the index publication from the new runtime as well.
+
 Query domain (`RuntimeQuerySpec`): `sources` OR, `datasets` OR, then AND with
 per-tag `all_tags`, one OR group of `any_tags`, and per-namespace `none_tags`
 (`known_ns − excluded`); `any_of` is a union of flat branches. AND terms are
