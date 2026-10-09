@@ -90,6 +90,11 @@ def run_pipeline(task, publication, transport, *, workers, metadata, workers_per
                            and isinstance(transport, RustProductionTransport)
                            and transport.lightweight else None)
 
+    from ..storage.raw_spans import RawSpans
+
+    raw_spans = (RawSpans(lane_count, task.capacity) if control is None
+                 and type(transport) is RustProductionTransport and transport.lightweight else None)
+
     def hook(lane, item, event, payload):
         if len(canonical(payload)) > min(8192, task.capacity.rpc_line_bytes):
             raise TaskError("ATTEMPT_EVENT_LIMIT")
@@ -106,6 +111,8 @@ def run_pipeline(task, publication, transport, *, workers, metadata, workers_per
             projection = prepared._projection(cache)
             if metadata_candidates is not None:
                 projection._metadata_candidates = metadata_candidates
+            if raw_spans is not None:
+                projection._raw_span_claim = (raw_spans, item["operation_id"], prepared)
             _fetch_publication_sample(
                 projection,
                 item["record_id"],
@@ -177,6 +184,8 @@ def run_pipeline(task, publication, transport, *, workers, metadata, workers_per
                 return
             blocked = False
             _, completed = active.pop(index)
+            if raw_spans is not None:
+                raw_spans.unregister(item["operation_id"])
             tar_active[completed.transport_identity] -= 1
             if not tar_active[completed.transport_identity]:
                 del tar_active[completed.transport_identity]
@@ -295,8 +304,13 @@ def run_pipeline(task, publication, transport, *, workers, metadata, workers_per
             tar_active[prepared.transport_identity] += 1
             try:
                 mapping = delivery_mapping(task, item, publication)
+                if raw_spans is not None:
+                    raw_spans.register(item["operation_id"], prepared, lanes[index][0],
+                                       metadata=metadata)
                 executor.submit(execute, index, item, prepared, mapping)
             except BaseException:
+                if raw_spans is not None:
+                    raw_spans.unregister(item["operation_id"])
                 active.pop(index)
                 tar_active[prepared.transport_identity] -= 1
                 if not tar_active[prepared.transport_identity]:
@@ -324,6 +338,8 @@ def run_pipeline(task, publication, transport, *, workers, metadata, workers_per
                 first_error = first_error or primary
                 if metadata_candidates is not None:
                     metadata_candidates.close()
+                if raw_spans is not None:
+                    raw_spans.close()
                 # No SQLite call is needed to reject outstanding event RPCs and reap
                 # completion envelopes. This also covers SQL/meta/interrupt failures.
                 # Workers must be acknowledged before executor.shutdown waits for them.
@@ -351,6 +367,8 @@ def run_pipeline(task, publication, transport, *, workers, metadata, workers_per
                 )
     finally:
         primary = sys.exc_info()[1]
+        if raw_spans is not None:
+            raw_spans.close()
         if metadata_candidates is not None:
             metadata_candidates.close()
         close_failed = False

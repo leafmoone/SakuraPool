@@ -166,12 +166,14 @@ class PublicationFetchError(RemoteIOError):
 
 
 @contextmanager
-def _owned_range(transport, bound, offset, size, state):
+def _owned_range(transport, bound, offset, size, state, *, sharing=None):
     """Keep body-primary classification even if transport exit also fails."""
     state["code"] = "publication_range"
     body_primary = None
     try:
-        with transport.read_range_owned(bound, offset, size) as payload:
+        manager = (transport.read_range_owned(bound, offset, size) if sharing is None else
+                   sharing[0].read(sharing[1], sharing[2], transport, bound, offset, size))
+        with manager as payload:
             try:
                 yield payload
             except BaseException as error:
@@ -491,7 +493,10 @@ def _fetch_publication_sample(
                     )
                 for chunk_index, (offset, length) in enumerate(plan.chunks()):
                     state.update(member_kind="image", chunk_index=chunk_index)
-                    with _owned_range(transport, bound, offset, length, state) as payload:
+                    sharing = (getattr(pub, "_raw_span_claim", None)
+                               if not plan.metadata_bytes and plan.image_chunks == 1 else None)
+                    with _owned_range(transport, bound, offset, length, state,
+                                      sharing=sharing) as payload:
                         if len(payload) != length:
                             raise RemoteIOError("image exact extent")
                         image_digest.update(payload)
@@ -607,7 +612,8 @@ def _write_coalesced_members(
         if attempt_hook is not None:
             attempt_hook("CREATED", {"name": image_name, "identity": list(created[image_name])})
         state.update(member_kind="image", chunk_index=0)
-        with _owned_range(transport, bound, offset, length, state) as payload:
+        sharing = getattr(pub, "_raw_span_claim", None)
+        with _owned_range(transport, bound, offset, length, state, sharing=sharing) as payload:
             whole = image_view = metadata_view = None
             try:
                 if len(payload) != length:

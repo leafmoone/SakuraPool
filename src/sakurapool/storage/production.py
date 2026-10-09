@@ -2022,6 +2022,32 @@ class RustProductionTransport:
         return obj
 
     @contextmanager
+    def _shared_range_guard(self, bound, length):
+        """Pin this lane's own live generation while borrowing immutable bytes."""
+        if not self.lightweight or not 0 < length <= self.max_range_bytes:
+            raise RemoteIOError("Shared Range guard unavailable", lightweight=True)
+        with self._lane_lock:
+            obj = self._bound_object(bound)
+            self._admit_lightweight_generation(1)
+            if proof_key(obj, test=self._test) not in self._live_proofs:
+                if self.verify_conditions(obj) != obj:
+                    raise RemoteIOError("Shared Range validator changed", lightweight=True)
+            generation, owner = self._generation, threading.get_ident()
+
+            def check():
+                worker = self._lane_worker
+                if (self._closed or self._lane_failed or self._operation_active
+                        or self._generation != generation or threading.get_ident() != owner
+                        or worker is None or not worker._alive or worker._proc is None
+                        or worker._proc.poll() is not None
+                        or self._verified_object_body(obj) != obj):
+                    raise RemoteIOError("Shared Range lane proof unavailable", lightweight=True)
+
+            check()
+            yield obj, check
+            check()
+
+    @contextmanager
     def read_range_owned(self, bound, start, length):
         obj = self._bound_object(bound)
         if length == 0:

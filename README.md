@@ -571,6 +571,23 @@ proof or verified binding, staging an image, or requesting payload bytes. All th
 proof requests remain lane-owned. Helpers are cancelled/joined before lane completion;
 unconfirmed finalization forbids retry. This overlaps cold setup waits, without
 promising a steady-state throughput gain or altering proxy/TLS/timeout policy.
+
+Owned lightweight task lanes can share immutable payload bytes across at most three
+already-claimed adjacent records. This applies to single-chunk image-only records
+and to an existing coalesced image+JSON span; multi-chunk/non-coalescible records and
+externally supplied control transports retain their direct path. Every consuming
+lane must first establish and retain its own live generation proof, matching the
+full publication/snapshot/TAR identity, strong ETag and CDN host. Shared bytes never
+supply proof authority or admit extra records. Each record still has its own stage,
+hashes, bounded JSON validation, fsync, durable events, receipt and recovery state.
+A union must fit the configured Range chunk, with at most 64 KiB padding and padding
+no greater than one sixteenth of useful requested image/JSON bytes. The run-wide
+shared-body budget is one Range chunk, including twice a pending union's length for
+its native buffer plus immutable copy. Pinned views remain charged through release;
+saturation falls back to independent requests. No bytes are published to this cache
+until the producer's owned result is fully finalized. The cache is discarded at run
+exit; it does not reuse downloaded outputs or metadata/proof authority across tasks.
+Fewer payload requests do not guarantee lower elapsed time on fast/local sources.
 With `workers_per_tar` above 1, a custom
 transport's `clone()` must return a fresh instance, never the caller's transport
 or another lane, even when the effective cap is 1. With `workers=1`, a transport
