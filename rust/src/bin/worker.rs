@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::io::{self, BufRead, Write};
 
-const CAPABILITIES: [&str; 9] = [
+#[path = "worker/multiplex.rs"]
+mod multiplex;
+
+const CAPABILITIES: [&str; 10] = [
     "hash_file",
     "fetch_range",
     "scan_tar",
@@ -17,6 +20,7 @@ const CAPABILITIES: [&str; 9] = [
     "production_http_status_v1",
     "production_download_lightweight_v1",
     "metadata_attempt_v1",
+    "multiplex_channel_v1",
 ];
 const MAX_SESSION_REQUESTS: usize = 256;
 const MAX_REQUEST_ID_BYTES: usize = 64;
@@ -96,6 +100,8 @@ enum Outbound {
         metadata_limits: &'static sakurapool_rust::metadata::Limits,
         #[serde(skip_serializing_if = "Option::is_none")]
         execution_limits: Option<StreamCapacity>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        multiplex_limits: Option<serde_json::Value>,
     },
     Response {
         request_id: String,
@@ -164,9 +170,9 @@ fn main() -> io::Result<()> {
             return Ok(());
         }
     };
-    let lightweight = hello.protocol_version == 2;
+    let lightweight = matches!(hello.protocol_version, 2 | 3);
     if hello.kind != "hello"
-        || !matches!(hello.protocol_version, 1 | 2)
+        || !matches!(hello.protocol_version, 1 | 2 | 3)
         || (lightweight
             && (hello.budget.is_some()
                 || hello.stream_capacity.is_some()
@@ -221,9 +227,15 @@ fn main() -> io::Result<()> {
             protocol_resident_bytes: resident,
             metadata_limits: &sakurapool_rust::metadata::LIMITS,
             execution_limits: hello.execution_limits,
+            multiplex_limits: (hello.protocol_version == 3).then(|| serde_json::json!({
+                "channels":multiplex::CHANNELS,"requests":MAX_SESSION_REQUESTS})),
         },
         MAX_LINE_BYTES,
     )?;
+    if hello.protocol_version == 3 {
+        drop(stdout);
+        return multiplex::run(&mut reader,stream_capacity.unwrap());
+    }
     let mut seen_requests: BTreeSet<String> = BTreeSet::new();
     let mut execution = sakurapool_rust::production::ExecutionContext::default();
     let mut metadata = sakurapool_rust::metadata::Context::default();

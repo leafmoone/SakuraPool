@@ -207,6 +207,7 @@ class RustWorker:
         metadata: bool = False,
         deadline: float | None = None,
         cancel_event=None,
+        _multiplex=False,
     ) -> None:
         binary = Path(binary)
         if not binary.is_file():
@@ -232,9 +233,13 @@ class RustWorker:
         if capacity is not None and not isinstance(capacity, CapacityConfig):
             raise ValueError("typed capacity required")
         self.lightweight = lightweight
+        self._multiplex = _multiplex
+        if _multiplex and not lightweight:
+            raise ValueError("multiplex requires lightweight protocol")
         if lightweight and job_budget is not None:
             raise ValueError("lightweight worker does not accept budget")
-        self.protocol_version = LIGHTWEIGHT_PROTOCOL_VERSION if lightweight else PROTOCOL_VERSION
+        self.protocol_version = (3 if _multiplex else
+                                 LIGHTWEIGHT_PROTOCOL_VERSION if lightweight else PROTOCOL_VERSION)
         self.capacity = capacity = (
             CapacityConfig() if lightweight and capacity is None else capacity
         )
@@ -396,6 +401,7 @@ class RustWorker:
                         raise RustWorkerError(self._stdout_error or "worker exited") from None
                 if time.monotonic() >= deadline:
                     raise RustWorkerError("worker timed out")
+        self._last_received_bytes = len(raw)
         if len(raw) > max_line_bytes:
             raise RustWorkerError("worker response line too long")
         # Legacy scan manifests have their own bounded member/node allowance.
@@ -408,9 +414,10 @@ class RustWorker:
             node_limit = max_nodes
         peak = _json_peak(
             raw, max_nodes=node_limit,
-            _run_skip_strings=(getattr(self, "metadata", False)
-                               and max_line_bytes == METADATA_RESPONSE_LINE_BYTES
-                               and max_nodes == METADATA_RESPONSE_NODES),
+            _run_skip_strings=(getattr(self, "_multiplex", False) or (
+                getattr(self, "metadata", False)
+                and max_line_bytes == METADATA_RESPONSE_LINE_BYTES
+                and max_nodes == METADATA_RESPONSE_NODES)),
         )
         if peak > 8 * max_line_bytes + PROTOCOL_NODE_BYTES * node_limit:
             raise RustWorkerError("worker json allocation exceeded")
@@ -422,6 +429,7 @@ class RustWorker:
             raise RustWorkerError("worker returned invalid json")
         if len(raw) > self._line_bytes and not (
             message.get("type") == "response" and message.get("ok") is True
+            or self._multiplex and message.get("type") == "channel_response"
         ):
             raise RustWorkerError("worker response line too long")
         return message
@@ -497,6 +505,12 @@ class RustWorker:
             self.cancel()
             raise RustWorkerError("worker handshake failed")
         self.capabilities = tuple(capabilities)
+        multiplex_limits = message.get("multiplex_limits")
+        if self._multiplex and ("multiplex_channel_v1" not in self.capabilities
+                or type(multiplex_limits) is not dict
+                or multiplex_limits != {"channels": 8, "requests": 256}
+                or any(type(v) is not int for v in multiplex_limits.values())):
+            raise RustWorkerError("worker multiplex negotiation failed")
         self.metadata_limits = message.get("metadata_limits")
         if self.metadata:
             self.require_metadata()

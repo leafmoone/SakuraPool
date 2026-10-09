@@ -2,6 +2,7 @@
 
 import queue
 import sys
+import time
 from collections import Counter, OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -93,7 +94,8 @@ def run_pipeline(task, publication, transport, *, workers, metadata, workers_per
     from ..storage.raw_spans import RawSpans
 
     raw_spans = (RawSpans(lane_count, task.capacity) if control is None
-                 and type(transport) is RustProductionTransport and transport.lightweight else None)
+                 and type(transport) is RustProductionTransport
+                   and transport.lightweight else None)
 
     def hook(lane, item, event, payload):
         if len(canonical(payload)) > min(8192, task.capacity.rpc_line_bytes):
@@ -318,6 +320,9 @@ def run_pipeline(task, publication, transport, *, workers, metadata, workers_per
                 free.append(index)
                 raise
 
+    worker_pool = (transport._begin_task_pool(lane_count) if control is None
+                   and type(transport) is RustProductionTransport
+                   and transport.lightweight else None)
     try:
         with ThreadPoolExecutor(
             max_workers=max(1, lane_count), thread_name_prefix="sakura-download"
@@ -372,6 +377,15 @@ def run_pipeline(task, publication, transport, *, workers, metadata, workers_per
         if metadata_candidates is not None:
             metadata_candidates.close()
         close_failed = False
+        close_deadline = None
+        if worker_pool is not None:
+            close_deadline = time.monotonic() + 5
+            try:
+                worker_pool.prepare_close(close_deadline)
+            except BaseException:
+                close_failed = True
+            for lane, _ in lanes:
+                lane._close_deadline = close_deadline
         for lane, _ in lanes:
             if lane is transport:
                 continue
@@ -379,7 +393,12 @@ def run_pipeline(task, publication, transport, *, workers, metadata, workers_per
                 lane.close()
             except BaseException:
                 close_failed = True
-        # Every owned lane must be attempted, even if the first close fails.
+        if worker_pool is not None:
+            try:
+                transport._end_task_pool(worker_pool, deadline=close_deadline)
+            except BaseException:
+                close_failed = True
+        # Every owned lane/control/group must be attempted despite earlier failures.
         if close_failed:
             if primary is not None:
                 primary.task_secondary = (

@@ -348,6 +348,7 @@ class GuardedTransport:
         worker=None,
         metadata_mode: str | None = None,
         metadata_origin: str | None = None,
+        _worker_pool=None,
     ):
         if not trusted_hosts or any(
             not h or h != h.lower() or ":" in h or "/" in h for h in trusted_hosts
@@ -401,6 +402,7 @@ class GuardedTransport:
         if not math.isfinite(max_retry_wait_s) or max_retry_wait_s < 0:
             raise ValueError("retry wait must be a finite nonnegative number")
         self.max_retry_wait_s = max_retry_wait_s
+        self._worker_pool = _worker_pool
         self.metadata_mode = metadata_mode or (
             "legacy_requests" if self.offline_mode and worker is None else "native"
         )

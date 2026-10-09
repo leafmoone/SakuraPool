@@ -327,13 +327,20 @@ class MetadataRPC:
                 raise RustWorkerError("worker is closed")
             # Publish the constructing worker before __init__: cancellation can
             # signal it as soon as Popen has supplied an actual child handle.
-            worker = RustWorker.__new__(RustWorker)
+            from .worker_pool import PooledWorker
+
+            pool = getattr(self.owner, "_worker_pool", None)
+            worker_class = RustWorker if pool is None else PooledWorker
+            worker = worker_class.__new__(worker_class)
             self._worker = worker
             try:
-                RustWorker.__init__(worker, self.binary, capacity=self.capacity,
-                                    lightweight=True, metadata=True,
-                                    timeout_s=min(60.0, remaining(deadline)), deadline=deadline,
-                                    cancel_event=self._closed)
+                options = dict(metadata=True, timeout_s=min(60.0, remaining(deadline)),
+                               deadline=deadline, cancel_event=self._closed)
+                if pool is None:
+                    RustWorker.__init__(worker, self.binary, capacity=self.capacity,
+                                        lightweight=True, **options)
+                else:
+                    PooledWorker.__init__(worker, pool, **options)
                 if self._closed.is_set():
                     worker.cancel(deadline=self._grace())
                     raise RustWorkerError("worker is closed")

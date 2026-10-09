@@ -557,7 +557,7 @@ Each full TAR transport identity (endpoint, repository, repository type, revisio
 path and size) has at most min(workers_per_tar, L) active operations. The default
 allows up to six active operations per TAR within the total-worker bound; use
 `--workers-per-tar 1` for serial same-TAR operation. Concurrency can help when few
-TARs and slow responses leave workers idle, but adds independent worker startup, metadata and
+TARs and slow responses leave workers idle, but adds independent channel startup, metadata and
 conditional-proof work; fast responses may be slower. Native lanes retain their
 own transport, metadata channel, generation and bounded proof caches. No lane
 borrows another lane's authorization. For an owner-created frozen descriptor on an
@@ -571,6 +571,26 @@ proof or verified binding, staging an image, or requesting payload bytes. All th
 proof requests remain lane-owned. Helpers are cancelled/joined before lane completion;
 unconfirmed finalization forbids retry. This overlaps cold setup waits, without
 promising a steady-state throughput gain or altering proxy/TLS/timeout policy.
+
+When the configured native worker advertises `multiplex_channel_v1`, an owned
+lightweight task run groups up to eight independent execution or lazy metadata
+channels per native process using protocol 3. The original root protocol-2 worker
+remains separate. A run owns at most 2L channels; no pool crosses profiles, task runs,
+credentials or capacity settings. Each channel retains its own native HTTP contexts,
+request identities, 256-request generation limit and conditional proofs. Grouping
+reduces processes and pipe handles; blocking HTTP clients still own threads, so it
+does not promise a proportional thread or private-memory reduction. An otherwise
+compatible protocol-2 worker without this additive capability retains the existing
+per-channel process path without a speculative protocol-3 probe. External/custom
+control transports keep their existing behavior.
+
+Each group has bounded request and response slots, with one outstanding operation
+per channel. One deadline covers queued writes, pipe IO and response decoding.
+Idle channel closure leaves its peers usable; malformed/duplicate/stale replies or
+unconfirmed active cancellation fail the affected group closed. New allocations
+stop after a group failure, and no channel borrows another channel's proof authority.
+All task-owned groups are signaled before teardown waits and share one cleanup
+deadline; unconfirmed cleanup is an error and cannot authorize retry.
 
 Owned lightweight task lanes can share immutable payload bytes across at most three
 already-claimed adjacent records. This applies to single-chunk image-only records

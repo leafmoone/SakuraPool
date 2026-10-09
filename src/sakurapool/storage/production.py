@@ -205,6 +205,7 @@ class RustProductionTransport:
         _test=False,
         root: Path | None = None,
         offline_mode: bool = False,
+        _worker_pool=None,
     ):
         self.lightweight = ledger is None
         if self.lightweight and root is None:
@@ -261,6 +262,15 @@ class RustProductionTransport:
         self._live_proofs = set()
         self._closed = False
         self._close_deadline = None
+        self._worker_pool = _worker_pool
+        self._clone_pool = None
+        if _worker_pool is not None:
+            from .worker_pool import WorkerPool
+
+            if type(_worker_pool) is not WorkerPool or not self.lightweight:
+                raise ValueError("owned lightweight worker pool required")
+            _worker_pool.validate(self.worker, self.root, self.origin, self.capacity,
+                                  self._token, self._cookie, self._test)
         if self.lightweight:
             self._persistent = True
             self._lane_worker = None
@@ -279,13 +289,36 @@ class RustProductionTransport:
     max_range_bytes = MAX_RANGE
 
     def _new_lightweight_worker(self):
-        worker = RustWorker(self.worker, capacity=self.capacity, lightweight=True)
+        if self._worker_pool is None:
+            worker = RustWorker(self.worker, capacity=self.capacity, lightweight=True)
+        else:
+            from .worker_pool import PooledWorker
+
+            worker = PooledWorker(self._worker_pool)
         try:
             worker.require_metadata()
         except BaseException:
             worker.cancel(deadline=time.monotonic() + 5.0)
             raise
         return worker
+
+    def _begin_task_pool(self, lanes):
+        from .worker_pool import CAPABILITY, WorkerPool
+
+        if self._clone_pool is not None:
+            raise RemoteIOError("Transport already owns a task pool", lightweight=True)
+        if not self.lightweight or CAPABILITY not in self._lane_worker.capabilities:
+            return None
+        pool = WorkerPool(self, 2 * lanes)
+        self._clone_pool = pool
+        return pool
+
+    def _end_task_pool(self, pool, *, deadline=None):
+        try:
+            pool.close(deadline=deadline)
+        finally:
+            if self._clone_pool is pool:
+                self._clone_pool = None
 
     def preflight_metadata(self):
         """Check the additive capability before any task row/NETWORK_START mutation."""
@@ -762,6 +795,7 @@ class RustProductionTransport:
                 worker=self.worker,
                 metadata_origin=self.origin,
                 metadata_mode="native",
+                _worker_pool=self._worker_pool,
             )
         return self._control
 
@@ -769,6 +803,8 @@ class RustProductionTransport:
         if self._close_deadline is None:
             self._close_deadline = time.monotonic() + 5.0
         deadline = self._close_deadline
+        if self._clone_pool is not None:
+            self._clone_pool.signal_cancel(deadline=deadline)
         self._closed = True
         # Signal both children before waiting for a data-lane lock or any join.
         control = getattr(self, "_control", None)
@@ -870,6 +906,7 @@ class RustProductionTransport:
             root=self.root if root is None else root,
             capacity=self.capacity,
             offline_mode=self.offline_mode,
+            _worker_pool=self._clone_pool or self._worker_pool,
         )
         return copy
 
