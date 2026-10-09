@@ -153,7 +153,7 @@ def create_and_run_task(
     publication, directory, workspace, query, selection=None, *, metadata=False,
     image_extensions=None, filename_template="{tag}_{index}", filename_prefix=None,
     transport=None, control=None, fault_hook=None, connection_profile=None,
-    workers=1, workers_per_tar=1,
+    workers=6, workers_per_tar=6,
 ):
     """Explicit immediate download, sharing one verified handle only in this call."""
     from pathlib import Path
@@ -616,8 +616,8 @@ def run_task(
     resume=False,
     fault_hook=None,
     connection_profile=None,
-    workers=1,
-    workers_per_tar=1,
+    workers=6,
+    workers_per_tar=6,
 ):
     return _run_task(directory, transport, control=control, resume=resume,
                      fault_hook=fault_hook, connection_profile=connection_profile,
@@ -635,7 +635,7 @@ def _run_options(transport, connection_profile, workers, workers_per_tar):
 
 def _run_task(
     directory, transport=None, *, control=None, resume=False, fault_hook=None,
-    connection_profile=None, workers=1, workers_per_tar=1, _session=None,
+    connection_profile=None, workers=6, workers_per_tar=6, _session=None,
 ):
     _run_options(transport, connection_profile, workers, workers_per_tar)
     with TaskDB(directory) as task, task.runner_lock(), ExitStack() as stack:

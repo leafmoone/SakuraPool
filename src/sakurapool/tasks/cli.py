@@ -38,8 +38,9 @@ def add_parser(subparsers):
         create.add_argument("--filename-prefix")
         if name == "start":
             create.add_argument("--profile", required=True)
-            create.add_argument("--workers", type=_positive_workers, default=1)
-            create.add_argument("--workers-per-tar", type=_positive_workers, default=1)
+            create.add_argument("--workers", type=_positive_workers, default=6)
+            create.add_argument("--workers-per-tar", type=_positive_workers, default=6,
+                                help="maximum active operations per TAR (default: 6)")
     update = commands.add_parser("update")
     update.add_argument("task_dir")
     update.add_argument("--workspace")
@@ -53,9 +54,9 @@ def add_parser(subparsers):
             command.add_argument("--failure-seq", type=int, help="read a bounded persisted failure")
         elif name in ("run", "resume"):
             command.add_argument("--profile", required=True)
-            command.add_argument("--workers", type=_positive_workers, default=1)
-            command.add_argument("--workers-per-tar", type=_positive_workers, default=1,
-                                 help="maximum active operations per TAR (default: 1)")
+            command.add_argument("--workers", type=_positive_workers, default=6)
+            command.add_argument("--workers-per-tar", type=_positive_workers, default=6,
+                                 help="maximum active operations per TAR (default: 6)")
         elif name == "export":
             command.add_argument("--manifest", required=True)
 
@@ -140,7 +141,7 @@ def command(args):
                 resume=action == "resume",
                 connection_profile=profile,
                 workers=args.workers,
-                workers_per_tar=getattr(args, "workers_per_tar", 1),
+                workers_per_tar=getattr(args, "workers_per_tar", 6),
             )
         print(json.dumps(result, sort_keys=True))
         return 0

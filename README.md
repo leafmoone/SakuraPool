@@ -512,11 +512,12 @@ binding cache. It owns the publication handle, not the caller's transport.
 PublicationSession itself is serial and same-thread: no cross-thread SQLite use.
 The task coordinator separately supports bounded concurrent lanes; this is not a
 concurrent scheduler inside a shared PublicationSession.
-Default task workers=1; `--workers` and the API accept
+Default task workers=6; `--workers` and the API accept
 any strictly positive integer, without an enumeration or configured maximum.
-Task `run` and `resume` also accept `--workers-per-tar` (API: `workers_per_tar`),
-defaulting to 1. Increase it explicitly to allow bounded concurrent operations on
-the same TAR, for example:
+Task `start`, `run` and `resume` also accept `--workers-per-tar` (API: `workers_per_tar`),
+defaulting to 6, capped by the total available workers. Both concurrency defaults
+are 6. Override either to choose a different total-worker or same-TAR cap,
+for example:
 `sakura task run TASK --profile PROFILE.json --workers 6 --workers-per-tar 2`.
 Both options apply to the current run, not the frozen task plan.
 Actual concurrency depends on ready work, object distribution and available OS
@@ -534,7 +535,7 @@ publication verification for each run.
 
 The previous 1/2/4/6 choices and estimated 512 MiB aggregate-memory admission are
 removed by explicit user contract change. Zero, negative and non-integer workers
-(including API booleans) are invalid; default remains 1. No machine-RAM detection,
+(including API booleans) are invalid; default is 6. No machine-RAM detection,
 automatic worker increase or replacement memory ceiling is introduced. Choosing
 large concurrency can exhaust real machine resources; successful execution or
 throughput growth is not guaranteed.
@@ -554,15 +555,16 @@ filter naturally limits returned rows. Very large positive Python integers there
 do not overflow SQLite or impose a hidden input maximum. There is no fixed 12-record candidate ceiling.
 Each full TAR transport identity (endpoint, repository, repository type, revision,
 path and size) has at most min(workers_per_tar, L) active operations. The default
-retains one active operation per TAR. Opting in can help when few TARs and slow
-responses leave workers idle, but adds independent worker startup, metadata and
+allows up to six active operations per TAR within the total-worker bound; use
+`--workers-per-tar 1` for serial same-TAR operation. Concurrency can help when few
+TARs and slow responses leave workers idle, but adds independent worker startup, metadata and
 conditional-proof work; fast responses may be slower. Native lanes retain their
 own transport, metadata channel, generation and bounded proof caches. No lane
 borrows another lane's authorization. With `workers_per_tar` above 1, a custom
 transport's `clone()` must return a fresh instance, never the caller's transport
 or another lane, even when the effective cap is 1. With `workers=1`, a transport
 without `clone()` can still be borrowed for the single lane and remains caller-owned.
-For opt-in same-TAR concurrency, each dispatch first admits visible TARs with no
+When the effective same-TAR cap exceeds 1, each dispatch first admits visible TARs with no
 active operation. Only when none exist in the bounded lookahead may it add an
 operation to an already-active TAR, up to the per-TAR cap. This spreads available
 lanes across independent TARs before filling spare lanes with same-TAR work.
@@ -570,9 +572,9 @@ Warm affinity cannot move a record from the second admission layer ahead of the
 first. An already-active TAR continues making progress; when its last active
 operation finishes, its next visible READY record can enter the first layer. No operation
 is preempted, and independent TARs beyond 16L are not searched for.
-In this opt-in mode, the fairness allowance below applies to the currently
+In this concurrent mode, the fairness allowance below applies to the currently
 eligible admission layer; it does not promise a second lane while independent
-TAR work is visible. The default cap of 1 retains its original scheduling rule.
+TAR work is visible. An explicit cap of 1 retains its original scheduling rule.
 Within the bounded lookahead and eligible layer,
 the oldest eligible record is preferred when a free lane has its live binding.
 Otherwise a later eligible record with a matching warm free lane may run first,

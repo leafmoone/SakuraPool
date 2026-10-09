@@ -46,7 +46,7 @@ def _select_free_lane(free, lanes, prepared, capacity, *, metadata=False):
     return free[0] if index is None else index
 
 
-def run_pipeline(task, publication, transport, *, workers, metadata, workers_per_tar=1,
+def run_pipeline(task, publication, transport, *, workers, metadata, workers_per_tar=6,
                  fault_hook=None, control=None):
     """At most W active operations, with an explicit per-TAR lane bound."""
     from ..image_formats import ImageFormatError
