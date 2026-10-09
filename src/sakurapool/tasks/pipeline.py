@@ -11,6 +11,7 @@ from ..storage.prepared_fetch import PreparedFetch
 from ..storage.publication_fetch import _fetch_publication_sample
 from ..storage.transport import RemoteIOError
 from .plan import canonical
+from .ready_window import ReadyWindow
 from .store import MAX_EVENT_BATCH, TaskError, safe_failure
 
 
@@ -72,9 +73,19 @@ def run_pipeline(task, publication, transport, *, workers, metadata, workers_per
     warm_bypass_credit = lane_count
     extensions = task.image_extensions
     output = task.directory / "output"
-    # Immutable descriptors belong to this verified publication/settings run.
-    # Retain only the current lookahead, independently of each lane's proof cache.
-    prepared_cache = {}
+    # Immutable descriptors and READY heads belong to this verified owner run.
+    # Lane proof caches remain independent and are never scheduling authority.
+    tar_active = Counter()
+
+    def prepare(candidate):
+        try:
+            return PreparedFetch._prepare(
+                publication, candidate["record_id"], capacity=task.capacity,
+                image_extensions=extensions)
+        except ImageFormatError as error:
+            raise format_failure(error, candidate) from None
+
+    ready_window = ReadyWindow(window, prepare)
     metadata_candidates = (MetadataCandidates() if control is None
                            and isinstance(transport, RustProductionTransport)
                            and transport.lightweight else None)
@@ -165,7 +176,10 @@ def run_pipeline(task, publication, transport, *, workers, metadata, workers_per
             except queue.Empty:
                 return
             blocked = False
-            active.pop(index)
+            _, completed = active.pop(index)
+            tar_active[completed.transport_identity] -= 1
+            if not tar_active[completed.transport_identity]:
+                del tar_active[completed.transport_identity]
             free.append(index)
             if error is None:
                 try:
@@ -217,64 +231,34 @@ def run_pipeline(task, publication, transport, *, workers, metadata, workers_per
                 stop = True
 
     def schedule(executor):
-        nonlocal stop, blocked, warm_bypass_credit, prepared_cache
+        nonlocal stop, blocked, warm_bypass_credit
         if blocked:
             return
-
-        def prepare(candidate):
-            key = (candidate["seq"], candidate["rid"], candidate["record_id"])
-            value = prepared_cache.get(key)
-            if value is None:
-                try:
-                    value = PreparedFetch._prepare(
-                        publication,
-                        candidate["record_id"],
-                        capacity=task.capacity,
-                        image_extensions=extensions,
-                    )
-                except ImageFormatError as error:
-                    raise format_failure(error, candidate) from None
-                prepared_cache[key] = value
-            return value
-
         while not stop and (free or len(lanes) < lane_count):
-            candidates = task.candidates(limit=window)
-            if not candidates:
+            if not ready_window.refill(task):
                 stop = True
                 break
-            # Trim before preparing a shifted window; resident lookahead stays <= 16L.
-            keys = {(row["seq"], row["rid"], row["record_id"]) for row in candidates}
-            prepared_cache = {key: value for key, value in prepared_cache.items() if key in keys}
-            # Recompute from owner-held active work; never share a lane's authorization.
-            tar_active = Counter(value[1].transport_identity for value in active.values())
             selected = None
             admission_limit = per_tar_limit
             if per_tar_limit > 1:
-                # Extra same-TAR slots are eligible only after visible independent TARs.
-                for position, candidate in enumerate(candidates):
-                    prepared = prepare(candidate)
-                    if tar_active[prepared.transport_identity] == 0:
-                        selected = candidate, prepared, position
-                        admission_limit = 1
-                        break
+                # Extra same-TAR slots follow all visible independent TAR heads.
+                selected = ready_window.select(tar_active, 1)
+                if selected is not None:
+                    admission_limit = 1
             if selected is None:
-                for position, candidate in enumerate(candidates):
-                    prepared = prepare(candidate)
-                    if tar_active[prepared.transport_identity] < per_tar_limit:
-                        selected = candidate, prepared, position
-                        break
+                selected = ready_window.select(tar_active, per_tar_limit)
             if selected is None:
                 # Only completion can free a TAR slot in this immutable, single-runner task.
                 # The outer loop still drains events and polls pause/cancel requests.
                 blocked = True
                 break
-            candidate, prepared, position = selected
+            candidate, prepared = selected
             bypass = False
             index = _warm_free_lane(free, lanes, prepared, task.capacity, metadata=metadata)
             if index is None and free and warm_bypass_credit:
                 # A bounded number of warm dispatches may bypass the oldest eligible item.
-                for later in candidates[position + 1:]:
-                    later_prepared = prepare(later)
+                for later in ready_window.later(candidate["seq"]):
+                    later_prepared = ready_window.prepare(later)
                     if tar_active[later_prepared.transport_identity] >= admission_limit:
                         continue
                     warm = _warm_free_lane(free, lanes, later_prepared, task.capacity,
@@ -301,18 +285,22 @@ def run_pipeline(task, publication, transport, *, workers, metadata, workers_per
             if item is None:
                 stop = True
                 break
-            prepared_cache.pop((candidate["seq"], candidate["rid"], candidate["record_id"]), None)
+            ready_window.remove(candidate)
             # Failed/no-op claims never consume fairness credit.
             warm_bypass_credit = warm_bypass_credit - 1 if bypass else lane_count
             if fault_hook:
                 fault_hook("CLAIMED", item)
             free.remove(index)
             active[index] = (item, prepared)
+            tar_active[prepared.transport_identity] += 1
             try:
                 mapping = delivery_mapping(task, item, publication)
                 executor.submit(execute, index, item, prepared, mapping)
             except BaseException:
                 active.pop(index)
+                tar_active[prepared.transport_identity] -= 1
+                if not tar_active[prepared.transport_identity]:
+                    del tar_active[prepared.transport_identity]
                 free.append(index)
                 raise
 

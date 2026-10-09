@@ -602,14 +602,18 @@ class TaskDB:
             self.set_meta(db, "request", value)
         return {"requested": value, "state": self.meta("state")}
 
-    def candidates(self, *, limit):
+    def candidates(self, *, limit, after=None):
         if type(limit) is not int or limit < 1:
             raise TaskError("TASK_IDENTITY_INVALID")
         # A positive Python integer may exceed SQLite's signed 64-bit binding range.
         # Bound only the SQL binding; an indexed LIMIT must not scan all READY rows.
         limit = min(limit, (1 << 63) - 1)
+        if after is not None and (type(after) is not int or not 0 <= after < (1 << 63)):
+            raise TaskError("TASK_IDENTITY_INVALID")
         rows = self.db.execute(
-            "SELECT seq,rid,record_id FROM items WHERE state='READY' ORDER BY seq LIMIT ?", (limit,)
+            "SELECT seq,rid,record_id FROM items WHERE state='READY'"
+            + (" AND seq>?" if after is not None else "") + " ORDER BY seq LIMIT ?",
+            (after, limit) if after is not None else (limit,),
         ).fetchall()
         for row in rows:
             if (
