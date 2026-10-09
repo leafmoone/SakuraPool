@@ -12,6 +12,7 @@ from itertools import islice
 
 from ..capacity import CapacityConfig
 from ..runtime import RuntimeQuerySpec
+from ..runtime.query import DIMENSION_FIELDS, _ratio
 
 FORMAT = "sakurapool-task-v1"
 ALGORITHM = "sha256-seed-record-topk-v1"
@@ -62,7 +63,8 @@ def normalize_query(spec):
         branches[canonical(normalized)] = normalized
     return {
         # Omit unset dimensions to preserve existing frozen-query digests.
-        **{name: getattr(spec, name) for name in ("width_gt", "height_gt")
+        **{name: (str(_ratio(getattr(spec, name))) if name.startswith("aspect_ratio_")
+                  else getattr(spec, name)) for name in DIMENSION_FIELDS
            if getattr(spec, name) is not None},
         "sources": names(spec.sources),
         "datasets": names(spec.datasets),

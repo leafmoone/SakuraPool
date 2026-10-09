@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass, field
+from fractions import Fraction
 from itertools import islice
 from typing import Iterator, Union
 
@@ -15,6 +17,26 @@ from .snapshot import RuntimeSnapshot
 
 TagKey = tuple[str, str]  # (namespace, tag value)
 TagRef = Union[str, TagKey]
+DIMENSION_FIELDS = (
+    "width_gt", "width_lt", "height_gt", "height_lt", "pixels_gt", "pixels_lt",
+    "aspect_ratio_gt", "aspect_ratio_lt",
+)
+
+
+def _ratio(value: int | float | str) -> Fraction:
+    """Decimal numeric spelling or a bounded decimal/fraction string, never binary float."""
+    if (type(value) not in (int, float, str) or isinstance(value, str) and
+            (len(value) > 1024 or re.fullmatch(r"[0-9]+(?:/[0-9]+|\.[0-9]+)?", value) is None)):
+        raise ValueError("aspect ratio must be a nonnegative number or decimal/fraction string")
+    try:
+        ratio = Fraction(str(value))
+    except (ValueError, ZeroDivisionError, OverflowError):
+        raise ValueError("aspect ratio must be finite with a positive denominator") from None
+    if len(str(ratio)) > 1024:
+        raise ValueError("aspect ratio canonical representation exceeds 1024 characters")
+    if ratio < 0:
+        raise ValueError("aspect ratio must be nonnegative")
+    return ratio
 
 
 @dataclass(frozen=True)
@@ -24,7 +46,8 @@ class RuntimeQuerySpec:
     sources OR, datasets OR, then AND with all_tags AND, any_tags OR,
     none_tags excluded within their known namespace. any_of is a union of
     branch specs evaluated with the same single-branch semantics. width_gt
-    and height_gt are strict pixel thresholds, ANDed with the other terms.
+    and height_gt are strict pixel thresholds; *_lt provides upper bounds.
+    pixels and aspect_ratio are derived exactly, ANDed with the other terms.
     """
 
     sources: tuple[str, ...] = ()
@@ -36,15 +59,27 @@ class RuntimeQuerySpec:
     any_of: tuple["RuntimeQuerySpec", ...] = ()
     width_gt: int | None = None
     height_gt: int | None = None
+    width_lt: int | None = None
+    height_lt: int | None = None
+    pixels_gt: int | None = None
+    pixels_lt: int | None = None
+    aspect_ratio_gt: int | float | str | None = None
+    aspect_ratio_lt: int | float | str | None = None
 
     def __post_init__(self) -> None:
-        for name in ("width_gt", "height_gt"):
+        for name in DIMENSION_FIELDS:
             value = getattr(self, name)
-            if value is not None and (type(value) is not int or not 0 <= value < 2**32):
-                raise ValueError(f"{name} must be an integer in [0, 2**32)")
+            if value is None:
+                continue
+            if name.startswith("aspect_ratio_"):
+                _ratio(value)
+            else:
+                bits = 64 if name.startswith("pixels_") else 32
+                if type(value) is not int or not 0 <= value < 2**bits:
+                    raise ValueError(f"{name} must be an integer in [0, 2**{bits})")
         if self.any_of and (self.sources or self.datasets or self.all_tags
                             or self.any_tags or self.none_tags
-                            or self.width_gt is not None or self.height_gt is not None):
+                            or any(getattr(self, name) is not None for name in DIMENSION_FIELDS)):
             raise ValueError(
                 "any_of branches carry the terms; top level takes only any_of")
 
@@ -243,20 +278,72 @@ def _stored_cardinality(snapshot: RuntimeSnapshot, kind: str,
     raise ValueError(f"unsupported union kind: {kind}")
 
 
+def _filter_dimensions(snapshot: RuntimeSnapshot, spec: RuntimeQuerySpec,
+                       candidates: BitMap | None = None) -> BitMap:
+    clauses, params = [], []
+    derived = []
+    for name in DIMENSION_FIELDS:
+        value = getattr(spec, name)
+        if value is None:
+            continue
+        dimension, operation = name.rsplit("_", 1)
+        if dimension in ("width", "height"):
+            clauses.append(f"{dimension} > 0 AND {dimension} {'>' if operation == 'gt' else '<'} ?")
+            params.append(value)
+        else:
+            derived.append((dimension, operation, _ratio(value) if dimension == "aspect_ratio"
+                            else value))
+    if derived:
+        clauses.extend(("width > 0", "height > 0"))
+    sql = "SELECT rid, width, height FROM records WHERE " + " AND ".join(clauses)
+
+    def rows():
+        # Small tag/source selections use bounded IN batches; broad selections
+        # stream the covering dimension index. Never one SQL request per image.
+        if candidates is not None and len(candidates) < snapshot.rid_count // 2:
+            getlimit = getattr(snapshot._catalog, "getlimit", None)
+            limit = getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) if getlimit else 999
+            size = min(8192, limit - len(params))
+            if size <= 0:
+                raise ValueError("SQLite variable limit too small for dimension filters")
+            for chunk in _chunked(candidates, size):
+                placeholders = ",".join("?" for _ in chunk)
+                cursor = snapshot._catalog.execute(
+                    sql + f" AND rid IN ({placeholders})", [*params, *chunk])
+                try:
+                    yield from cursor
+                finally:
+                    cursor.close()
+        else:
+            cursor = snapshot._catalog.execute(sql, params)
+            try:
+                yield from cursor
+            finally:
+                cursor.close()
+
+    result = BitMap()
+    for rid, width, height in rows():
+        if candidates is not None and rid not in candidates:
+            continue
+        for dimension, operation, value in derived:
+            if dimension == "pixels":
+                left, right = width * height, value
+            else:
+                left, right = width * value.denominator, height * value.numerator
+            # Python integers are exact even above SQLite's signed-64-bit range.
+            if (left <= right if operation == "gt" else left >= right):
+                break
+        else:
+            result.add(rid)
+    return result
+
+
 def _branch_result(snapshot: RuntimeSnapshot, spec: RuntimeQuerySpec) -> BitMap:
-    filters = [(name, value) for name, value in
-               (("width", spec.width_gt), ("height", spec.height_gt))
-               if value is not None]
+    filters = any(getattr(spec, name) is not None for name in DIMENSION_FIELDS)
     if filters:
         columns = {row[1] for row in snapshot._catalog.execute("PRAGMA table_info(records)")}
-        if not {name for name, _ in filters} <= columns:
+        if not {"width", "height"} <= columns:
             raise ValueError("dimension filters require recompiling this runtime from its P2 index")
-
-    def dimensions() -> BitMap:
-        # Indexed catalog range scan; no image reads or per-record queries.
-        where = " AND ".join(f"{name} > ?" for name, _ in filters)
-        return BitMap(row[0] for row in snapshot._catalog.execute(
-            f"SELECT rid FROM records WHERE {where}", [value for _, value in filters]))
 
     terms: list[_Term] = []
     if spec.sources:
@@ -293,7 +380,7 @@ def _branch_result(snapshot: RuntimeSnapshot, spec: RuntimeQuerySpec) -> BitMap:
             terms.append(_Term(stored_known, "namespace_minus", tag_ids,
                                namespace_id))
     if not terms:
-        return dimensions() if filters else BitMap(range(snapshot.rid_count))
+        return _filter_dimensions(snapshot, spec) if filters else BitMap(range(snapshot.rid_count))
     # Plan by stored cardinality: OR terms use their pre-materialization
     # bound, so the smallest constraint is applied first and the AND can
     # short-circuit without loading the remaining blobs at all.
@@ -304,7 +391,7 @@ def _branch_result(snapshot: RuntimeSnapshot, spec: RuntimeQuerySpec) -> BitMap:
         result = bitmap if result is None else (result & bitmap)
         if result is not None and not result:
             return result
-    return result & dimensions() if filters else result
+    return _filter_dimensions(snapshot, spec, result) if filters else result
 
 
 def evaluate_spec(snapshot: RuntimeSnapshot,

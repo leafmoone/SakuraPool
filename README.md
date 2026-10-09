@@ -943,6 +943,23 @@ these filters; old snapshots still support unfiltered queries, and a dimension
 query on an old snapshot reports that recompilation is required. For task creation,
 rebuild the index publication from the new runtime as well.
 
+Size bounds also accept `width_lt`, `height_lt`, `pixels_gt`, `pixels_lt`,
+`aspect_ratio_gt`, and `aspect_ratio_lt`. All bounds are strict (`gt` means `>`,
+`lt` means `<`) and AND together. Pixels mean `width * height`; aspect ratio means
+`width / height`. Example: `{"width_gt":1024,"pixels_lt":4000000,
+"aspect_ratio_gt":"16/9","aspect_ratio_lt":2}` selects wide images below four
+million pixels. Use `"16/9"` for an exact fractional ratio; finite numeric inputs
+use their decimal spelling (so `1.5` means exactly `3/2`). Ratio input strings and canonical fractions
+are limited to 1024 characters; scientific notation in strings is not accepted.
+Pixel thresholds are nonnegative integers below 2**64; ratio thresholds are
+nonnegative. Null or zero in a tested dimension never matches, including upper
+bounds; pixels/ratio require both dimensions to be positive. Contradictory bounds
+produce no matches. Only width/height are stored: pixels and ratios are computed
+with exact integer arithmetic from streamed/batched candidates, without SQLite
+multiplication overflow, floating-point boundary rounding, or image fetches.
+These bounds work in query JSON, `RuntimeQuerySpec`, and `rt.query(...)`; task
+freezing retains them and canonicalizes equivalent ratio spellings.
+
 Query domain (`RuntimeQuerySpec`): `sources` OR, `datasets` OR, then AND with
 per-tag `all_tags`, one OR group of `any_tags`, and per-namespace `none_tags`
 (`known_ns − excluded`); `any_of` is a union of flat branches. AND terms are
