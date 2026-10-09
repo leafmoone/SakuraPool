@@ -53,6 +53,8 @@ _SAFE_CODES = frozenset(
         "body_io",
         "scan_failed",
         "metadata_limit",
+        "metadata_cache_wait",
+        "metadata_cache_closed",
         "origin_transport",
         "cdn_transport",
         "origin_timeout",

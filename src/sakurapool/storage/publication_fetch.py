@@ -370,31 +370,45 @@ def _fetch_publication_sample(
     control_finalizing = False
     try:
         if obj is None:
-            owned = control is None
-            reused = owned and getattr(transport, "_persistent", False)
-            if reused:
-                control = transport.metadata_control()
-            elif owned:
-                control = GuardedTransport(
-                    None,
-                    offline_mode=offline,
-                    trusted_hosts=frozenset({urlsplit(endpoint).hostname}),
-                    token=transport._token,
-                    credential_origin=endpoint,
-                    same_origin_cookie=transport._cookie,
-                    capacity=capacity,
-                    worker=transport.worker,
-                    metadata_origin=endpoint,
-                    metadata_mode="native",
-                )
-            try:
-                obj = exact_provider_lookup(
-                    control, endpoint, repo, revision, path, size, digest.hex())
-            finally:
-                if owned and not reused:
-                    control_finalizing = True
-                    control.close()
-                    control_finalizing = False
+            def lookup():
+                nonlocal control_finalizing
+                selected_control = control
+                owned = selected_control is None
+                reused = owned and getattr(transport, "_persistent", False)
+                if reused:
+                    selected_control = transport.metadata_control()
+                elif owned:
+                    selected_control = GuardedTransport(
+                        None,
+                        offline_mode=offline,
+                        trusted_hosts=frozenset({urlsplit(endpoint).hostname}),
+                        token=transport._token,
+                        credential_origin=endpoint,
+                        same_origin_cookie=transport._cookie,
+                        capacity=capacity,
+                        worker=transport.worker,
+                        metadata_origin=endpoint,
+                        metadata_mode="native",
+                    )
+                try:
+                    return exact_provider_lookup(
+                        selected_control, endpoint, repo, revision, path, size, digest.hex())
+                finally:
+                    if owned and not reused:
+                        control_finalizing = True
+                        selected_control.close()
+                        control_finalizing = False
+
+            from .metadata_candidates import MetadataCandidates, MetadataKey
+
+            shared = getattr(pub, "_metadata_candidates", None)
+            if control is None and type(shared) is MetadataCandidates:
+                metadata_key = MetadataKey(pub.content_digest, rt.snapshot_id, endpoint,
+                                           transport.origin, repo, repo_type, revision, path,
+                                           size, digest.hex(), bool(transport._test))
+                obj = shared.lookup(metadata_key, lookup)
+            else:
+                obj = lookup()
             if obj.repo_type != repo_type:
                 raise PublicationCorrupt("repository type mismatch")
             obj = transport.verify_conditions(obj)

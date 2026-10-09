@@ -49,6 +49,8 @@ def run_pipeline(task, publication, transport, *, workers, metadata, workers_per
                  fault_hook=None, control=None):
     """At most W active operations, with an explicit per-TAR lane bound."""
     from ..image_formats import ImageFormatError
+    from ..storage.metadata_candidates import MetadataCandidates
+    from ..storage.production import RustProductionTransport
     from .runner import delivery_mapping, format_failure, preflight, verify_delivery
 
     if type(workers) is not int or workers < 1:
@@ -73,6 +75,9 @@ def run_pipeline(task, publication, transport, *, workers, metadata, workers_per
     # Immutable descriptors belong to this verified publication/settings run.
     # Retain only the current lookahead, independently of each lane's proof cache.
     prepared_cache = {}
+    metadata_candidates = (MetadataCandidates() if control is None
+                           and isinstance(transport, RustProductionTransport)
+                           and transport.lightweight else None)
 
     def hook(lane, item, event, payload):
         if len(canonical(payload)) > min(8192, task.capacity.rpc_line_bytes):
@@ -87,8 +92,11 @@ def run_pipeline(task, publication, transport, *, workers, metadata, workers_per
         error = None
         try:
             lane, cache = lanes[index]
+            projection = prepared._projection(cache)
+            if metadata_candidates is not None:
+                projection._metadata_candidates = metadata_candidates
             _fetch_publication_sample(
-                prepared._projection(cache),
+                projection,
                 item["record_id"],
                 lane,
                 output,
@@ -306,6 +314,8 @@ def run_pipeline(task, publication, transport, *, workers, metadata, workers_per
             except BaseException as primary:
                 stop = True
                 first_error = first_error or primary
+                if metadata_candidates is not None:
+                    metadata_candidates.close()
                 # No SQLite call is needed to reject outstanding event RPCs and reap
                 # completion envelopes. This also covers SQL/meta/interrupt failures.
                 # Workers must be acknowledged before executor.shutdown waits for them.
@@ -333,6 +343,8 @@ def run_pipeline(task, publication, transport, *, workers, metadata, workers_per
                 )
     finally:
         primary = sys.exc_info()[1]
+        if metadata_candidates is not None:
+            metadata_candidates.close()
         close_failed = False
         for lane, _ in lanes:
             if lane is transport:
