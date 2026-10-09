@@ -70,6 +70,9 @@ def run_pipeline(task, publication, transport, *, workers, metadata, workers_per
     warm_bypass_credit = lane_count
     extensions = task.image_extensions
     output = task.directory / "output"
+    # Immutable descriptors belong to this verified publication/settings run.
+    # Retain only the current lookahead, independently of each lane's proof cache.
+    prepared_cache = {}
 
     def hook(lane, item, event, payload):
         if len(canonical(payload)) > min(8192, task.capacity.rpc_line_bytes):
@@ -186,11 +189,9 @@ def run_pipeline(task, publication, transport, *, workers, metadata, workers_per
                 stop = True
 
     def schedule(executor):
-        nonlocal stop, blocked, warm_bypass_credit
+        nonlocal stop, blocked, warm_bypass_credit, prepared_cache
         if blocked:
             return
-        # Immutable owner-created descriptors are reused only in this scheduling pass.
-        prepared_cache = {}
 
         def prepare(candidate):
             key = (candidate["seq"], candidate["rid"], candidate["record_id"])
@@ -272,6 +273,7 @@ def run_pipeline(task, publication, transport, *, workers, metadata, workers_per
             if item is None:
                 stop = True
                 break
+            prepared_cache.pop((candidate["seq"], candidate["rid"], candidate["record_id"]), None)
             # Failed/no-op claims never consume fairness credit.
             warm_bypass_credit = warm_bypass_credit - 1 if bypass else lane_count
             if fault_hook:

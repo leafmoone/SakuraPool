@@ -632,11 +632,29 @@ class TaskDB:
                     "SELECT * FROM items WHERE state='READY' ORDER BY seq LIMIT 1"
                 ).fetchone()
             else:
-                if expected not in self.candidates(limit=window):
+                if (type(window) is not int or window < 1 or type(expected) is not dict
+                        or set(expected) != {"seq", "rid", "record_id"}
+                        or any(type(expected[name]) is not int
+                               or not 0 <= expected[name] < (1 << 63) for name in ("seq", "rid"))
+                        or type(expected["record_id"]) is not str
+                        or len(expected["record_id"]) != 32
+                        or any(c not in "0123456789abcdef" for c in expected["record_id"])):
                     raise TaskError("TASK_IDENTITY_INVALID")
                 row = db.execute(
                     "SELECT * FROM items WHERE seq=? AND state='READY'", (expected["seq"],)
                 ).fetchone()
+                if row is None or any(type(row[name]) is not type(value) or row[name] != value
+                                      for name, value in expected.items()):
+                    raise TaskError("TASK_IDENTITY_INVALID")
+                # Exact identity and current window rank are checked under the same
+                # write transaction. Do not copy/validate the full window a second time.
+                # The state/seq index visits at most `window` preceding READY entries.
+                preceding = db.execute(
+                    "SELECT 1 FROM items WHERE state='READY' AND seq<? ORDER BY seq "
+                    "LIMIT 1 OFFSET ?", (expected["seq"], min(window, (1 << 63) - 1) - 1)
+                ).fetchone()
+                if preceding is not None:
+                    raise TaskError("TASK_IDENTITY_INVALID")
             if row is None:
                 return None
             operation = uuid.uuid4().hex

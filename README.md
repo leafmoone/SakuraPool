@@ -518,8 +518,11 @@ The same strict positive-integer validation applies to `workers_per_tar`.
 Let L be the smaller of requested workers and the ready-record count at runner start. Lanes are
 created lazily for eligible work, not eagerly for the full input. Active
 operations are bounded by L, candidate/claim lookahead by 16L, event envelopes
-by 2L, and completion envelopes by L. Prepared descriptors are cached within a
-scheduling pass and trimmed to the current lookahead window. When that window
+by 2L, and completion envelopes by L. Immutable prepared descriptors are cached
+across scheduling passes within one run, trimmed to the current lookahead window,
+and evicted on claim. They never carry or share lane-specific network proofs.
+Claims recheck exact typed record identity and bounded READY-window rank in their
+write transaction without copying the entire candidate window again. When that window
 contains only busy TARs, scanning waits for a completion; pause/cancel polling
 and event acknowledgements continue. The SQL LIMIT binding is capped at SQLite's signed 64-bit maximum; the READY
 filter naturally limits returned rows. Very large positive Python integers therefore
