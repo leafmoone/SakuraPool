@@ -144,6 +144,11 @@ def _create_verified(pub, publication, directory, workspace, query, options,
 
 
 
+def _supports_live_verification():
+    # Windows stat().st_ctime is creation time, not a write/change guard.
+    return os.name == "posix"
+
+
 def create_and_run_task(
     publication, directory, workspace, query, selection=None, *, metadata=False,
     image_extensions=None, filename_template="{tag}_{index}", filename_prefix=None,
@@ -160,6 +165,15 @@ def create_and_run_task(
     root = plain_entry(publication, directory=True)
     if Path(directory).absolute().is_relative_to(root):
         raise TaskError("TASK_PUBLICATION_CONTAINMENT", "create")
+    if not _supports_live_verification():
+        # Retain two full loads until native deny-write handle pinning is supported.
+        with create_task(publication, directory, workspace, query, selection,
+                         metadata=metadata, image_extensions=image_extensions,
+                         filename_template=filename_template, filename_prefix=filename_prefix):
+            pass
+        return run_task(directory, transport, control=control, fault_hook=fault_hook,
+                        connection_profile=connection_profile, workers=workers,
+                        workers_per_tar=workers_per_tar)
     with _VerifiedPublication(publication, options[0], load_publication) as session:
         pub = session.check(options[0], publication)
         with _create_verified(pub, publication, directory, workspace, query, options,

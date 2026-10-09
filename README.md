@@ -438,11 +438,14 @@ plus `--profile`, `--workers` and `--workers-per-tar`:
 sakura task start --publication PUB --query QUERY.json --selection first --limit 100 --metadata --task-dir TASK --profile PROFILE.json --workers 8 --workers-per-tar 8
 ```
 
-This uninterrupted operation fully verifies content once and owns the same open
-publication through task creation and execution. Inputs must remain immutable;
+On POSIX this uninterrupted operation fully verifies content once and owns the same
+open publication through task creation and execution. Inputs must remain immutable;
 file/handle identity and change signatures are checked before the runner connects.
 Keep the task directory outside the publication. There is no persisted verification
 token: standalone `create`, `run` and `resume` retain their full-verification behavior.
+Windows currently keeps both full verifications in `start` as well: its stat creation
+time cannot serve as a write/change guard. The other download optimizations apply
+independently of this startup fallback.
 The Python equivalent is `tasks.runner.create_and_run_task`.
 
 The same publisher is used by direct `publication fetch` (default `image_1`, explicit
