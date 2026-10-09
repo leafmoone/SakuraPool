@@ -22,18 +22,24 @@ def _positive_workers(value):
 def add_parser(subparsers):
     task = subparsers.add_parser("task")
     commands = task.add_subparsers(dest="task_command", required=True)
-    create = commands.add_parser("create")
-    for option in ("publication", "query", "task-dir"):
-        create.add_argument("--" + option, required=True)
-    create.add_argument("--workspace")
-    create.add_argument("--selection", choices=("all", "first", "sample", "records"), default="all")
-    create.add_argument("--limit", type=int)
-    create.add_argument("--seed")
-    create.add_argument("--records", help="bounded JSON record_id list")
-    create.add_argument("--metadata", action="store_true")
-    create.add_argument("--image-extensions", help="comma-separated registered suffixes")
-    create.add_argument("--filename-template", default="{tag}_{index}")
-    create.add_argument("--filename-prefix")
+    for name in ("create", "start"):
+        create = commands.add_parser(name)
+        for option in ("publication", "query", "task-dir"):
+            create.add_argument("--" + option, required=True)
+        create.add_argument("--workspace")
+        create.add_argument("--selection", choices=("all", "first", "sample", "records"),
+                            default="all")
+        create.add_argument("--limit", type=int)
+        create.add_argument("--seed")
+        create.add_argument("--records", help="bounded JSON record_id list")
+        create.add_argument("--metadata", action="store_true")
+        create.add_argument("--image-extensions", help="comma-separated registered suffixes")
+        create.add_argument("--filename-template", default="{tag}_{index}")
+        create.add_argument("--filename-prefix")
+        if name == "start":
+            create.add_argument("--profile", required=True)
+            create.add_argument("--workers", type=_positive_workers, default=1)
+            create.add_argument("--workers-per-tar", type=_positive_workers, default=1)
     update = commands.add_parser("update")
     update.add_argument("task_dir")
     update.add_argument("--workspace")
@@ -66,7 +72,7 @@ def command(args):
     try:
         action = args.task_command
         explicit = getattr(args, "workspace", None)
-        if action == "create":
+        if action in ("create", "start"):
             workspace = Workspace.open(explicit) if explicit is not None else None
             capacity = workspace.capacity if workspace is not None else LEGACY_CAPACITY
         else:
@@ -92,7 +98,7 @@ def command(args):
         elif action in ("pause", "cancel"):
             with TaskDB(args.task_dir, workspace=workspace) as task:
                 result = task.request("PAUSE" if action == "pause" else "CANCEL")
-        elif action == "create":
+        elif action in ("create", "start"):
             from ..cli import _spec_from_dict
             from .plan import Selection
             from .runner import create_task
@@ -103,18 +109,23 @@ def command(args):
             if not isinstance(records, list):
                 raise TaskError("RECORD_LIST_INVALID", "cli")
             selection = Selection(args.selection, args.limit, args.seed, tuple(records))
-            with create_task(
-                args.publication,
-                args.task_dir,
-                workspace,
-                _spec_from_dict(bounded_json(args.query, capacity.task_header_bytes)),
-                selection,
-                metadata=args.metadata,
-                image_extensions=args.image_extensions,
-                filename_template=args.filename_template,
-                filename_prefix=args.filename_prefix,
-            ) as task:
-                result = task.inspect()
+            query = _spec_from_dict(bounded_json(args.query, capacity.task_header_bytes))
+            options = {"metadata": args.metadata, "image_extensions": args.image_extensions,
+                       "filename_template": args.filename_template,
+                       "filename_prefix": args.filename_prefix}
+            if action == "start":
+                from .profile import read_profile
+                from .runner import create_and_run_task
+
+                profile = read_profile(args.profile)
+                result = create_and_run_task(
+                    args.publication, args.task_dir, workspace, query, selection,
+                    connection_profile=profile, workers=args.workers,
+                    workers_per_tar=args.workers_per_tar, **options)
+            else:
+                with create_task(args.publication, args.task_dir, workspace, query,
+                                 selection, **options) as task:
+                    result = task.inspect()
         elif action == "export":
             from .export import export_task
 

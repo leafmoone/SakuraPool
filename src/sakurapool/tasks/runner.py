@@ -89,6 +89,13 @@ def create_task(
     filename_template="{tag}_{index}",
     filename_prefix=None,
 ):
+    options = _create_options(directory, workspace, query, selection, image_extensions)
+    with load_publication(publication, full_verify=True) as pub:
+        return _create_verified(pub, publication, directory, workspace, query, options,
+                                metadata, filename_template, filename_prefix)
+
+
+def _create_options(directory, workspace, query, selection, image_extensions):
     if workspace is not None and not getattr(workspace, "lightweight", False):
         raise TaskError("LEGACY_TASK_MIGRATION_REQUIRED", "create")
     capacity = workspace.capacity if workspace is not None else LEGACY_CAPACITY
@@ -97,37 +104,70 @@ def create_task(
     selection = Selection() if selection is None else selection
     selection.validate(capacity)
     normalized = normalize_query(query)
-    from ..image_formats import SUPPORTED_IMAGE_EXTENSIONS
     from ..image_formats import image_extensions as validate_extensions
 
     try:
         extensions = validate_extensions(image_extensions)
     except ValueError:
         raise TaskError("IMAGE_EXTENSIONS_INVALID", "create") from None
-    with load_publication(publication, full_verify=True) as pub:
-        if extensions != SUPPORTED_IMAGE_EXTENSIONS:
-            # Deterministic bounded pass before creating any task files. Defaults
-            # admit every supported format; unknown formats retain a typed fallback.
-            records = ((seq, row.rid, row.record_id) for seq, row in enumerate(
-                selected_records(pub.runtime, query, selection, capacity)))
-            _check_selected_formats(pub.runtime, records, extensions, capacity, phase="create")
-        header = {
-            "publication_digest": pub.content_digest,
-            "snapshot_id": pub.runtime.snapshot_id,
-            "query": normalized,
-            "selection": selection.header(capacity),
-            "metadata": metadata,
-        }
-        return TaskDB.create(
-            directory,
-            workspace,
-            header,
-            selected_records(pub.runtime, query, selection, capacity),
-            publication_path=publication,
-            image_extensions=extensions,
-            filename_template=filename_template,
-            filename_prefix=filename_prefix,
-        )
+    return capacity, selection, normalized, extensions
+
+
+def _create_verified(pub, publication, directory, workspace, query, options,
+                     metadata, filename_template, filename_prefix):
+    from ..image_formats import SUPPORTED_IMAGE_EXTENSIONS
+
+    capacity, selection, normalized, extensions = options
+    if extensions != SUPPORTED_IMAGE_EXTENSIONS:
+        # Deterministic bounded pass before creating any task files. Defaults
+        # admit every supported format; unknown formats retain a typed fallback.
+        records = ((seq, row.rid, row.record_id) for seq, row in enumerate(
+            selected_records(pub.runtime, query, selection, capacity)))
+        _check_selected_formats(pub.runtime, records, extensions, capacity, phase="create")
+    header = {
+        "publication_digest": pub.content_digest,
+        "snapshot_id": pub.runtime.snapshot_id,
+        "query": normalized,
+        "selection": selection.header(capacity),
+        "metadata": metadata,
+    }
+    return TaskDB.create(
+        directory,
+        workspace,
+        header,
+        selected_records(pub.runtime, query, selection, capacity),
+        publication_path=publication,
+        image_extensions=extensions,
+        filename_template=filename_template,
+        filename_prefix=filename_prefix,
+    )
+
+
+
+def create_and_run_task(
+    publication, directory, workspace, query, selection=None, *, metadata=False,
+    image_extensions=None, filename_template="{tag}_{index}", filename_prefix=None,
+    transport=None, control=None, fault_hook=None, connection_profile=None,
+    workers=1, workers_per_tar=1,
+):
+    """Explicit immediate download, sharing one verified handle only in this call."""
+    from pathlib import Path
+
+    from .verified_session import _VerifiedPublication
+
+    _run_options(transport, connection_profile, workers, workers_per_tar)
+    options = _create_options(directory, workspace, query, selection, image_extensions)
+    root = plain_entry(publication, directory=True)
+    if Path(directory).absolute().is_relative_to(root):
+        raise TaskError("TASK_PUBLICATION_CONTAINMENT", "create")
+    with _VerifiedPublication(publication, options[0], load_publication) as session:
+        pub = session.check(options[0], publication)
+        with _create_verified(pub, publication, directory, workspace, query, options,
+                              metadata, filename_template, filename_prefix):
+            pass
+        return _run_task(directory, transport, control=control, fault_hook=fault_hook,
+                         connection_profile=connection_profile, workers=workers,
+                         workers_per_tar=workers_per_tar, _session=session)
 
 
 def check_publication_identity(task, publication):
@@ -565,21 +605,37 @@ def run_task(
     workers=1,
     workers_per_tar=1,
 ):
+    return _run_task(directory, transport, control=control, resume=resume,
+                     fault_hook=fault_hook, connection_profile=connection_profile,
+                     workers=workers, workers_per_tar=workers_per_tar)
+
+
+def _run_options(transport, connection_profile, workers, workers_per_tar):
     if type(workers) is not int or workers < 1:
         raise TaskError("WORKERS_INVALID", "preflight")
     if type(workers_per_tar) is not int or workers_per_tar < 1:
         raise TaskError("WORKERS_PER_TAR_INVALID", "preflight")
     if transport is None and connection_profile is None:
         raise TaskError("PROFILE_REQUIRED", "preflight")
+
+
+def _run_task(
+    directory, transport=None, *, control=None, resume=False, fault_hook=None,
+    connection_profile=None, workers=1, workers_per_tar=1, _session=None,
+):
+    _run_options(transport, connection_profile, workers, workers_per_tar)
     with TaskDB(directory) as task, task.runner_lock(), ExitStack() as stack:
         if transport is not None:
             # Caller-owned transports retain their preflight order and lifecycle.
             _check_task_transport(task, transport)
         if task.meta("state") in ("PAUSED", "CANCELLED", "FAILED", "BLOCKED") and not resume:
             raise TaskError("EXPLICIT_RESUME_REQUIRED")
-        publication = stack.enter_context(
-            load_publication(task.meta("publication_path"), full_verify=True)
-        )
+        if _session is None:
+            publication = stack.enter_context(
+                load_publication(task.meta("publication_path"), full_verify=True)
+            )
+        else:
+            publication = _session.check(task.capacity, task.meta("publication_path"))
         header = check_publication_identity(task, publication)
         from ..image_formats import SUPPORTED_IMAGE_EXTENSIONS
 

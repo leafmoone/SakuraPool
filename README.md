@@ -431,6 +431,20 @@ sakura task create --workspace WORKSPACE --publication PUB --query QUERY.json --
 sakura task run WORKSPACE/tasks/TASK --profile PROFILE.json --workers 6
 ```
 
+For immediate creation and download, `task start` accepts the same creation options
+plus `--profile`, `--workers` and `--workers-per-tar`:
+
+```text
+sakura task start --publication PUB --query QUERY.json --selection first --limit 100 --metadata --task-dir TASK --profile PROFILE.json --workers 8 --workers-per-tar 8
+```
+
+This uninterrupted operation fully verifies content once and owns the same open
+publication through task creation and execution. Inputs must remain immutable;
+file/handle identity and change signatures are checked before the runner connects.
+Keep the task directory outside the publication. There is no persisted verification
+token: standalone `create`, `run` and `resume` retain their full-verification behavior.
+The Python equivalent is `tasks.runner.create_and_run_task`.
+
 The same publisher is used by direct `publication fetch` (default `image_1`, explicit
 `--filename-index`, template/prefix options) and `PublicationSession.fetch`, whose
 caller must supply `filename_index`. Direct/session callers select stable indexes;
@@ -445,6 +459,14 @@ names/content alone cannot authorize adoption, deletion or overwrite. Missing,
 replaced, ambiguous or moved-back acknowledged files remain BLOCKED and preserved.
 The shared output directory may contain other records/user files; recovery checks
 only the operation's mapping and private stage, not exclusive ownership of output.
+
+The coordinator may commit up to 32 already queued independent events together;
+each lane waits for the FULL/DELETE commit before advancing. It never waits to fill
+a batch. READY lookahead and prepared TAR heads stay bounded to 16 times the active
+lane limit. Native lanes may reuse bounded unbound metadata candidates from the
+same run and fixed revision, but every cold lane/object binding still performs its
+own conditional proof. Metadata controls are created on misses, so all-distinct TAR
+workloads can still require a control per lane; there is no universal process cap.
 
 There may be a visible image before its JSON. Direct/session calls without TaskDB
 preserve partial data on failure and do not promise automatic restart/adoption.
