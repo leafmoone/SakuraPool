@@ -1782,6 +1782,15 @@ class RustProductionTransport:
 
     def verify_conditions(self, candidate: ProviderObject):
         """Observe then positive+negative at the actual byte endpoint. Never infer support."""
+        return self._verify_conditions(candidate)
+
+    def _verify_conditions_overlapped(self, candidate, metadata):
+        """Frozen-scope observe only; actual metadata must pass before any binding."""
+        if not self.lightweight or not self._persistent:
+            raise RemoteIOError("Metadata overlap requires an owned lightweight lane")
+        return self._verify_conditions(candidate, metadata=metadata)
+
+    def _verify_conditions(self, candidate, *, metadata=None):
         with self._lane_lock:
             if self._operation_active or self._proof_group:
                 raise RemoteIOError("execution generation already outstanding")
@@ -1797,7 +1806,8 @@ class RustProductionTransport:
             self._proof_group = True
             self._proof_owner = threading.get_ident()
         try:
-            result = self._verify_conditions_body(candidate)
+            result = (self._verify_conditions_body(candidate) if metadata is None else
+                      self._verify_conditions_body(candidate, metadata=metadata))
             self._live_proofs.add(proof_key(result, test=self._test))
             return result
         except BaseException as error:
@@ -1822,10 +1832,15 @@ class RustProductionTransport:
             with self._lane_lock:
                 self._proof_group = False
 
-    def _verify_conditions_body(self, candidate):
+    def _verify_conditions_body(self, candidate, *, metadata=None):
         with self.transfer(candidate, condition="observe") as (_, observed):
-            bound = replace(candidate, validator=observed["etag"], cdn_host=observed["cdn_host"])
-            digest = observed["sha256"]
+            validator, host, digest = observed["etag"], observed["cdn_host"], observed["sha256"]
+        # The one-byte observation has no authority until the actual exact lookup
+        # agrees with the frozen identity. It cannot replace provider metadata.
+        if metadata is not None and metadata() != candidate:
+            raise RemoteIOError("Frozen metadata identity mismatch",
+                                code="provider_listing_incomplete", phase="provider_exact_lookup")
+        bound = replace(candidate, validator=validator, cdn_host=host)
         # Capability test is not a production transfer: no proof exists yet.
         with self._capability_match(bound) as positive:
             if positive.get("status") != 206 or positive.get("sha256") != digest:

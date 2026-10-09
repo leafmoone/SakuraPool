@@ -560,7 +560,18 @@ allows up to six active operations per TAR within the total-worker bound; use
 TARs and slow responses leave workers idle, but adds independent worker startup, metadata and
 conditional-proof work; fast responses may be slower. Native lanes retain their
 own transport, metadata channel, generation and bounded proof caches. No lane
-borrows another lane's authorization. With `workers_per_tar` above 1, a custom
+borrows another lane's authorization. For an owner-created frozen descriptor on an
+owned lightweight lane, an initial unbound one-byte observation may overlap the
+exact provider metadata lookup. Each active lane has at most one metadata helper,
+so there are at most L helpers and no unbounded submission queue. Positive metadata
+cache hits avoid helpers. The frozen publication scopes that observation; it never
+substitutes for metadata. The actual metadata result must match before constructing
+a bound object, issuing positive/negative condition requests, publishing a live
+proof or verified binding, staging an image, or requesting payload bytes. All three
+proof requests remain lane-owned. Helpers are cancelled/joined before lane completion;
+unconfirmed finalization forbids retry. This overlaps cold setup waits, without
+promising a steady-state throughput gain or altering proxy/TLS/timeout policy.
+With `workers_per_tar` above 1, a custom
 transport's `clone()` must return a fresh instance, never the caller's transport
 or another lane, even when the effective cap is 1. With `workers=1`, a transport
 without `clone()` can still be borrowed for the single lane and remains caller-owned.

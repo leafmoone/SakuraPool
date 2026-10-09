@@ -16,6 +16,23 @@ from .publication import PublicationCorrupt
 _FACTORY = object()
 
 
+class _PreparedProjection(SimpleNamespace):
+    """Private lane view produced only from a frozen owner descriptor."""
+
+
+def _prepared_projection(pub, record_id, location, row, object_ref):
+    prepared = getattr(pub, "_prepared", None)
+    return (type(pub) is _PreparedProjection and type(prepared) is PreparedFetch
+            and prepared._provenance is _FACTORY
+            and prepared.content_digest == pub.content_digest
+            and prepared.snapshot_id == pub.runtime.snapshot_id
+            and prepared.record_id == record_id
+            and dict(prepared.location) == location
+            and prepared.catalog_row == tuple(row)
+            and dict(prepared.object_ref) == object_ref)
+
+
+
 @dataclass(frozen=True)
 class StreamPlan:
     """Arithmetic only: planning never authorizes or performs remote IO."""
@@ -244,7 +261,8 @@ class PreparedFetch:
                     raise PublicationCorrupt("prepared catalog mismatch")
                 return SimpleNamespace(fetchone=lambda: prepared.catalog_row)
 
-        return SimpleNamespace(_closed=False, full_verified=True, runtime=Runtime(),
+        return _PreparedProjection(_prepared=self, _closed=False, full_verified=True,
+                                   runtime=Runtime(),
                                catalog=Catalog(), content_digest=self.content_digest,
                                _verified=cache if cache is not None else OrderedDict(),
                                expected_image_sha=lambda rid:

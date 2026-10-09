@@ -1,6 +1,7 @@
 """Run-scoped, bounded reuse of unbound fixed-revision metadata candidates."""
 
 import re
+import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from threading import Event, Lock
@@ -46,6 +47,7 @@ class _Flight:
     done: Event = field(default_factory=Event)
     value: object = None
     failure: tuple | None = None
+    finalization_failed: bool = False
 
 
 def _failure(error):
@@ -59,10 +61,13 @@ def _failure(error):
     return "provider_listing_incomplete", "provider_exact_lookup", None
 
 
-def _error(failure):
+def _error(failure, *, finalization_failed=False):
     code, phase, status = failure
-    return RemoteIOError("Shared metadata lookup unavailable", code=code, phase=phase,
-                         http_status=status, lightweight=True)
+    error = RemoteIOError("Shared metadata lookup unavailable", code=code, phase=phase,
+                          http_status=status, lightweight=True)
+    if finalization_failed:
+        error.finalization_secondary = ("METADATA_FINALIZATION_FAILED",)
+    return error
 
 
 def _checked(key, value):
@@ -85,9 +90,23 @@ class MetadataCandidates:
         self._pending = {}
         self._closed = False
 
-    def lookup(self, key, loader):
+    def cached(self, key):
+        """An unbound positive hit only; never authorizes a conditional transfer."""
         if type(key) is not MetadataKey:
             raise ValueError("typed metadata cache key required")
+        with self._lock:
+            if self._closed:
+                raise _error(("metadata_cache_closed", "provider_exact_lookup", None))
+            value = self._values.get(key)
+            if value is not None:
+                self._values.move_to_end(key)
+            return value
+
+    def lookup(self, key, loader, *, cancelled=None):
+        if type(key) is not MetadataKey:
+            raise ValueError("typed metadata cache key required")
+        if cancelled is not None and cancelled.is_set():
+            raise _error(("metadata_cache_closed", "provider_exact_lookup", None))
         owner = False
         with self._lock:
             if self._closed:
@@ -104,23 +123,40 @@ class MetadataCandidates:
         if flight is None:
             # Saturation must neither grow shared state nor reject valid work.
             value = _checked(key, loader())
+            if cancelled is not None and cancelled.is_set():
+                raise _error(("metadata_cache_closed", "provider_exact_lookup", None))
             with self._lock:
                 if self._closed:
                     raise _error(("metadata_cache_closed", "provider_exact_lookup", None))
             return value
         if not owner:
-            if not flight.done.wait(WAIT_SECONDS):
+            if cancelled is None:
+                completed = flight.done.wait(WAIT_SECONDS)
+            else:
+                deadline = time.monotonic() + WAIT_SECONDS
+                completed = False
+                while not completed:
+                    if cancelled.is_set():
+                        raise _error(("metadata_cache_closed", "provider_exact_lookup", None))
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    completed = flight.done.wait(min(0.05, remaining))
+            if not completed:
                 raise _error(("metadata_cache_wait", "provider_exact_lookup", None))
             if flight.failure is not None:
-                raise _error(flight.failure)
+                raise _error(flight.failure, finalization_failed=flight.finalization_failed)
             return flight.value
         try:
             value = _checked(key, loader())
+            if cancelled is not None and cancelled.is_set():
+                raise _error(("metadata_cache_closed", "provider_exact_lookup", None))
         except BaseException as error:
             failure = _failure(error)
             with self._lock:
                 self._pending.pop(key, None)
                 flight.failure = failure
+                flight.finalization_failed = bool(getattr(error, "finalization_secondary", ()))
                 flight.done.set()
             raise
         with self._lock:

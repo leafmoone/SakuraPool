@@ -15,7 +15,7 @@ from .bounded_json import validate_file
 from .diagnostic_codes import _TRANSIENT_NETWORK_CODES
 from .flat_delivery import DeliveryMapping, publish_flat
 from .modelscope import EXACT_LOOKUP_PAGE_SIZE, ModelScopeDataset, _io_error
-from .prepared_fetch import stream_plan
+from .prepared_fetch import _prepared_projection, stream_plan
 from .production import (
     _CONSERVATIVE_FINALIZED,
     _HTTP_STATUS_FINALIZED,
@@ -370,13 +370,16 @@ def _fetch_publication_sample(
     control_finalizing = False
     try:
         if obj is None:
+            overlap_control = None
+
             def lookup():
                 nonlocal control_finalizing
                 selected_control = control
                 owned = selected_control is None
                 reused = owned and getattr(transport, "_persistent", False)
                 if reused:
-                    selected_control = transport.metadata_control()
+                    selected_control = (overlap_control if overlap_control is not None else
+                                        transport.metadata_control())
                 elif owned:
                     selected_control = GuardedTransport(
                         None,
@@ -406,12 +409,30 @@ def _fetch_publication_sample(
                 metadata_key = MetadataKey(pub.content_digest, rt.snapshot_id, endpoint,
                                            transport.origin, repo, repo_type, revision, path,
                                            size, digest.hex(), bool(transport._test))
-                obj = shared.lookup(metadata_key, lookup)
+                obj = shared.cached(metadata_key)
+                overlap = (obj is None and type(transport) is RustProductionTransport
+                           and transport.lightweight and transport._persistent
+                           and _prepared_projection(pub, record_id, loc, r, ro))
+                if overlap:
+                    from .metadata_overlap import pending_metadata
+
+                    expected = ProviderObject(repo, repo_type, transport.origin, revision,
+                                              path, size)
+                    expected.validate(test=transport._test)
+                    # Initialize without network IO before the foreground proof
+                    # takes its lane lock. Followers never start metadata workers.
+                    overlap_control = transport.metadata_control()
+                    with pending_metadata(shared, metadata_key, lookup, overlap_control) as wait:
+                        obj = transport._verify_conditions_overlapped(expected, wait)
+                elif obj is None:
+                    obj = shared.lookup(metadata_key, lookup)
             else:
+                overlap = False
                 obj = lookup()
             if obj.repo_type != repo_type:
                 raise PublicationCorrupt("repository type mismatch")
-            obj = transport.verify_conditions(obj)
+            if not overlap:
+                obj = transport.verify_conditions(obj)
             pub._verified[key] = obj
             while len(pub._verified) > 64:
                 pub._verified.popitem(last=False)
