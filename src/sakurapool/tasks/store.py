@@ -24,6 +24,7 @@ LIGHT_FORMAT = "sakurapool-task-v4"
 MAX_DB_BYTES = 32 << 20
 MAX_JOURNAL_BYTES = 33 << 20
 SCHEMA_VERSION = 4
+MAX_EVENT_BATCH = 32
 
 
 class TaskError(RuntimeError):
@@ -670,6 +671,28 @@ class TaskDB:
         self.event(operation, event, payload, recovery=True)
 
     def event(self, operation, event, payload, *, recovery=False):
+        with self.transaction() as db:
+            self._apply_event(db, operation, event, payload, recovery=recovery)
+
+    def event_batch(self, events):
+        """Commit an already available bounded group of independent lane events."""
+        if type(events) not in (tuple, list) or not 1 <= len(events) <= MAX_EVENT_BATCH:
+            raise TaskError("ATTEMPT_EVENT_INVALID")
+        operations = set()
+        for entry in events:
+            if type(entry) not in (tuple, list) or len(entry) != 3:
+                raise TaskError("ATTEMPT_EVENT_INVALID")
+            operation = entry[0]
+            if (type(operation) is not str or len(operation) != 32
+                    or any(c not in "0123456789abcdef" for c in operation)
+                    or operation in operations):
+                raise TaskError("ATTEMPT_IDENTITY_INVALID")
+            operations.add(operation)
+        with self.transaction() as db:
+            for operation, event, payload in events:
+                self._apply_event(db, operation, event, payload)
+
+    def _apply_event(self, db, operation, event, payload, *, recovery=False):
         transitions = {
             "NETWORK_START": "CLAIMED",
             "STAGED": "NETWORK_START",
@@ -681,82 +704,81 @@ class TaskDB:
         }
         if event not in transitions:
             raise TaskError("ATTEMPT_EVENT_INVALID")
-        with self.transaction() as db:
-            row = db.execute(
-                "SELECT * FROM items WHERE operation_id=? AND state IN "
-                "('IN_PROGRESS','FAILED','BLOCKED')", (operation,)
-            ).fetchone()
-            if row is not None and not recovery and row["state"] != "IN_PROGRESS":
-                raise TaskError("ATTEMPT_EVENT_ORDER_INVALID")
-            if (recovery and row is not None and event == "PUBLISHED"
-                    and row["phase"] == "PUBLISHED"):
-                return
-            allowed = transitions[event]
-            allowed = (allowed,) if type(allowed) is str else allowed
-            if row is None or row["phase"] not in allowed:
-                raise TaskError("ATTEMPT_EVENT_ORDER_INVALID")
-            if event == "STAGED":
-                stage = {**payload, "created": {}}
-                db.execute(
-                    "UPDATE items SET stage=? WHERE seq=?", (canonical(stage).decode(), row["seq"])
-                )
-            elif event == "CREATED":
-                stage = json.loads(row["stage"])
-                stage["created"][payload["name"]] = payload["identity"]
-                db.execute(
-                    "UPDATE items SET stage=? WHERE seq=?", (canonical(stage).decode(), row["seq"])
-                )
-            elif event == "PREPARED":
-                from ..storage.flat_delivery import DeliveryMapping, validate_receipt
+        row = db.execute(
+            "SELECT * FROM items WHERE operation_id=? AND state IN "
+            "('IN_PROGRESS','FAILED','BLOCKED')", (operation,)
+        ).fetchone()
+        if row is not None and not recovery and row["state"] != "IN_PROGRESS":
+            raise TaskError("ATTEMPT_EVENT_ORDER_INVALID")
+        if (recovery and row is not None and event == "PUBLISHED"
+                and row["phase"] == "PUBLISHED"):
+            return
+        allowed = transitions[event]
+        allowed = (allowed,) if type(allowed) is str else allowed
+        if row is None or row["phase"] not in allowed:
+            raise TaskError("ATTEMPT_EVENT_ORDER_INVALID")
+        if event == "STAGED":
+            stage = {**payload, "created": {}}
+            db.execute(
+                "UPDATE items SET stage=? WHERE seq=?", (canonical(stage).decode(), row["seq"])
+            )
+        elif event == "CREATED":
+            stage = json.loads(row["stage"])
+            stage["created"][payload["name"]] = payload["identity"]
+            db.execute(
+                "UPDATE items SET stage=? WHERE seq=?", (canonical(stage).decode(), row["seq"])
+            )
+        elif event == "PREPARED":
+            from ..storage.flat_delivery import DeliveryMapping, validate_receipt
 
-                try:
-                    config = FilenameConfig.from_dict(self.meta("header")["filename_config"])
-                    stem = config.stem(row["seq"])
-                    if stem != row["output_stem"]:
-                        raise ValueError()
-                    proofs = payload["receipt"]
-                    image_names = [n for n in proofs
-                                   if any(n == stem + ext for ext in self.image_extensions)]
-                    if len(image_names) != 1:
-                        raise ValueError()
-                    mapping = DeliveryMapping(stem, image_names[0][len(stem):],
-                                              stem + ".json" in proofs)
-                    validate_receipt(payload, mapping)
-                    stage = json.loads(row["stage"])
-                    if (payload["stage_name"] != stage["name"]
-                            or payload["stage_identity"] != stage["identity"]
-                            or stage["created"] != {
-                                p["staged_name"]: p["identity"] for p in proofs.values()}):
-                        raise ValueError()
-                except (KeyError, TypeError, ValueError):
-                    raise TaskError("OUTPUT_CONFLICT", "publication_fetch") from None
-                receipt = {
-                    **payload,
-                    "task_id": self.meta("task_id"),
-                    "plan_digest": self.meta("plan_digest"),
-                    "operation_id": operation,
-                }
-                encoded = canonical(receipt)
-                if len(encoded) > 8192:
-                    raise TaskError("RECEIPT_LIMIT")
-                db.execute("UPDATE items SET receipt=? WHERE seq=?", (encoded.decode(), row["seq"]))
-            elif event == "MEMBER_PUBLISHED":
-                receipt = json.loads(row["receipt"])
-                names = json.loads(row["published_members"])
-                if set(payload) != {"name"} or payload["name"] not in receipt["receipt"]:
-                    raise TaskError("ATTEMPT_EVENT_INVALID")
-                if payload["name"] in names:
-                    raise TaskError("ATTEMPT_EVENT_ORDER_INVALID")
-                names.append(payload["name"])
-                db.execute("UPDATE items SET published_members=?,phase='PARTIAL' WHERE seq=?",
-                           (canonical(names).decode(), row["seq"]))
-            elif event == "PUBLISHED":
-                receipt = json.loads(row["receipt"])
-                if set(json.loads(row["published_members"])) != set(receipt["receipt"]):
-                    raise TaskError("ATTEMPT_EVENT_ORDER_INVALID")
-                db.execute("UPDATE items SET delivery='PUBLISHED' WHERE seq=?", (row["seq"],))
-            if event not in ("CREATED", "MEMBER_PUBLISHED"):
-                db.execute("UPDATE items SET phase=? WHERE seq=?", (event, row["seq"]))
+            try:
+                config = FilenameConfig.from_dict(self.meta("header")["filename_config"])
+                stem = config.stem(row["seq"])
+                if stem != row["output_stem"]:
+                    raise ValueError()
+                proofs = payload["receipt"]
+                image_names = [n for n in proofs
+                               if any(n == stem + ext for ext in self.image_extensions)]
+                if len(image_names) != 1:
+                    raise ValueError()
+                mapping = DeliveryMapping(stem, image_names[0][len(stem):],
+                                          stem + ".json" in proofs)
+                validate_receipt(payload, mapping)
+                stage = json.loads(row["stage"])
+                if (payload["stage_name"] != stage["name"]
+                        or payload["stage_identity"] != stage["identity"]
+                        or stage["created"] != {
+                            p["staged_name"]: p["identity"] for p in proofs.values()}):
+                    raise ValueError()
+            except (KeyError, TypeError, ValueError):
+                raise TaskError("OUTPUT_CONFLICT", "publication_fetch") from None
+            receipt = {
+                **payload,
+                "task_id": self.meta("task_id"),
+                "plan_digest": self.meta("plan_digest"),
+                "operation_id": operation,
+            }
+            encoded = canonical(receipt)
+            if len(encoded) > 8192:
+                raise TaskError("RECEIPT_LIMIT")
+            db.execute("UPDATE items SET receipt=? WHERE seq=?", (encoded.decode(), row["seq"]))
+        elif event == "MEMBER_PUBLISHED":
+            receipt = json.loads(row["receipt"])
+            names = json.loads(row["published_members"])
+            if set(payload) != {"name"} or payload["name"] not in receipt["receipt"]:
+                raise TaskError("ATTEMPT_EVENT_INVALID")
+            if payload["name"] in names:
+                raise TaskError("ATTEMPT_EVENT_ORDER_INVALID")
+            names.append(payload["name"])
+            db.execute("UPDATE items SET published_members=?,phase='PARTIAL' WHERE seq=?",
+                       (canonical(names).decode(), row["seq"]))
+        elif event == "PUBLISHED":
+            receipt = json.loads(row["receipt"])
+            if set(json.loads(row["published_members"])) != set(receipt["receipt"]):
+                raise TaskError("ATTEMPT_EVENT_ORDER_INVALID")
+            db.execute("UPDATE items SET delivery='PUBLISHED' WHERE seq=?", (row["seq"],))
+        if event not in ("CREATED", "MEMBER_PUBLISHED"):
+            db.execute("UPDATE items SET phase=? WHERE seq=?", (event, row["seq"]))
 
     def finish_item(
         self, seq, *, state, code=None, diagnostic=None, operation=None, recovery_retry=False

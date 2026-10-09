@@ -11,7 +11,7 @@ from ..storage.prepared_fetch import PreparedFetch
 from ..storage.publication_fetch import _fetch_publication_sample
 from ..storage.transport import RemoteIOError
 from .plan import canonical
-from .store import TaskError, safe_failure
+from .store import MAX_EVENT_BATCH, TaskError, safe_failure
 
 
 @dataclass
@@ -117,25 +117,45 @@ def run_pipeline(task, publication, transport, *, workers, metadata, workers_per
             completions.put((index, item, error))
 
     def pump(abort=None):
+        nonlocal first_error, stop
         if get_ident() != owner:
             raise TaskError("TASK_OWNER_MISMATCH")
         try:
             call = calls.get(timeout=0.02)
         except queue.Empty:
             return
+        batch = [call]
+        # Never wait to fill a batch: each lane already waits for this durable ack.
+        while len(batch) < MAX_EVENT_BATCH:
+            try:
+                batch.append(calls.get_nowait())
+            except queue.Empty:
+                break
         error = None
         try:
             if abort is not None:
                 raise abort
-            current = active.get(call.lane)
-            if current is None or current[0]["operation_id"] != call.operation:
-                raise TaskError("ATTEMPT_IDENTITY_MISSING")
-            task.event(call.operation, call.event, call.payload)
+            for call in batch:
+                current = active.get(call.lane)
+                if current is None or current[0]["operation_id"] != call.operation:
+                    raise TaskError("ATTEMPT_IDENTITY_MISSING")
+            task.event_batch([(call.operation, call.event, call.payload) for call in batch])
+            # All events are durable before any hook or worker can advance.
             if fault_hook:
-                fault_hook(call.event, current[0])
+                for call in batch:
+                    fault_hook(call.event, active[call.lane][0])
         except BaseException as caught:
             error = caught
-        call.reply.put(error)
+            first_error = first_error or caught
+            stop = True
+        finally:
+            # Even a hook/commit failure must release every waiter before teardown.
+            for call in batch:
+                # Keep the original primary on the owner; exceptions raised by
+                # several lanes must not share a mutable payload-bearing traceback.
+                call.reply.put(None if error is None else RemoteIOError(
+                    "Coordinator event rejected", code="publication_write",
+                    phase="publication_fetch", lightweight=True))
 
     def complete():
         nonlocal first_error, stop, blocked
