@@ -137,7 +137,8 @@ def map_rows(path):
             yield r
 
 
-def p2_inputs(path):
+def p2_roots(path):
+    """Read the bounded, explicit root list without discovering sibling inputs."""
     d = bounded(path, 4 << 20)
     if (
         not isinstance(d, dict)
@@ -155,7 +156,11 @@ def p2_inputs(path):
         if p in roots:
             raise PublicationCorrupt("duplicate P2 root")
         roots.append(p)
-    return load_p2_inventory(roots)
+    return roots
+
+
+def p2_inputs(path):
+    return load_p2_inventory(p2_roots(path))
 
 
 SCHEMA = """

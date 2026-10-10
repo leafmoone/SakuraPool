@@ -858,6 +858,11 @@ for already-local TARs. These indexing/administration interfaces are separate fr
 ordinary lightweight retrieval; ordinary fetch requires a verified local publication
 and never implicitly scans original archives.
 
+For existing P2 inputs, `sakura index replace-tars` replaces explicitly listed
+same-path local TARs without rescanning unchanged TARs. It emits a new validated
+P2-root list for normal full runtime/publication compilation. Remote revisions
+may be supplied later; see the local partition builder's replacement workflow.
+
 ## Installation and CLI
 
 Python 3.10 or newer is required by the code and dependency minimums; there is no

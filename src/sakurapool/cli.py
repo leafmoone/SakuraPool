@@ -222,6 +222,8 @@ def main(argv: list[str] | None = None) -> int:
         help="P2 index dir (repeatable)",
     )
     rc.add_argument("--output", dest="named_output", type=Path)
+    rc.add_argument("--p2-list", type=Path,
+                    help="explicit P2 root-list JSON, mutually exclusive with P2 dir arguments")
     rc.add_argument("--chunk-size", type=int, default=500_000)
     for name in ("inspect", "verify", "lookup", "query"):
         command = runtime_sub.add_parser(name)
@@ -284,6 +286,20 @@ def main(argv: list[str] | None = None) -> int:
     build.add_argument(
         "--code-sha", required=True, help="full SHA of the installed candidate/approved build"
     )
+    replace = index_subparsers.add_parser(
+        "replace-tars", help="replace explicitly listed changed local TARs in immutable P2 inputs"
+    )
+    for option in ("p2-list", "local-root", "worker", "work-dir", "output"):
+        replace.add_argument("--" + option, type=Path, required=True)
+    replace.add_argument("--dataset", required=True)
+    replace.add_argument("--code-sha", required=True)
+    targets = replace.add_mutually_exclusive_group(required=True)
+    targets.add_argument("--tar", action="append", dest="tar_paths",
+                         help="same repository-relative TAR path (repeatable)")
+    targets.add_argument("--tar-list", type=Path, help="JSON array of changed TAR paths")
+    replace.add_argument("--remote-map", type=Path, help="optional old full remote-map")
+    replace.add_argument("--replacement-map", type=Path,
+                         help="optional explicit remote bindings for exactly the changed TARs")
     scan_remote = index_subparsers.add_parser("scan-remote", help="gated P4 scan")
     for option in ("config", "plan", "output-package"):
         scan_remote.add_argument("--" + option, type=Path, required=True)
@@ -298,8 +314,9 @@ def main(argv: list[str] | None = None) -> int:
         and args.runtime_command == "compile"
         and not args.index_dirs
         and not args.paths
+        and not args.p2_list
     ):
-        parser.error("runtime compile requires --index or P2_DIR arguments")
+        parser.error("runtime compile requires --p2-list, --index or P2_DIR arguments")
     try:
         if args.command in ("workspace", "doctor"):
             from .workspace_cli import command as workspace_command
@@ -468,6 +485,16 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             print(json.dumps(result, sort_keys=True))
             return 0
+        if args.command == "index" and args.index_command == "replace-tars":
+            from .storage.publication import bounded
+            from .tar_replacement import replace_tars
+
+            paths = (bounded(args.tar_list, 4 << 20) if args.tar_list else args.tar_paths)
+            result = replace_tars(args.p2_list, args.dataset, paths, args.local_root,
+                args.worker, args.work_dir, args.output, code_sha=args.code_sha,
+                remote_map=args.remote_map, replacement_map=args.replacement_map)
+            print(json.dumps(result, sort_keys=True))
+            return 0
         if args.command == "index" and args.index_command == "build-partition":
             from .local_builder import build_partition
             from .partition import PartitionManifest
@@ -499,6 +526,13 @@ def main(argv: list[str] | None = None) -> int:
                 return 3
         if args.command == "runtime":
             if args.runtime_command == "compile":
+                if args.p2_list:
+                    from .storage.publication import p2_roots
+
+                    if args.index_dirs or args.paths or not args.named_output:
+                        raise ValueError("--p2-list requires --output and no P2 dir arguments")
+                    args.inputs, args.output = p2_roots(args.p2_list), args.named_output
+                    return _runtime_command(args)
                 if args.index_dirs and args.paths[:-1]:
                     raise ValueError("--index cannot be mixed with positional P2 dirs")
                 if args.index_dirs:
