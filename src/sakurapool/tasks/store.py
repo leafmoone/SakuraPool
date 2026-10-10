@@ -112,12 +112,16 @@ def _recovery_snapshot(path, capacity):
     contents = []
     for p, limit, expected in zip(paths, limits, before):
         with p.open("rb") as stream:
-            if _file_signature(os.fstat(stream.fileno())) != expected:
+            opened = _file_signature(os.fstat(stream.fileno()))
+            # Windows path stat and handle fstat can report different ctime
+            # semantics. Compare only their shared fields across APIs; retain
+            # all five fields for handle-to-handle and path-to-path checks.
+            if opened[:4] != expected[:4]:
                 raise TaskError("TASKDB_RECOVERY_RACE", "recovery", recoverable=True)
             data = stream.read(limit + 1)
             if len(data) > limit:
                 raise TaskError("TASKDB_RECOVERY_LIMIT", "recovery")
-            if _file_signature(os.fstat(stream.fileno())) != expected:
+            if _file_signature(os.fstat(stream.fileno())) != opened:
                 raise TaskError("TASKDB_RECOVERY_RACE", "recovery", recoverable=True)
         contents.append(data)
     _check_files(path, capacity, transient_journal=False)
@@ -929,9 +933,14 @@ def _runner_lock(directory):
         if lock.read(2) != b"T":
             raise TaskError("RUNNER_LOCK_INVALID")
         identity = _file_signature(os.fstat(lock.fileno()))
+        path_identity = _file_signature(plain_entry(directory / "runner.lock").stat())
 
         def check_lock():
-            if _file_signature(plain_entry(directory / "runner.lock").stat()) != identity:
+            current = _file_signature(plain_entry(directory / "runner.lock").stat())
+            # ctime is not comparable across these Windows APIs. It remains
+            # mandatory within each API so later metadata changes fail closed.
+            if (current[:4] != identity[:4] or current != path_identity
+                    or _file_signature(os.fstat(lock.fileno())) != identity):
                 raise TaskError("RUNNER_LOCK_INVALID")
 
         check_lock()
