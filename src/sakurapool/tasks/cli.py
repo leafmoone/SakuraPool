@@ -26,6 +26,7 @@ def add_parser(subparsers):
     for option in ("publication", "query", "task-dir"):
         create.add_argument("--" + option, required=True)
     create.add_argument("--workspace")
+    create.add_argument("--output-dir", help="frozen external final output directory")
     create.add_argument("--selection", choices=("all", "first", "sample", "records"), default="all")
     create.add_argument("--limit", type=int)
     create.add_argument("--seed")
@@ -113,6 +114,7 @@ def command(args):
                 image_extensions=args.image_extensions,
                 filename_template=args.filename_template,
                 filename_prefix=args.filename_prefix,
+                output_dir=args.output_dir,
             ) as task:
                 result = task.inspect()
         elif action == "export":

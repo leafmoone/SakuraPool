@@ -632,6 +632,19 @@ lanes, new claims stop when pause/cancel is observed; already-admitted active it
 drain before the run returns. Same-object affinity does not promise multiple
 concurrent streams from a single TAR.
 
+Standalone tasks may use `task create --output-dir ABSOLUTE_FINAL_DIRECTORY` to
+separate downloaded images from TaskDB/runner state. The parent directory must
+already exist; the final directory may be new or existing. Its absolute path and
+filesystem identity are frozen into the plan with
+`output_policy: external-flat-no-overwrite-v1`. Final files and bounded per-image
+staging stay in that directory; there is no whole-task post-download copy.
+Existing names are never replaced. Directory replacement, links/junctions and
+overlap with the task state directory are rejected. Workspace-bound tasks keep
+the existing contained layout; external output is currently standalone-only.
+Omitting `--output-dir` retains the previous `TASK/output` layout and plan.
+Older Core releases reject the new output policy instead of resuming it at the
+wrong path. Moving an external target is not supported; start a new task instead.
+
 Task connection profiles are separate from strict old single-object profiles:
 `{"format":"sakurapool-task-connection-v1","origin":"https://modelscope.cn",
 "repositories":["owner/dataset"],"worker":"ABSOLUTE_WORKER_PATH"}`.
@@ -648,7 +661,10 @@ receipt-verified deliveries with source/plan identity,
 relative task paths and delivery hashes, without image copies or archives.
 The manifest must be directly inside TASK (for example TASK/subset.jsonl), so
 its relative `output/...` paths resolve relative to the manifest's directory;
-a different export base is explicitly rejected.
+a different export base is explicitly rejected. External-output tasks instead
+write `sakurapool-task-export-v2` rows containing the frozen `output_root` and
+safe basename-only `files[].path`. Consumers must verify this root against the
+inspected TaskDB plan before resolving files. Old tasks keep export v1 unchanged.
 Legacy binary ledger formats remain archives/admin compatibility and are not
 used by new downloads. No exact per-task network consumption is recorded or
 inferred from historical global counters.

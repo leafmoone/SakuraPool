@@ -69,7 +69,7 @@ def run_pipeline(task, publication, transport, *, workers, metadata, workers_per
     blocked = False
     warm_bypass_credit = lane_count
     extensions = task.image_extensions
-    output = task.directory / "output"
+    output = task.output_directory
     # Immutable descriptors belong to this verified publication/settings run.
     # Retain only the current lookahead, independently of each lane's proof cache.
     prepared_cache = {}

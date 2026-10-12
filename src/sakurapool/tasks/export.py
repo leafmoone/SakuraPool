@@ -7,7 +7,7 @@ from ..fs_safety import plain_entry
 from ..storage.publication import load_publication
 from .plan import canonical
 from .runner import check_publication_identity, verify_delivery
-from .store import TaskDB, TaskError
+from .store import EXTERNAL_OUTPUT_POLICY, TaskDB, TaskError
 
 
 def export_task(directory, manifest):
@@ -27,7 +27,9 @@ def _export_lightweight(task, manifest):
             raise TaskError("EXPORT_CONFLICT", "export")
         if manifest.parent != task.directory:
             raise TaskError("EXPORT_BASE_MISMATCH", "export")
-        task.validate_plan()
+        header = task.validate_plan()
+        external = header.get("output_policy") == EXTERNAL_OUTPUT_POLICY
+        output = task.output_directory
         where = "state='DONE' AND delivery='VERIFIED'"
         count = task.db.execute("SELECT count(*) FROM items WHERE " + where).fetchone()[0]
         cap = min(task.capacity.export_manifest_bytes, count * 8192 + 4096)
@@ -36,7 +38,8 @@ def _export_lightweight(task, manifest):
             for item in task.db.execute("SELECT * FROM items WHERE " + where + " ORDER BY seq"):
                 receipt = verify_delivery(task, item, publication)
                 row = {
-                    "format": "sakurapool-task-export-v1",
+                    "format": ("sakurapool-task-export-v2" if external
+                               else "sakurapool-task-export-v1"),
                     "task_id": task.meta("task_id"),
                     "plan_digest": task.meta("plan_digest"),
                     "publication_digest": task.meta("header")["publication_digest"],
@@ -49,7 +52,7 @@ def _export_lightweight(task, manifest):
                     "post_id": item["post_id"],
                     "files": [
                         {
-                            "path": (f"output/{name}" if task.version == 4
+                            "path": (name if external else f"output/{name}" if task.version == 4
                                      else f"output/{item['record_id']}/{name}"),
                             "bytes": proof["bytes"],
                             "sha256": proof["sha256"],
@@ -57,6 +60,8 @@ def _export_lightweight(task, manifest):
                         for name, proof in sorted(receipt["receipt"].items())
                     ],
                 }
+                if external:
+                    row["output_root"] = str(output)
                 payload = canonical(row) + b"\n"
                 written += len(payload)
                 if written > cap:
