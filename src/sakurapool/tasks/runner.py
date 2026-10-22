@@ -9,7 +9,7 @@ from ..storage.diagnostic_codes import _TRANSIENT_NETWORK_CODES
 from ..storage.publication import load_publication
 from .context import LEGACY_CAPACITY, effective_capacity
 from .plan import Selection, normalize_query, selected_records
-from .store import EXTERNAL_OUTPUT_POLICY, TaskDB, TaskError
+from .store import EXTERNAL_OUTPUT_POLICY, TaskDB, TaskError, TaskIdentity
 
 RECONCILE_PAGE_ROWS = 64
 
@@ -633,10 +633,12 @@ def run_task(
     connection_profile=None,
     workers=6,
     workers_per_tar=6,
+    expected_identity: TaskIdentity | None = None,
 ):
     return _run_task(directory, transport, control=control, resume=resume,
                      fault_hook=fault_hook, connection_profile=connection_profile,
-                     workers=workers, workers_per_tar=workers_per_tar)
+                     workers=workers, workers_per_tar=workers_per_tar,
+                     expected_identity=expected_identity)
 
 
 def _run_options(transport, connection_profile, workers, workers_per_tar):
@@ -651,9 +653,10 @@ def _run_options(transport, connection_profile, workers, workers_per_tar):
 def _run_task(
     directory, transport=None, *, control=None, resume=False, fault_hook=None,
     connection_profile=None, workers=6, workers_per_tar=6, _session=None, _transport_owner=None,
+    expected_identity: TaskIdentity | None = None,
 ):
     _run_options(transport, connection_profile, workers, workers_per_tar)
-    with TaskDB(directory) as task, task.runner_lock(), ExitStack() as stack:
+    with TaskDB(directory, expected_identity=expected_identity) as task, task.runner_lock(), ExitStack() as stack:
         if transport is not None:
             # Caller-owned transports retain their preflight order and lifecycle.
             _check_task_transport(task, transport)

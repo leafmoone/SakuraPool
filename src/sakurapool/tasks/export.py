@@ -7,12 +7,12 @@ from ..fs_safety import plain_entry
 from ..storage.publication import load_publication
 from .plan import canonical
 from .runner import check_publication_identity, verify_delivery
-from .store import EXTERNAL_OUTPUT_POLICY, TaskDB, TaskError
+from .store import EXTERNAL_OUTPUT_POLICY, TaskDB, TaskError, TaskIdentity
 
 
-def export_task(directory, manifest):
+def export_task(directory, manifest, *, expected_identity: TaskIdentity | None = None):
     manifest = Path(manifest).absolute()
-    with TaskDB(directory, readonly=True) as task:
+    with TaskDB(directory, readonly=True, expected_identity=expected_identity) as task:
         if task.version not in (3, 4):
             raise TaskError("LEGACY_TASK_MIGRATION_REQUIRED", "export")
         return _export_lightweight(task, manifest)
@@ -34,6 +34,7 @@ def _export_lightweight(task, manifest):
         count = task.db.execute("SELECT count(*) FROM items WHERE " + where).fetchone()[0]
         cap = min(task.capacity.export_manifest_bytes, count * 8192 + 4096)
         written = 0
+        task.validate_identity()
         with manifest.open("xb") as stream:
             for item in task.db.execute("SELECT * FROM items WHERE " + where + " ORDER BY seq"):
                 receipt = verify_delivery(task, item, publication)

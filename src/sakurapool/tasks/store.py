@@ -11,6 +11,7 @@ import tempfile
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from typing import TypedDict
 
 from ..capacity import CapacityConfig
 from ..download_naming import FLAT_POLICY, FilenameConfig, safe_output_path, stem_key
@@ -26,6 +27,13 @@ MAX_JOURNAL_BYTES = 33 << 20
 SCHEMA_VERSION = 4
 MAX_EVENT_BATCH = 32
 EXTERNAL_OUTPUT_POLICY = "external-flat-no-overwrite-v1"
+
+
+class TaskIdentity(TypedDict):
+    task_id: str
+    plan_digest: str
+    snapshot_id: str
+    publication_digest: str
 
 
 class TaskError(RuntimeError):
@@ -271,7 +279,23 @@ def safe_failure(details):
 
 
 class TaskDB:
-    def __init__(self, directory, *, readonly=False, workspace=None):
+    def __init__(self, directory, *, readonly=False, workspace=None,
+                 expected_identity: TaskIdentity | None = None):
+        self.expected_identity: TaskIdentity | None = None
+        if expected_identity is not None:
+            fields = {"task_id": 32, "plan_digest": 64, "snapshot_id": 64,
+                      "publication_digest": 64}
+            if not isinstance(expected_identity, dict) or any(
+                not isinstance(expected_identity.get(key), str)
+                or len(expected_identity[key]) != length
+                or any(c not in "0123456789abcdef" for c in expected_identity[key])
+                for key, length in fields.items()
+            ):
+                raise TaskError("TASK_IDENTITY_INVALID", "identity")
+            self.expected_identity = TaskIdentity(
+                task_id=expected_identity["task_id"], plan_digest=expected_identity["plan_digest"],
+                snapshot_id=expected_identity["snapshot_id"],
+                publication_digest=expected_identity["publication_digest"])
         self.directory = plain_entry(Path(directory).absolute(), directory=True)
         self.path = plain_entry(self.directory / "task.sqlite")
         self.workspace = bootstrap_workspace(self.directory, workspace)
@@ -303,6 +327,30 @@ class TaskDB:
             return
         _check_files(self.path, self.capacity)
         self.db = _connect(self.path, readonly=readonly, capacity=self.capacity)
+        try:
+            self.validate_identity()
+        except BaseException:
+            self.db.close()
+            raise
+
+    def _validate_identity(self, db: sqlite3.Connection) -> None:
+        if self.expected_identity is None:
+            return
+        header = _bounded_meta(db, "header", self.capacity.task_header_bytes)
+        if not isinstance(header, dict):
+            raise TaskError("TASK_HEADER_INVALID")
+        actual = {
+            "task_id": _bounded_meta(db, "task_id", 128),
+            "plan_digest": _bounded_meta(db, "plan_digest", 128),
+            "snapshot_id": header.get("snapshot_id"),
+            "publication_digest": header.get("publication_digest"),
+        }
+        if actual != self.expected_identity:
+            raise TaskError("TASK_IDENTITY_MISMATCH", "identity", recoverable=True)
+
+    def validate_identity(self) -> None:
+        """Check the caller's pins on this connection, never by reopening its path."""
+        self._validate_identity(self.db)
 
     def _validate_probe(self, probe, *, readonly):
         try:
@@ -343,6 +391,8 @@ class TaskDB:
                     raise TaskError("TASK_WORKSPACE_CONFLICT", "plan")
             if _bounded_meta(probe, "plan_digest", 128) != plan_digest(header):
                 raise TaskError("PLAN_IDENTITY_MISMATCH", "plan")
+            # Includes the recovered shadow, before original hot-journal recovery.
+            self._validate_identity(probe)
         except (ValueError, KeyError, TypeError, RecursionError):
             raise TaskError("TASK_HEADER_INVALID") from None
 
@@ -683,6 +733,7 @@ class TaskDB:
         if value not in ("PAUSE", "CANCEL"):
             raise TaskError("TASK_REQUEST_INVALID")
         with self.transaction() as db:
+            self.validate_identity()
             self.set_meta(db, "request", value)
         return {"requested": value, "state": self.meta("state")}
 
@@ -972,6 +1023,7 @@ class TaskDB:
         if self.version != 4 or self.readonly:
             raise TaskError("TASKDB_READONLY")
         with _runner_lock(self.directory):
+            self.validate_identity()
             yield
 
     def close(self):

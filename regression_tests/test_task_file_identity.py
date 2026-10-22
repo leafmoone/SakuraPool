@@ -358,7 +358,15 @@ os._exit(73)
             self.assertEqual(original_files(), before_readonly)
         self.assertEqual(original_files(), before_readonly,
                          "Readonly recovery must not repair the original DB or journal")
-        with store.TaskDB(directory) as task:
+        identity = {"task_id": baseline["task_id"], "plan_digest": baseline["plan_digest"],
+                    "snapshot_id": baseline["header"]["snapshot_id"],
+                    "publication_digest": baseline["header"]["publication_digest"]}
+        wrong_identity = {**identity, "task_id": "f" * 32}
+        self.assert_task_error("TASK_IDENTITY_MISMATCH", lambda: store.TaskDB(
+            directory, expected_identity=wrong_identity))
+        self.assertEqual(original_files(), before_readonly,
+                         "A rejected identity must not recover the original hot journal")
+        with store.TaskDB(directory, expected_identity=identity) as task:
             self.assertIsNone(task._shadow, "Writable recovery must use SQLite on the original")
             self.assertEqual(task.inspect(), baseline)
             self.assertEqual(task.validate_plan(), frozen)
@@ -371,6 +379,53 @@ os._exit(73)
         with store.TaskDB(directory, readonly=True) as task:
             self.assertEqual(task.inspect(), baseline)
             self.assertEqual(task.validate_plan(), frozen)
+
+    def test_reviewed_identity_rejects_replaced_task_before_mutation(self):
+        from sakurapool.runtime import RuntimeQuerySpec
+        from sakurapool.tasks.plan import Selection, SelectedRecord, normalize_query
+        from sakurapool.tasks.runner import run_task
+        from sakurapool.tasks.export import export_task
+
+        directory = self.root / "reviewed-task"
+        header = {"publication_digest": "a" * 64, "snapshot_id": "b" * 64,
+                  "query": normalize_query(RuntimeQuerySpec()),
+                  "selection": Selection("first", 1).header(), "metadata": False}
+        rows = [SelectedRecord(0, "1" * 32, "owned", "tiny", "1")]
+        with store.TaskDB.create(directory, None, header, rows,
+                                 publication_path=self.root / "unused-publication",
+                                 filename_prefix="reviewed") as task:
+            reviewed = {"task_id": task.meta("task_id"), "plan_digest": task.meta("plan_digest"),
+                        "snapshot_id": header["snapshot_id"],
+                        "publication_digest": header["publication_digest"]}
+        directory.rename(self.root / "retained-original")
+        with store.TaskDB.create(directory, None, header, rows,
+                                 publication_path=self.root / "unused-publication",
+                                 filename_prefix="reviewed") as task:
+            replacement = task.inspect()
+        before = (directory / "task.sqlite").read_bytes()
+        for resume in (False, True):
+            self.assert_task_error("TASK_IDENTITY_MISMATCH", lambda: run_task(
+                directory, connection_profile={}, resume=resume, expected_identity=reviewed))
+        manifest = directory / "must-not-exist.jsonl"
+        self.assert_task_error("TASK_IDENTITY_MISMATCH", lambda: export_task(
+            directory, manifest, expected_identity=reviewed))
+        for control in ("PAUSE", "CANCEL"):
+            def request():
+                with store.TaskDB(directory, expected_identity=reviewed) as task:
+                    task.request(control)
+            self.assert_task_error("TASK_IDENTITY_MISMATCH", request)
+        self.assertEqual((directory / "task.sqlite").read_bytes(), before)
+        self.assertFalse(manifest.exists())
+        matching = {**reviewed, "task_id": replacement["task_id"]}
+        # Cooperative controls must remain usable while another runner owns its lock.
+        with store.TaskDB(directory, expected_identity=matching) as task, task.runner_lock():
+            with store.TaskDB(directory, expected_identity=matching) as control:
+                self.assertEqual(control.request("PAUSE")["requested"], "PAUSE")
+            # Recheck on the actual transaction connection, not just at construction.
+            with task.transaction() as db:
+                task.set_meta(db, "task_id", "e" * 32)
+            self.assert_task_error("TASK_IDENTITY_MISMATCH", lambda: task.request("CANCEL"))
+            self.assertEqual(task.meta("request"), "PAUSE")
 
     def test_recovery_rejects_same_api_path_ctime_change_after_read(self):
         real_stat = Path.stat

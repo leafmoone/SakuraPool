@@ -56,6 +56,9 @@ def add_parser(subparsers):
         command = commands.add_parser(name)
         command.add_argument("task_dir")
         command.add_argument("--workspace")
+        if name != "inspect":
+            command.add_argument("--expected-identity", type=json.loads,
+                                 help="reviewed task_id, plan_digest, snapshot_id and publication_digest JSON")
         if name == "inspect":
             command.add_argument("--failure-seq", type=int, help="read a bounded persisted failure")
         elif name in ("run", "resume"):
@@ -78,6 +81,7 @@ def bounded_json(path, cap=65536):
 def command(args):
     try:
         action = args.task_command
+        expected_identity = getattr(args, "expected_identity", None)
         if action == "session":
             import sys
 
@@ -92,7 +96,8 @@ def command(args):
             workspace = Workspace.open(explicit) if explicit is not None else None
             capacity = workspace.capacity if workspace is not None else LEGACY_CAPACITY
         else:
-            with TaskDB(args.task_dir, readonly=True, workspace=explicit) as task:
+            with TaskDB(args.task_dir, readonly=True, workspace=explicit,
+                        expected_identity=expected_identity) as task:
                 workspace, capacity = task.workspace, task.capacity
                 task.validate_plan()
                 if action == "inspect":
@@ -112,7 +117,7 @@ def command(args):
                 extensions=args.image_extensions,
             )
         elif action in ("pause", "cancel"):
-            with TaskDB(args.task_dir, workspace=workspace) as task:
+            with TaskDB(args.task_dir, workspace=workspace, expected_identity=expected_identity) as task:
                 result = task.request("PAUSE" if action == "pause" else "CANCEL")
         elif action in ("create", "start"):
             from ..cli import _spec_from_dict
@@ -145,7 +150,7 @@ def command(args):
         elif action == "export":
             from .export import export_task
 
-            result = export_task(args.task_dir, args.manifest)
+            result = export_task(args.task_dir, args.manifest, expected_identity=expected_identity)
         else:
             from .profile import read_profile
             from .runner import run_task
@@ -157,6 +162,7 @@ def command(args):
                 connection_profile=profile,
                 workers=args.workers,
                 workers_per_tar=getattr(args, "workers_per_tar", 6),
+                expected_identity=expected_identity,
             )
         print(json.dumps(result, sort_keys=True))
         return 0
