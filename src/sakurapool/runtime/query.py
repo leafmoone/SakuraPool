@@ -152,6 +152,18 @@ class QueryResult:
             raise ValueError("limit must be >= 0")
         return list(islice(self._bitmap, n))
 
+    def page(self, offset: int, limit: int) -> QueryResult:
+        """Return at most limit matches by ordered result rank, not raw RID.
+
+        The result keeps this snapshot; its count is the page length, not the
+        original total. Like limit(), slicing does not project catalog records.
+        """
+        if type(offset) is not int or offset < 0:
+            raise ValueError("offset must be a nonnegative integer")
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("limit must be a positive integer")
+        return QueryResult(self._snapshot, self._bitmap[offset:offset + limit])
+
     def iter_location_batches(self,
                               batch_size: int = 8192) -> Iterator[LocationBatch]:
         self._snapshot._check_open()

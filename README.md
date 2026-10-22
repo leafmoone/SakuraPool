@@ -1135,6 +1135,8 @@ planned by their stored cardinality before any bitmap loads and materialization
 stops once the intersection is empty. `query()` accepts a spec object or
 keyword form (`rt.query(sources=..., namespace=..., all_tags=...)`) and returns
 a lazy bitmap result: `count()` / `len()`, `iter_rids()`, `limit(n)`,
+`page(offset, limit)` (ordered match ranks; returns a bounded result whose count
+is the page length, while the original result retains the total),
 `iter_location_batches(size)`, `iter_record_batches(size)` (record batches carry
 `source_name`/`dataset_name` alongside the numeric IDs); point resolution is
 `lookup_rids(source, post_id[, dataset])` / `resolve_one(source, post_id,
