@@ -27,6 +27,7 @@ def add_parser(subparsers):
         for option in ("publication", "query", "task-dir"):
             create.add_argument("--" + option, required=True)
         create.add_argument("--workspace")
+        create.add_argument("--output-dir", help="frozen external final output directory")
         create.add_argument("--selection", choices=("all", "first", "sample", "records"),
                             default="all")
         create.add_argument("--limit", type=int)
@@ -127,7 +128,7 @@ def command(args):
             query = _spec_from_dict(bounded_json(args.query, capacity.task_header_bytes))
             options = {"metadata": args.metadata, "image_extensions": args.image_extensions,
                        "filename_template": args.filename_template,
-                       "filename_prefix": args.filename_prefix}
+                       "filename_prefix": args.filename_prefix, "output_dir": args.output_dir}
             if action == "start":
                 from .profile import read_profile
                 from .runner import create_and_run_task

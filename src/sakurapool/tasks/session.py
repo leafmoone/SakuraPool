@@ -258,7 +258,7 @@ class TaskSession:
                 else:
                     pub = self._verified.check(self.capacity, self.root)
                     with runner._create_verified(pub, self.root, directory, self.workspace,
-                                                 query, options, *output):
+                                                 query, options, *output, None):
                         pass
             else:
                 with TaskDB(directory, readonly=True, workspace=self.workspace) as task:

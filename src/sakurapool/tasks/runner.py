@@ -9,7 +9,7 @@ from ..storage.diagnostic_codes import _TRANSIENT_NETWORK_CODES
 from ..storage.publication import load_publication
 from .context import LEGACY_CAPACITY, effective_capacity
 from .plan import Selection, normalize_query, selected_records
-from .store import TaskDB, TaskError
+from .store import EXTERNAL_OUTPUT_POLICY, TaskDB, TaskError
 
 RECONCILE_PAGE_ROWS = 64
 
@@ -88,11 +88,12 @@ def create_task(
     image_extensions=None,
     filename_template="{tag}_{index}",
     filename_prefix=None,
+    output_dir=None,
 ):
     options = _create_options(directory, workspace, query, selection, image_extensions)
     with load_publication(publication, full_verify=True) as pub:
         return _create_verified(pub, publication, directory, workspace, query, options,
-                                metadata, filename_template, filename_prefix)
+                                metadata, filename_template, filename_prefix, output_dir)
 
 
 def _create_options(directory, workspace, query, selection, image_extensions):
@@ -114,7 +115,7 @@ def _create_options(directory, workspace, query, selection, image_extensions):
 
 
 def _create_verified(pub, publication, directory, workspace, query, options,
-                     metadata, filename_template, filename_prefix):
+                     metadata, filename_template, filename_prefix, output_dir):
     from ..image_formats import SUPPORTED_IMAGE_EXTENSIONS
 
     capacity, selection, normalized, extensions = options
@@ -140,6 +141,7 @@ def _create_verified(pub, publication, directory, workspace, query, options,
         image_extensions=extensions,
         filename_template=filename_template,
         filename_prefix=filename_prefix,
+        output_dir=output_dir,
     )
 
 
@@ -152,7 +154,7 @@ def _supports_live_verification():
 def create_and_run_task(
     publication, directory, workspace, query, selection=None, *, metadata=False,
     image_extensions=None, filename_template="{tag}_{index}", filename_prefix=None,
-    transport=None, control=None, fault_hook=None, connection_profile=None,
+    output_dir=None, transport=None, control=None, fault_hook=None, connection_profile=None,
     workers=6, workers_per_tar=6,
 ):
     """Explicit immediate download, sharing one verified handle only in this call."""
@@ -176,7 +178,8 @@ def create_and_run_task(
     if session is None:
         with create_task(publication, directory, workspace, query, selection,
                          metadata=metadata, image_extensions=image_extensions,
-                         filename_template=filename_template, filename_prefix=filename_prefix):
+                         filename_template=filename_template, filename_prefix=filename_prefix,
+                         output_dir=output_dir):
             pass
         return run_task(directory, transport, control=control, fault_hook=fault_hook,
                         connection_profile=connection_profile, workers=workers,
@@ -184,7 +187,7 @@ def create_and_run_task(
     with session:
         pub = session.check(options[0], publication)
         with _create_verified(pub, publication, directory, workspace, query, options,
-                              metadata, filename_template, filename_prefix):
+                              metadata, filename_template, filename_prefix, output_dir):
             pass
         return _run_task(directory, transport, control=control, fault_hook=fault_hook,
                          connection_profile=connection_profile, workers=workers,
@@ -292,7 +295,7 @@ def verify_delivery(task, item, publication=None):
                     or len(published) != len(mapping.names)
                     or set(published) != set(mapping.names)):
                 raise ValueError()
-            verify_final(task.directory / "output", receipt, mapping)
+            verify_final(task.output_directory, receipt, mapping)
         except (ValueError, OSError):
             raise TaskError("OUTPUT_CONFLICT", "recovery") from None
         return receipt
@@ -340,7 +343,7 @@ def verify_delivery(task, item, publication=None):
             or receipt["operation_id"] != operation
         ):
             raise TaskError("OUTPUT_CONFLICT", "recovery")
-        final = plain_entry(task.directory / "output" / item["record_id"], directory=True)
+        final = plain_entry(task.output_directory / item["record_id"], directory=True)
         info = final.stat()
         if [info.st_dev, info.st_ino] != receipt["directory_identity"]:
             raise TaskError("OUTPUT_REPLACED", "recovery")
@@ -416,8 +419,11 @@ def _recover_stage(task, row):
         # A crash after mkdir but before STAGED has no marker and stays blocked.
         try:
             workspace = getattr(task, "workspace", None)
-            _real_output_root(task.directory / "output", physical_root=(
-                workspace.root if workspace is not None else task.directory))
+            external = task.meta("header").get("output_policy") == EXTERNAL_OUTPUT_POLICY
+            root = workspace.root if workspace is not None else (
+                task.output_directory if external else task.directory
+            )
+            _real_output_root(task.output_directory, physical_root=root)
         except (OSError, ValueError):
             return False
         return True
@@ -446,7 +452,7 @@ def _recover_stage(task, row):
             or any(not _identity(value) for value in stage["created"].values())
         ):
             return False
-        path = task.directory / "output" / name
+        path = task.output_directory / name
         if not os.path.lexists(path):
             # Ordinary failed cleanup is durable as SAFE. A crashed stage disappearing
             # without this evidence cannot prove that output was not moved elsewhere.
@@ -498,7 +504,7 @@ def reconcile(task, publication=None):
                     from ..storage.flat_delivery import publish_flat
 
                     published = json.loads(row["published_members"])
-                    publish_flat(task.directory / "output", receipt, mapping,
+                    publish_flat(task.output_directory, receipt, mapping,
                                  intent=row["phase"] != "PREPARED", published=published,
                                  hook=lambda event, payload: task.recovery_event(
                                      row["operation_id"], event, payload))
@@ -521,7 +527,7 @@ def reconcile(task, publication=None):
                 blocker = blocker or classified
             continue
         mapping = delivery_mapping(task, row, publication)
-        if any(os.path.lexists(task.directory / "output" / name) for name in mapping.names):
+        if any(os.path.lexists(task.output_directory / name) for name in mapping.names):
             try:
                 verify_delivery(task, row, publication)
                 task.finish_item(row["seq"], state="DONE", operation=row["operation_id"])
@@ -596,7 +602,7 @@ def preflight(task, pub, item, transport, *, prepared=None, **_ignored):
         raise TaskError("RECORD_IDENTITY_MISMATCH", "preflight")
     prepared.plan(metadata=task.meta("header")["metadata"], capacity=capacity)
     output = _real_output_root(
-        task.directory / "output", physical_root=getattr(transport, "root", None)
+        task.output_directory, physical_root=getattr(transport, "root", None)
     )
     # Candidate projections have no stem: use the full immutable item after owner lookup.
     full = task.db.execute("SELECT * FROM items WHERE seq=?", (item["seq"],)).fetchone()
@@ -612,7 +618,9 @@ def _check_task_transport(task, transport):
         raise TaskError("CONSUMPTION_LEDGER_UNSUPPORTED", "preflight")
     if effective_capacity(transport, task.capacity) != task.capacity:
         raise TaskError("TASK_CAPACITY_CONFLICT", "preflight")
-    _real_output_root(task.directory, physical_root=getattr(transport, "root", None))
+    external = task.meta("header").get("output_policy") == EXTERNAL_OUTPUT_POLICY
+    scope = task.output_directory if external else task.directory
+    _real_output_root(scope, physical_root=getattr(transport, "root", None))
 
 
 def run_task(
@@ -673,8 +681,9 @@ def _run_task(
             from .profile import connect_profile
 
             # Credentials and worker creation follow verification under the same lock.
-            root = task.workspace.root if task.workspace is not None else task.directory
-            _real_output_root(task.directory, physical_root=root)
+            root = task.workspace.root if task.workspace is not None else (task.output_directory
+                if header.get("output_policy") == EXTERNAL_OUTPUT_POLICY else task.directory)
+            _real_output_root(task.output_directory, physical_root=root)
             transport = (_transport_owner._connection(task, connection_profile)
                          if _transport_owner is not None else stack.enter_context(
                              connect_profile(connection_profile, root=root,

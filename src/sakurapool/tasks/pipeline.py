@@ -73,7 +73,7 @@ def run_pipeline(task, publication, transport, *, workers, metadata, workers_per
     blocked = False
     warm_bypass_credit = lane_count
     extensions = task.image_extensions
-    output = task.directory / "output"
+    output = task.output_directory
     # Immutable descriptors and READY heads belong to this verified owner run.
     # Lane proof caches remain independent and are never scheduling authority.
     tar_active = Counter()

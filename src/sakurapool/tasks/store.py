@@ -25,6 +25,7 @@ MAX_DB_BYTES = 32 << 20
 MAX_JOURNAL_BYTES = 33 << 20
 SCHEMA_VERSION = 4
 MAX_EVENT_BATCH = 32
+EXTERNAL_OUTPUT_POLICY = "external-flat-no-overwrite-v1"
 
 
 class TaskError(RuntimeError):
@@ -402,7 +403,7 @@ class TaskDB:
 
     @classmethod
     def create(cls, directory, workspace, header, rows, *, publication_path, image_extensions=None,
-               filename_template="{tag}_{index}", filename_prefix=None):
+               filename_template="{tag}_{index}", filename_prefix=None, output_dir=None):
         from ..image_formats import image_extensions as validate_extensions
         from ..workspace import Workspace
 
@@ -423,6 +424,39 @@ class TaskDB:
         plain_entry(directory.parent, directory=True)
         if ".." in directory.parts or os.path.lexists(directory):
             raise TaskError("TASK_DIRECTORY_CONFLICT")
+        external = output_dir is not None
+        output = directory / "output"
+        if external:
+            if workspace is not None:
+                raise TaskError("EXTERNAL_OUTPUT_WORKSPACE_UNSUPPORTED", "create")
+            output = Path(output_dir)
+            if (len(str(output)) > 4096 or any(ord(c) < 32 for c in str(output))
+                    or not output.is_absolute() or ".." in output.parts
+                    or output == directory or output.is_relative_to(directory)
+                    or directory.is_relative_to(output)):
+                raise TaskError("OUTPUT_DIRECTORY_INVALID", "create")
+            # Only the selected target is created. Parents must already exist and
+            # all ancestors must be ordinary directories, never links/junctions.
+            try:
+                for parent in (output.parent, *output.parent.parents):
+                    plain_entry(parent, directory=True)
+                if os.path.lexists(output):
+                    plain_entry(output, directory=True)
+                else:
+                    output.mkdir()
+                    sync_directory(output.parent)
+                # Probe only an owned temporary file, before creating TaskDB or
+                # starting network work; never silently redirect an unwritable target.
+                with tempfile.TemporaryFile(dir=output) as probe:
+                    probe.write(b"T")
+                    probe.flush()
+                    os.fsync(probe.fileno())
+            except PermissionError:
+                raise TaskError("OUTPUT_DIRECTORY_UNWRITABLE", "create") from None
+            except OSError:
+                raise TaskError("OUTPUT_DIRECTORY_UNAVAILABLE", "create") from None
+            except ValueError:
+                raise TaskError("OUTPUT_DIRECTORY_INVALID", "create") from None
         directory.mkdir()
         path = directory / "task.sqlite"
         with path.open("xb"):
@@ -451,7 +485,10 @@ class TaskDB:
                 try:
                     stem = naming.stem(count)
                     for suffix in (".jpeg", ".json"):
-                        safe_output_path(directory / "output", stem + suffix)
+                        safe_output_path(output, stem + suffix)
+                    if external and any(os.path.lexists(output / (stem + suffix))
+                                        for suffix in (*extensions, ".json")):
+                        raise TaskError("OUTPUT_CONFLICT", "create")
                     key = stem_key(stem)
                     db.execute(
                         "INSERT INTO items(seq,rid,record_id,source,dataset,post_id,"
@@ -475,12 +512,17 @@ class TaskDB:
                 "selection_count": actual_count,
                 "selection_digest": digest,
                 "metadata": bool(header.get("metadata", False)),
-                "output_policy": FLAT_POLICY,
+                "output_policy": EXTERNAL_OUTPUT_POLICY if external else FLAT_POLICY,
                 "filename_config": naming.to_dict(),
                 "filename_digest": names_digest.hexdigest(),
                 "effective_capacity": capacity.to_dict(),
                 "workspace_binding": workspace.download_binding(directory) if workspace else None,
             }
+            if external:
+                info = plain_entry(output, directory=True).stat()
+                frozen.update(
+                    output_directory=str(output), output_identity=[info.st_dev, info.st_ino]
+                )
             if len(canonical(frozen)) > capacity.task_header_bytes:
                 raise TaskError("TASK_HEADER_LIMIT")
             values = {
@@ -498,7 +540,8 @@ class TaskDB:
                 [(key, canonical(value).decode()) for key, value in values.items()],
             )
             db.execute("COMMIT")
-            (directory / "output").mkdir()
+            if not external:
+                output.mkdir()
             with (directory / "runner.lock").open("xb") as lock:
                 lock.write(b"T")
                 lock.flush()
@@ -509,7 +552,7 @@ class TaskDB:
         # creation. Failures preserve the task for inspection, never erase user data.
         with path.open("r+b") as stream:
             os.fsync(stream.fileno())
-        sync_directory(directory / "output")
+        sync_directory(output)
         sync_directory(directory)
         sync_directory(directory.parent)
         return cls(directory, workspace=workspace)
@@ -556,9 +599,46 @@ class TaskDB:
     def set_meta(self, db, key, value):
         db.execute("UPDATE meta SET value=? WHERE key=?", (canonical(value).decode(), key))
 
-    def _validate_filenames(self, db, header):
-        if header.get("output_policy") != FLAT_POLICY:
+    def _output_path(self, header):
+        if header.get("output_policy") == FLAT_POLICY:
+            if "output_directory" in header or "output_identity" in header:
+                raise TaskError("OUTPUT_POLICY_INVALID", "plan")
+            return self.directory / "output"
+        if header.get("output_policy") != EXTERNAL_OUTPUT_POLICY:
             raise TaskError("OUTPUT_POLICY_INVALID", "plan")
+        if self.workspace is not None:
+            raise TaskError("EXTERNAL_OUTPUT_WORKSPACE_UNSUPPORTED", "plan")
+        value, identity = header.get("output_directory"), header.get("output_identity")
+        if (type(value) is not str or not value or len(value) > 4096
+                or any(ord(c) < 32 for c in value)
+                or type(identity) is not list or len(identity) != 2
+                or any(type(v) is not int or v < 0 for v in identity)):
+            raise TaskError("OUTPUT_DIRECTORY_INVALID", "plan")
+        path = Path(value)
+        if (not path.is_absolute() or ".." in path.parts or path == self.directory
+                or path.is_relative_to(self.directory) or self.directory.is_relative_to(path)):
+            raise TaskError("OUTPUT_DIRECTORY_INVALID", "plan")
+        return path
+
+    @property
+    def output_directory(self):
+        header = self.meta("header")
+        if self.version != 4:
+            return self.directory / "output"
+        path = self._output_path(header)
+        if header["output_policy"] == EXTERNAL_OUTPUT_POLICY:
+            try:
+                for parent in (path, *path.parents):
+                    plain_entry(parent, directory=True)
+                info = path.stat()
+                if [info.st_dev, info.st_ino] != header["output_identity"]:
+                    raise ValueError()
+            except (OSError, ValueError):
+                raise TaskError("OUTPUT_REPLACED", "plan") from None
+        return path
+
+    def _validate_filenames(self, db, header):
+        output = self._output_path(header)
         try:
             naming = FilenameConfig.from_dict(header["filename_config"])
             expected = FilenameConfig.resolve(header.get("query", {}), template=naming.template,
@@ -573,7 +653,7 @@ class TaskDB:
                 if row["output_key"] != stem_key(row["output_stem"]):
                     raise ValueError()
                 for suffix in (".jpeg", ".json"):
-                    safe_output_path(self.directory / "output", row["output_stem"] + suffix)
+                    safe_output_path(output, row["output_stem"] + suffix)
                 digest.update(canonical(list(row)) + b"\n")
                 count += 1
             if (count != header["selection_count"]
